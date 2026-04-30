@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "_comment": [
+    "Project-level Claude Code settings. Tracked in git. Operator-local",
+    "overrides go in settings.local.json (gitignored).",
+    "",
+    "CVE-2025-59536 mitigation: enableAllProjectMcpServers is pinned to",
+    "false; enabledMcpjsonServers is an explicit allowlist (only gopls).",
+    "Do not set enableAllProjectMcpServers: true or wildcard-enable",
+    "enabledMcpjsonServers — that is the exact bypass the CVE described.",
+    "",
+    "Per official Anthropic docs, exit-2 PreToolUse hooks take precedence",
+    "over allow rules, so the Bash auto-allow list does not bypass the TDD",
+    "or dangerous-bash gates. JSON permissionDecision: 'deny' from a",
+    "PreToolUse hook also blocks the call.",
+    "",
+    "Known issues to track: PreToolUse exit-2 occasionally not blocking",
+    "Edit/Write on some Claude Code versions (Bash blocks reliably);",
+    "macOS allow/deny rules occasionally unreliable. Pre-commit + CI is",
+    "the deterministic floor — these hooks are in-session prevention."
+  ],
+
+  "defaultMode": "default",
+
+  "enableAllProjectMcpServers": false,
+  "enabledMcpjsonServers": ["gopls"],
+
+  "permissions": {
+    "allow": [
+      "Read",
+      "Glob",
+      "Grep",
+      "Bash(gofmt -w *)",
+      "Bash(gofmt -l *)",
+      "Bash(goimports *)",
+      "Bash(go list *)",
+      "Bash(go test ./...)",
+      "Bash(go test -race ./...)",
+      "Bash(go test -race -count=1 ./...)",
+      "Bash(go test -count=1 ./...)",
+      "Bash(go vet ./...)",
+      "Bash(go mod tidy)",
+      "Bash(go version)",
+      "Bash(make *)",
+      "Bash(rg *)",
+      "Bash(grep *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(wc *)",
+      "Bash(git status)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git blame *)",
+      "Bash(git branch *)",
+      "Bash(git show *)"
+    ],
+    "ask": [
+      "Edit(migrations/**)",
+      "Write(migrations/**)",
+      "Edit(.github/workflows/**)",
+      "Write(.github/workflows/**)",
+      "Edit(.gitlab-ci.yml)",
+      "Write(.gitlab-ci.yml)",
+      "Bash(go build *)",
+      "Bash(go run *)",
+      "Bash(go install *)",
+      "Bash(go get *)",
+      "Bash(golangci-lint run *)",
+      "Bash(staticcheck *)",
+      "Bash(govulncheck *)",
+      "Bash(deadcode *)",
+      "Bash(unparam *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(git push origin *)",
+      "Bash(git push --force-with-lease *)",
+      "Bash(git tag *)",
+      "Bash(docker push *)",
+      "Bash(kubectl *)",
+      "Bash(terraform apply *)",
+      "Bash(helm upgrade *)",
+      "Bash(helm install *)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)",
+      "Read(./private/**)",
+      "Read(./credentials/**)",
+      "Read(./config/credentials.json)",
+      "Read(./config/**/credentials*.json)",
+      "Read(./config/**/*secret*)",
+      "Read(./config/**/*token*)",
+      "Read(./**/id_rsa*)",
+      "Read(./**/id_ed25519*)",
+      "Read(./**/*.pem)",
+      "Read(./**/*.key)",
+
+      "Edit(./.git/**)",
+      "Write(./.git/**)",
+      "Edit(.claude/settings.json)",
+      "Write(.claude/settings.json)",
+
+      "Bash(rm -rf /*)",
+      "Bash(rm -rf ~*)",
+      "Bash(rm -rf $HOME*)",
+      "Bash(sudo *)",
+      "Bash(chmod 777 *)",
+      "Bash(chmod -R 777 *)",
+      "Bash(curl * | sh)",
+      "Bash(curl * | bash)",
+      "Bash(wget * | sh)",
+      "Bash(wget * | bash)",
+
+      "Bash(* --no-verify *)",
+      "Bash(*--no-verify)",
+      "Bash(git commit --no-verify*)",
+      "Bash(git commit -n *)",
+      "Bash(HUSKY=0 *)",
+      "Bash(GIT_HOOKS=0 *)",
+      "Bash(SKIP=* git commit *)",
+
+      "Bash(git push * --force *)",
+      "Bash(git push *--force)",
+      "Bash(git push --force *)",
+      "Bash(git push -f *)",
+      "Bash(git push *-f)",
+      "Bash(git filter-repo *)",
+      "Bash(git filter-branch *)",
+      "Bash(git reset --hard origin/*)",
+
+      "Bash(terraform destroy *)",
+      "Bash(terraform apply -auto-approve *)",
+
+      "Bash(* --accept-data-loss *)",
+      "Bash(*--accept-data-loss)",
+
+      "Bash(psql *production*)",
+      "Bash(psql *prod-*)",
+      "Bash(mysql *production*)",
+      "Bash(mongo *production*)"
+    ]
+  },
+
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/session-context.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/route-to-tdd.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/guard-dangerous-bash.sh",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/guard-protected-files.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/scan-for-secrets.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/require-tdd-state.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/gofmt-after-edit.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/detect-ai-bloat.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

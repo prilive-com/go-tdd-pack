@@ -1,0 +1,32 @@
+# Go build artifacts
+/bin/
+/dist/
+/coverage.out
+/coverage.html
+*.test
+*.prof
+*.coverprofile
+
+# Local env/secrets
+.env
+.env.*
+secrets/
+private/
+credentials/
+*.pem
+*.key
+
+# Claude local/private
+.claude/settings.local.json
+CLAUDE.local.md
+
+# TDD state (committed deliberately by default — uncomment to ignore in-flight)
+# .tdd/current-plan.md
+# .tdd/red-proof.md
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~

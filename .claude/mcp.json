@@ -1,0 +1,18 @@
+{
+  "_comment": [
+    "MCP servers wired into this project. Listed servers must also appear in",
+    ".claude/settings.json `enabledMcpjsonServers` to actually load (CVE-2025-59536",
+    "mitigation: no project MCP server runs without explicit allowlist entry).",
+    "",
+    "gopls runs the Go language server in MCP mode. Gives Claude real Go",
+    "diagnostics, references, hover info, etc. Requires `gopls` on PATH.",
+    "Install: go install golang.org/x/tools/gopls@latest"
+  ],
+  "mcpServers": {
+    "gopls": {
+      "command": "gopls",
+      "args": ["mcp"],
+      "env": {}
+    }
+  }
+}

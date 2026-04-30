@@ -1,0 +1,25 @@
+{
+  "project_name": "CHANGE_ME",
+  "tier1_description": "High-stakes files requiring full TDD ceremony before production edits.",
+  "tier1_path_regexes": [
+    "(^|/)migrations/.*\\.sql$",
+    "(^|/)internal/(.+/)?(auth|authorization|rbac|policy|security|crypto|secret|session|token)[^/]*/.*\\.go$",
+    "(^|/)internal/(.+/)?(payment|billing|invoice|ledger|accounting|balance|capital|risk|trade|order|fill|exchange)[^/]*/.*\\.go$",
+    "(^|/)internal/(.+/)?(migration|database|storage|repository|transaction)[^/]*/.*\\.go$",
+    "(^|/)internal/app/.*(engine|orchestrator|reconciliation|initializer).*\\.go$",
+    "(^|/)cmd/(.+/)?(destructive|admin|migrate)/.*\\.go$"
+  ],
+  "tier1_prompt_keywords": [
+    "auth", "authorization", "rbac", "policy", "security", "crypto", "secret", "token", "session",
+    "payment", "billing", "invoice", "ledger", "accounting", "balance", "money",
+    "capital", "risk", "trade", "order", "fill", "exchange", "migration", "database", "storage",
+    "idempotency", "reconciliation", "webhook", "queue", "worker", "rollback"
+  ],
+  "allow_test_file_edits_without_gate": true,
+  "allow_docs_and_claude_edits_without_gate": true,
+  "required_markers": [
+    "Human approved spec: yes",
+    "Red phase confirmed: yes",
+    "Human approved implementation: yes"
+  ]
+}

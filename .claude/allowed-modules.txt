@@ -1,0 +1,31 @@
+# Module prefixes the team has approved for `go.mod require` entries.
+#
+# Slopsquatting defense (~20% of LLM-recommended Go packages do not exist;
+# attackers pre-register the names as malware). Every entry MUST resolve on
+# pkg.go.dev. Adding a new prefix requires security-reviewer signoff.
+#
+# `scripts/check-allowed-modules.sh` enforces this list in CI.
+#
+# Add your org/group prefix as the first line, then keep the standard set.
+
+# Your-org prefix (replace with your actual GitLab/GitHub group):
+# gitlab.your-domain.com/your-group/
+
+# Standard library extensions
+golang.org/x/
+google.golang.org/
+
+# Observability
+go.opentelemetry.io/
+
+# Testing
+github.com/stretchr/testify
+github.com/google/go-cmp
+github.com/jackc/pgx/v5
+github.com/jackc/pgxmock/v4
+github.com/testcontainers/testcontainers-go
+
+# Common app deps
+github.com/spf13/
+github.com/google/uuid
+github.com/shopspring/decimal

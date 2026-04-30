@@ -1,0 +1,89 @@
+# GitLab CI pipeline for go-claude-starter projects.
+# Self-hosted GitLab. Customize Go version and runner tags as needed.
+#
+# This is the deterministic floor: all gates here must pass before merge.
+# In-session Claude Code hooks are advisory; CI is enforcement.
+
+stages:
+  - verify
+  - security
+  - tdd
+
+variables:
+  GO_VERSION: "1.26"
+  GOFLAGS: "-mod=readonly"
+  # Uncomment if you have a self-hosted Athens proxy:
+  # GOPROXY: "https://athens.your-domain.com,https://proxy.golang.org,direct"
+  # Replace with your GitLab host:
+  # GOPRIVATE: "gitlab.your-domain.com/*"
+
+default:
+  image: golang:${GO_VERSION}-alpine
+  before_script:
+    - apk add --no-cache git make bash jq
+    - go version
+  cache:
+    key:
+      files:
+        - go.sum
+    paths:
+      - .go-cache/
+      - .go-mod-cache/
+    policy: pull-push
+
+fmt-vet:
+  stage: verify
+  script:
+    - test -z "$(gofmt -l .)" || { gofmt -d .; exit 1; }
+    - go vet ./...
+    - go mod tidy && git diff --exit-code go.mod go.sum
+
+test:
+  stage: verify
+  script:
+    - go test ./...
+    - go test -race -count=1 ./...
+  coverage: '/coverage: \d+\.\d+%/'
+
+staticcheck:
+  stage: verify
+  script:
+    - go install honnef.co/go/tools/cmd/staticcheck@latest
+    - staticcheck ./...
+
+deadcode:
+  stage: verify
+  script:
+    - go install golang.org/x/tools/cmd/deadcode@latest
+    - deadcode ./... | tee deadcode.txt
+    - test ! -s deadcode.txt
+
+allowed-modules:
+  stage: security
+  script:
+    - bash scripts/check-allowed-modules.sh
+
+govulncheck:
+  stage: security
+  script:
+    - go install golang.org/x/vuln/cmd/govulncheck@latest
+    - govulncheck ./...
+  allow_failure: false
+
+golangci-lint:
+  stage: verify
+  image: golangci/golangci-lint:latest-alpine
+  before_script:
+    - apk add --no-cache git bash jq
+  script:
+    - golangci-lint run --timeout=5m
+
+# TDD ceremony enforcement: if any commit on this branch touches a Tier 1
+# path AND there's no corresponding red(...) commit before the green(...)
+# commit, fail.
+tdd-ceremony-check:
+  stage: tdd
+  script:
+    - bash scripts/check-tdd-ceremony.sh
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"

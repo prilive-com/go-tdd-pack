@@ -1,0 +1,61 @@
+# golangci-lint v2 configuration for go-claude-starter projects.
+#
+# G104 ("errors not checked") is NOT globally suppressed here — that's the
+# entire point of error handling discipline in Go. errcheck (enabled with
+# check-blank: true) covers the same concern with better precision.
+
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose
+    - contextcheck
+    - copyloopvar
+    - errorlint
+    - exhaustive
+    - gosec
+    - misspell
+    - noctx
+    - revive
+    - unconvert
+    - unparam
+    - whitespace
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    # Allow weak random in test files (deterministic seeds are fine for tests)
+    - path: _test\.go
+      linters:
+        - gosec
+      text: "G404"
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+
+  revive:
+    severity: warning
+    rules:
+      - name: context-as-argument
+      - name: error-return
+      - name: error-strings
+      - name: exported
+        disabled: true
