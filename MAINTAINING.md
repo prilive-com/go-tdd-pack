@@ -21,29 +21,47 @@ them.
   - `settings.json` — permissions + hook registration. Path-based
     deny rules + dangerous-bash deny patterns. Hook timeouts in
     seconds. Edit carefully — every consumer inherits this.
-  - **Note:** project MCP servers (gopls) live at `.mcp.json` in the
-    repo root, NOT under `.claude/`. Claude CLI only reads `.mcp.json`
-    at the project root. The `enabledMcpjsonServers: ["gopls"]` entry
-    in `settings.json` is the explicit allowlist (CVE-2025-59536
-    defense) — it points to the entry inside the root `.mcp.json`.
   - `allowed-modules.txt` — slopsquat allowlist. Defaults to standard
     Go ecosystem; first line is the org placeholder for the cloner to
     fill in.
   - `rules/` — referenced from `CLAUDE.md`. Loaded on demand.
   - `agents/` — reviewer subagents. Auto-discovered by Claude.
   - `skills/<name>/SKILL.md` — workflow skills. Auto-discovered.
-  - `hooks/*.sh` — safety hooks. Two output styles in this repo:
-    - **JSON style** (current pack lineage): `guard-dangerous-bash`,
-      `scan-for-secrets`, `guard-protected-files`,
-      `gofmt-after-edit`, `session-context`, `detect-ai-bloat`. Emit
-      `{hookSpecificOutput: {permissionDecision, ...}}` and exit 0.
-    - **Exit-2 style** (TDD lineage): `require-tdd-state.sh`,
-      `route-to-tdd.sh`. Block by writing `<claude-directive>` to
-      stderr and exiting 2. Per Anthropic docs, exit-2 takes
-      precedence over `permissions.allow` rules — the TDD gate uses
-      this to prevent allowlist bypass.
-    - Both styles are valid per official Claude Code docs. Pick the
-      style that matches the rest of the file when adding a new hook.
+  - `hooks/*.sh` — safety hooks. Three output patterns in this repo,
+    each chosen deliberately:
+    - **JSON `permissionDecision` for blocking PreToolUse hooks**:
+      `guard-dangerous-bash.sh`, `guard-protected-files.sh`,
+      `scan-for-secrets.sh`. Emit
+      `{hookSpecificOutput:{hookEventName,permissionDecision,permissionDecisionReason}}`
+      and exit 0. Supports `deny`, `ask`, and `allow` (`{}` = pass).
+      Used here for the dangerous-bash and secret guards because they
+      need `ask` for some patterns (e.g. `git push`).
+    - **Exit-2 + stderr `<claude-directive>` for the hard TDD gate**:
+      `require-tdd-state.sh`. Per Anthropic docs, exit 2 takes
+      precedence over `permissions.allow` rules — chosen here as
+      defense in depth so the TDD gate cannot be bypassed by a future
+      mis-configured allow entry.
+    - **Stdout context injection (exit 0) for advisory hooks**:
+      `route-to-tdd.sh` (UserPromptSubmit), `session-context.sh`
+      (SessionStart) — both emit text/JSON that Claude Code injects
+      into the next model request. `detect-ai-bloat.sh` (PostToolUse)
+      uses `hookSpecificOutput.additionalContext` for the same effect.
+    - When adding a new hook: match the pattern of the existing hook
+      in the same event family. Do NOT use `systemMessage` for advisory
+      output — it's shown to the user only, not to Claude.
+  - **Critical: every hook that calls `jq` must check for jq FIRST.**
+    PreToolUse safety hooks fail closed via static-heredoc `deny`
+    (no `jq` needed to emit the JSON). The smoke test
+    (`scripts/tdd-test-hooks.sh`) exits 1 with a clear error if jq is
+    missing — never `exit 0 SKIP` (that lies to CI).
+- `.mcp.json` (project root, NOT under `.claude/`) — Claude CLI only
+  reads `.mcp.json` at the project root for project-scoped MCP. The
+  `enabledMcpjsonServers: ["gopls"]` entry in `.claude/settings.json`
+  is the explicit allowlist (CVE-2025-59536 defense) — it points to
+  the entry inside `.mcp.json`. The CVE was about a previous bug
+  where MCP servers could execute before the user accepted the trust
+  dialog; current Claude Code requires explicit one-time approval
+  even with the allowlist set.
 - `.tdd/` — TDD ceremony machinery. `tdd-config.json` is the only file
   consumers will routinely edit (Tier 1 regexes for their code).
 - `specs/README.md` — explains the Layer 0 gate (Specify → Plan →

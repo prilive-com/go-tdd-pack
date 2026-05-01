@@ -4,8 +4,52 @@
 
 This project was bootstrapped from
 [`go-claude-starter`](https://gitlab.your-domain.com/your-group/go-claude-starter)
-v1.0.0. The Claude Code governance lives under `.claude/` and works
-automatically — no per-clone setup required.
+v1.1.0. The Claude Code governance layer (rules, skills, agents, hooks)
+loads automatically — no plugin install, no bootstrap script, no
+`pre-commit install`. **Full enforcement requires standard local tools
+(see Runtime requirements below); run `make doctor` to verify.**
+
+> **Trust note.** This pack defines hooks that execute shell scripts on
+> every Bash/Edit/Write tool call. Only clone this starter from sources
+> you trust, and review `.claude/hooks/*.sh` the same way you would
+> review any code that runs on your machine. (See CVE-2025-59536 — an
+> earlier Claude Code vulnerability where untrusted project settings
+> could trigger code execution before the user accepted the trust
+> dialog.)
+
+## Runtime requirements
+
+**Required (without these, hooks fail closed loudly):**
+
+- Claude Code (latest)
+- Go (1.26+)
+- Bash
+- jq
+- git
+
+**Recommended (full enforcement / quality checks):**
+
+- gopls          (Go language server, exposed via the gopls MCP)
+- goimports      (import management; used by `gofmt-after-edit.sh`)
+- staticcheck    (static analysis; used in CI)
+- govulncheck    (vulnerability scanning; used in CI)
+- golangci-lint  (broad lint coverage; used in CI)
+- gitleaks       (content-based secret scanning; `scan-for-secrets.sh`
+                  falls back to a narrow regex set without it)
+- deadcode       (dead-code detection; advisory in CI)
+
+Run `make doctor` to verify what's installed.
+
+## First-run note (MCP approval)
+
+This starter ships a project-scoped MCP server (`gopls`) at `.mcp.json`.
+Per Anthropic's CVE-2025-59536 fix, Claude Code requires **explicit
+one-time user approval** before running any project MCP server, even
+when it appears in `enabledMcpjsonServers`.
+
+The first time you run `claude` in the project, accept the gopls
+approval prompt (or run `/mcp` to enable it manually). After that,
+gopls loads automatically.
 
 ## Layout
 
@@ -78,20 +122,17 @@ The CI picks up `.gitlab-ci.yml` or `.github/workflows/` automatically.
 6. **Layer 5 — Cleanup.** `negative-diff` skill explicitly tasked with
    deletion after implementation.
 
-## Recommended local tools
+## Tooling commands
 
 ```bash
-# Go developer tools
-make tools                 # runs scripts/install-go-tools.sh
-
-# System tools (install via your package manager)
-#   jq           — required for TDD hooks
-#   golangci-lint — recommended
-#   gitleaks     — strongly recommended (used by scan-for-secrets.sh)
+make doctor                # verify required + recommended tools are installed
+make tools                 # install Go developer tools (gopls, staticcheck, ...)
+make tdd-test              # run the hook smoke tests (target: 17/17 passing)
+make ci                    # run the full CI sequence locally
 ```
 
-If `jq` is missing, the TDD gate hook will block edits with an
-informative message. Install once and forget.
+If any required tool is missing, hooks fail closed with a clear
+diagnostic — `make doctor` is the fastest way to see what to install.
 
 ## When TDD ceremony applies
 

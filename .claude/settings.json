@@ -1,24 +1,5 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
-  "_comment": [
-    "Project-level Claude Code settings. Tracked in git. Operator-local",
-    "overrides go in settings.local.json (gitignored).",
-    "",
-    "CVE-2025-59536 mitigation: enableAllProjectMcpServers is pinned to",
-    "false; enabledMcpjsonServers is an explicit allowlist (only gopls).",
-    "Do not set enableAllProjectMcpServers: true or wildcard-enable",
-    "enabledMcpjsonServers — that is the exact bypass the CVE described.",
-    "",
-    "Per official Anthropic docs, exit-2 PreToolUse hooks take precedence",
-    "over allow rules, so the Bash auto-allow list does not bypass the TDD",
-    "or dangerous-bash gates. JSON permissionDecision: 'deny' from a",
-    "PreToolUse hook also blocks the call.",
-    "",
-    "Known issues to track: PreToolUse exit-2 occasionally not blocking",
-    "Edit/Write on some Claude Code versions (Bash blocks reliably);",
-    "macOS allow/deny rules occasionally unreliable. Pre-commit + CI is",
-    "the deterministic floor — these hooks are in-session prevention."
-  ],
 
   "enableAllProjectMcpServers": false,
   "enabledMcpjsonServers": ["gopls"],

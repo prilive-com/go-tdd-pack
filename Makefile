@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 
-.PHONY: fmt test race vet vuln lint staticcheck deadcode tidy ci tools tdd-test
+.PHONY: fmt test race vet vuln lint staticcheck deadcode tidy ci tools tdd-test doctor
 
 fmt:
 	gofmt -w $$(find . -name '*.go' -not -path './vendor/*')
@@ -38,3 +38,6 @@ tools:
 
 tdd-test:
 	bash scripts/tdd-test-hooks.sh
+
+doctor:
+	bash scripts/doctor.sh
