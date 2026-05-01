@@ -20,6 +20,12 @@ credentials/
 .claude/settings.local.json
 CLAUDE.local.md
 
+# /second-opinion skill: per-clone redaction patterns (not the .example template)
+.claude/redact-patterns.txt
+# /second-opinion skill: codex stderr / debug capture (gitignored — may contain
+# code fragments and prompt content that should not enter git history)
+.tdd/second-opinion-debug.log
+
 # TDD state (committed deliberately by default — uncomment to ignore in-flight)
 # .tdd/current-plan.md
 # .tdd/red-proof.md

@@ -40,10 +40,20 @@ echo
 echo "Optional: Codex CLI (for /second-opinion skill — fully optional):"
 if command -v codex >/dev/null 2>&1; then
   ok "codex (run /second-opinion in a Claude Code session to use)"
+  # Auth check
   if [[ -z "${CODEX_API_KEY:-}" && -z "${OPENAI_API_KEY:-}" ]]; then
     if ! codex login status >/dev/null 2>&1; then
       warn "codex installed but not logged in (run 'codex login' or set CODEX_API_KEY)"
     fi
+  fi
+  # Auth-mode / model-default mismatch warning. gpt-5.5 (the skill default)
+  # requires ChatGPT-account auth; with API-key auth only, the skill will
+  # silently fall back to gpt-5.4 — which works but the user should know.
+  if [[ -n "${OPENAI_API_KEY:-}" || -n "${CODEX_API_KEY:-}" ]] \
+     && ! codex login status >/dev/null 2>&1 \
+     && [[ "${SECOND_OPINION_MODEL:-gpt-5.5}" == gpt-5.5* ]]; then
+    warn "API-key auth + default model gpt-5.5: gpt-5.5 needs 'codex login' (ChatGPT). The skill will fall back to gpt-5.4."
+    warn "  To silence: 'codex login', OR set SECOND_OPINION_MODEL=gpt-5.4 (or gpt-5.3-codex) in your env."
   fi
 else
   warn "codex (optional; install if you want cross-model second opinions)"
