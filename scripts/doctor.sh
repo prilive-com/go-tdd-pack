@@ -37,6 +37,19 @@ for t in "${RECOMMENDED[@]}"; do
 done
 
 echo
+echo "Optional: Codex CLI (for /second-opinion skill — fully optional):"
+if command -v codex >/dev/null 2>&1; then
+  ok "codex (run /second-opinion in a Claude Code session to use)"
+  if [[ -z "${CODEX_API_KEY:-}" && -z "${OPENAI_API_KEY:-}" ]]; then
+    if ! codex login status >/dev/null 2>&1; then
+      warn "codex installed but not logged in (run 'codex login' or set CODEX_API_KEY)"
+    fi
+  fi
+else
+  warn "codex (optional; install if you want cross-model second opinions)"
+fi
+
+echo
 if [[ "$missing_required" -gt 0 ]]; then
   echo "ERROR: $missing_required required tool(s) missing." >&2
   echo "Install hints:" >&2

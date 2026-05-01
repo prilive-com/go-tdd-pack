@@ -195,6 +195,115 @@ When you re-integrate from upstream (quarterly per the integration
 guide), preserve your project guards — they live in your fork, not in
 the upstream pack.
 
+## Second-opinion skill design choices
+
+The pack ships an optional `/second-opinion` skill
+(`.claude/skills/second-opinion/SKILL.md`) that calls OpenAI Codex
+CLI as a cross-model reviewer before non-trivial Tier 1
+implementation work. Several design choices are deliberate.
+
+### What it is
+
+A read-only Codex review of a plan, diff, or snippet. Returns
+findings as advisory context. Claude stays the final adjudicator.
+Codex is treated as a peer reviewer, not authority.
+
+### What it is NOT
+
+- Not a CI gate (failing Codex's tastes does not block anything).
+- Not a hook (no PostToolUse / Stop auto-fire).
+- Not multi-round debate. Single pass per invocation.
+- Not authoritative. Codex catches things AND misses things AND
+  sometimes invents things.
+- Not free of cost: each call uses ChatGPT subscription tokens (or
+  API credits if `CODEX_API_KEY` is set).
+
+### Design choices and why
+
+**Manual / auto-skill invocation, no PostToolUse + Stop hooks.**
+
+A previous spec proposed PostToolUse on `ExitPlanMode` and Stop hooks
+firing Codex automatically every Tier 1 ceremony. Rejected at first
+shipping because:
+
+- The skill auto-invokes via Claude's skill-description matching when
+  the description matches the user's intent. That is selective —
+  Claude decides per-task. PostToolUse hooks fire on every matching
+  tool event; cost and procedural weight are fixed regardless of
+  whether the review would add value.
+- Procedural weight on top of the existing TDD ceremony was high
+  (Round 1 + Claude rebuttal + Round 2 + adjudication on every
+  Tier 1 plan and every Tier 1 diff).
+- Sycophancy risk in the OPPOSITE direction (Claude defers to
+  "External Reviewer") is real and unmeasured. Manual / per-task
+  invocation makes it easy to opt out when noise > signal.
+- We have no real-world data yet on how often the second opinion
+  actually catches something Claude missed. Building infrastructure
+  before evidence is the wrong order.
+
+If real-world use shows the skill is invoked frequently and catches
+real defects, revisit auto-fire hooks in a future version with usage
+data, NOT before.
+
+**Single-pass review, no Round 2.**
+
+A previous spec proposed a 2-round debate (Round 1 → Claude rebuttal
+→ Round 2). Rejected for the same cost / weight reasons. If a
+developer wants a second pass after the first, they invoke the skill
+again with refined input. Cheaper and clearer.
+
+**Codex is fully optional.**
+
+`make doctor` reports Codex as optional. The pack works without it.
+Developers who do not want cross-model review never invoke the skill.
+Failures (codex missing, not logged in, timeout, network) are silent
+and non-blocking — the skill exits 0 with a one-line note.
+
+**Default model is the newest frontier (`gpt-5.5`).**
+
+Per user direction. Newest model = best general reasoning quality.
+The constraint that GPT-5.5 requires ChatGPT auth (not API key) is
+fine because the user authenticates via `codex login` against their
+ChatGPT subscription. If the developer uses `CODEX_API_KEY` instead,
+they should override `SECOND_OPINION_MODEL=gpt-5.4` (or
+`gpt-5.3-codex` for cheaper) since GPT-5.5 is unavailable via API
+key.
+
+**Anti-deference framing in the prompt and in the skill body.**
+
+The prompt tells Codex: be skeptical, downgrade severities when in
+doubt, do NOT pad with praise, zero findings is acceptable. The
+skill body tells Claude: do not change a plan or piece of code
+solely because the reviewer said so; the reason is the underlying
+technical claim. P0/P1 findings require written rationale (3 / 2
+sentences) regardless of stance.
+
+**Single env var override, no config file.**
+
+`SECOND_OPINION_MODEL` to switch models, `SECOND_OPINION_DISABLE=1`
+to silence. No `.claude/second-opinion.json`. No JSON schemas. Less
+to maintain, less to drift.
+
+### Where this lives
+
+- `.claude/skills/second-opinion/SKILL.md` — the skill itself.
+- `scripts/doctor.sh` — reports `codex` as optional with auth check.
+- `MAINTAINING.md` (this section) — rationale.
+- `CLAUDE.md` — one-line entry under "Skills available".
+
+That's it. Two new code locations + two doc additions. If the
+feature proves valuable, expansions go in a separate version with
+real usage data.
+
+### Branch / merge policy for this feature
+
+This skill was developed on the `feature/second-opinion` branch and
+should not merge to `main` until at least 2-4 weeks of real-world
+use confirms it adds value. If usage data shows it does not add
+value (rarely invoked, findings rarely useful, sycophancy creeps in),
+the branch is abandoned. main stays at the version before the skill
+was added.
+
 ## MCP server registration
 
 Project MCP servers live at `.mcp.json` in the repo root, NOT under

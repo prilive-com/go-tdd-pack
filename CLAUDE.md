@@ -185,6 +185,7 @@ Never interpret other replies as gate responses. Never self-approve.
 - `migration-review` — DB migration safety review
 - `new-module-scaffold` — scaffold a new package/binary
 - `postmortem-fix` — incident → prevention plan
+- `second-opinion` — optional cross-model review via OpenAI Codex CLI before non-trivial Tier 1 implementation; advisory only, requires `codex` installed + logged in
 
 ## Reviewer agents available
 
