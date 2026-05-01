@@ -81,6 +81,16 @@ gopls loads automatically.
 └── docs/process/        # TDD workflow reference
 ```
 
+## How to use this
+
+There are two paths:
+
+- **New Go project**: see "How to use this in a new project" below.
+- **Existing project that already has its own Claude Code setup**:
+  see [`docs/INTEGRATION_GUIDE.md`](docs/INTEGRATION_GUIDE.md) — a
+  step-by-step guide for merging this starter with your project's
+  existing rules, hooks, and tools without losing what already works.
+
 ## How to use this in a new project
 
 ```bash
