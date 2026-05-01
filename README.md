@@ -4,7 +4,7 @@
 
 This project was bootstrapped from
 [`go-claude-starter`](https://gitlab.your-domain.com/your-group/go-claude-starter)
-v1.1.0. The Claude Code governance layer (rules, skills, agents, hooks)
+v1.3.1. The Claude Code governance layer (rules, skills, agents, hooks)
 loads automatically — no plugin install, no bootstrap script, no
 `pre-commit install`. **Full enforcement requires standard local tools
 (see Runtime requirements below); run `make doctor` to verify.**
