@@ -1,0 +1,22 @@
+{
+  "project_name": "CHANGE_ME",
+  "tier1_description": "CLI Tier 1: command entry points, exec/runner code, config parsing, secrets, anything destructive (delete/wipe/migrate/exec).",
+  "tier1_path_regexes": [
+    "(^|/)cmd/.*\\.go$",
+    "(^|/)internal/(.+/)?(config|filesystem|exec|runner|auth|secret)[^/]*/.*\\.go$",
+    "(^|/)internal/(.+/)?(destructive|delete|wipe|migrate|exec|rm)[^/]*/.*\\.go$"
+  ],
+  "tier1_prompt_keywords": [
+    "command", "subcommand", "config",
+    "exec", "runner", "filesystem",
+    "auth", "secret", "token",
+    "delete", "destructive", "wipe", "migrate", "force", "admin"
+  ],
+  "allow_test_file_edits_without_gate": true,
+  "allow_docs_and_claude_edits_without_gate": true,
+  "required_markers": [
+    "Human approved spec: yes",
+    "Red phase confirmed: yes",
+    "Human approved implementation: yes"
+  ]
+}

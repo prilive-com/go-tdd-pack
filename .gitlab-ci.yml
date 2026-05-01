@@ -62,11 +62,18 @@ deadcode:
     - go install golang.org/x/tools/cmd/deadcode@latest
     - deadcode ./... | tee deadcode.txt
     - test ! -s deadcode.txt
+  # Advisory by default. deadcode is famously noisy on libraries
+  # (intentionally-unused public APIs), generated code, reflective code.
+  # Service projects with low false-positive rate can flip to `false`.
+  allow_failure: true
 
 allowed-modules:
   stage: security
   script:
-    - bash scripts/check-allowed-modules.sh
+    # CHECK_TRANSITIVE_MODULES=true (strict; default for this starter)
+    # is appropriate for high-stakes projects (financial, security,
+    # regulated). For lower-stakes services, set false in CI variables.
+    - CHECK_TRANSITIVE_MODULES="${CHECK_TRANSITIVE_MODULES:-true}" bash scripts/check-allowed-modules.sh
 
 govulncheck:
   stage: security
@@ -90,5 +97,15 @@ tdd-ceremony-check:
   stage: tdd
   script:
     - bash scripts/check-tdd-ceremony.sh
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# Refuse to merge an MR if .tdd/current-plan.md is mid-cycle. Prevents
+# accidentally pushing a developer's WIP plan to main (the audit trail
+# is committed by design; this is the safety on top of that design).
+tdd-state-clean:
+  stage: tdd
+  script:
+    - bash scripts/check-tdd-state-clean.sh
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"

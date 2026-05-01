@@ -142,7 +142,22 @@ The `require-tdd-state.sh` hook fires only on paths matched in
 typo fix kills velocity.
 
 Default Tier 1 regexes cover money/billing, auth/security, migrations,
-and orchestration. Edit them for your project.
+notifications, and orchestration. Edit them for your project.
+
+### Project-type presets
+
+The starter ships with three Tier 1 presets in `.tdd/presets/`. The
+service preset is the active default. To switch:
+
+```bash
+# Library / SDK (everything in pkg/ is a one-way door):
+cp .tdd/presets/library.json .tdd/tdd-config.json
+
+# CLI (cmd/, exec/runner code, destructive subcommands):
+cp .tdd/presets/cli.json .tdd/tdd-config.json
+```
+
+Then customize `project_name` and any project-specific regexes.
 
 ## Updating from upstream starter
 

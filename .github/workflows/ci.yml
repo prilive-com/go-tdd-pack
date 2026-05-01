@@ -19,7 +19,12 @@ jobs:
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
       - name: AGENTS.md mirrors CLAUDE.md
-        run: diff CLAUDE.md AGENTS.md > /dev/null || { echo "AGENTS.md must be byte-identical to CLAUDE.md. Run: cp CLAUDE.md AGENTS.md"; exit 1; }
+        run: |
+          if ! diff CLAUDE.md AGENTS.md > /dev/null; then
+            echo "AGENTS.md must be byte-identical to CLAUDE.md."
+            echo "Fix with: cp CLAUDE.md AGENTS.md"
+            exit 1
+          fi
       - name: gofmt
         run: test -z "$(gofmt -l .)" || { gofmt -d .; exit 1; }
       - name: go vet
@@ -35,11 +40,18 @@ jobs:
           go install honnef.co/go/tools/cmd/staticcheck@latest
           staticcheck ./...
       - name: deadcode
+        # Advisory by default. deadcode is noisy on libraries / generated /
+        # reflective code. Service projects can drop continue-on-error.
+        continue-on-error: true
         run: |
           go install golang.org/x/tools/cmd/deadcode@latest
           deadcode ./... | tee deadcode.txt
           test ! -s deadcode.txt
       - name: allowed-modules
+        env:
+          # CHECK_TRANSITIVE_MODULES=true (strict; default) suits high-stakes
+          # projects. For lower-stakes services, override to false.
+          CHECK_TRANSITIVE_MODULES: "true"
         run: bash scripts/check-allowed-modules.sh
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
@@ -67,3 +79,11 @@ jobs:
           fetch-depth: 0
       - name: TDD ceremony check
         run: bash scripts/check-tdd-ceremony.sh
+
+  tdd-state-clean:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Refuse mid-cycle TDD state
+        run: bash scripts/check-tdd-state-clean.sh
