@@ -72,6 +72,11 @@ them.
   deletes one. Keep them in sync.
 - `.golangci.yml`, `.editorconfig`, `.gitignore`, `Makefile` — standard
   Go project boilerplate.
+- `examples/tdd-cycle/` — illustrative 4-stage worked example of a
+  Tier 1 TDD cycle. Each `.go` file carries `//go:build ignore` so
+  `go build ./...` skips them. Snapshot, not a runnable package.
+  When the templates in `.tdd/templates/` change, this example will
+  drift — update deliberately at minor revisions, don't auto-sync.
 
 ## Common maintenance tasks
 

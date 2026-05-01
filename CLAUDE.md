@@ -194,3 +194,10 @@ Never interpret other replies as gate responses. Never self-approve.
 - `go-security-reviewer` — secrets, taint, supply chain, crypto
 - `go-test-engineer` — test quality + TDD ceremony check
 - `go-bloat-reviewer` — necessity gates, deletion candidates
+
+## Reference
+
+A worked Tier 1 TDD cycle (spec → red → green → refactor) is in
+`examples/tdd-cycle/`. Read the four-stage README to see what
+`.tdd/current-plan.md`, `.tdd/red-proof.md`, the test, and the
+implementation look like at each gate.
