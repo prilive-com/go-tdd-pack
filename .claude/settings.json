@@ -57,12 +57,7 @@
       "Bash(git push *)",
       "Bash(git push origin *)",
       "Bash(git push --force-with-lease *)",
-      "Bash(git tag *)",
-      "Bash(docker push *)",
-      "Bash(kubectl *)",
-      "Bash(terraform apply *)",
-      "Bash(helm upgrade *)",
-      "Bash(helm install *)"
+      "Bash(git tag *)"
     ],
     "deny": [
       "Read(./.env)",
@@ -111,9 +106,6 @@
       "Bash(git filter-repo *)",
       "Bash(git filter-branch *)",
       "Bash(git reset --hard origin/*)",
-
-      "Bash(terraform destroy *)",
-      "Bash(terraform apply -auto-approve *)",
 
       "Bash(* --accept-data-loss *)",
       "Bash(*--accept-data-loss)",

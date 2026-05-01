@@ -123,6 +123,10 @@ The CI picks up `.gitlab-ci.yml` or `.github/workflows/` automatically.
    `.claude/rules/*` + skills + subagents + safety hooks
    (`guard-dangerous-bash`, `scan-for-secrets`, `guard-protected-files`,
    `gofmt-after-edit`, `detect-ai-bloat`).
+   Scope is intentionally **Go development + production database
+   safety** only. IaC / k8s / container-registry / project-domain
+   guards are out of upstream scope — see `MAINTAINING.md` "Adding
+   project-specific guards" for how to add them per project.
 4. **Layer 3 — Mechanical floor (CI).** `.gitlab-ci.yml` /
    `.github/workflows/ci.yml`: gofmt, go vet, staticcheck, govulncheck,
    deadcode, allowed-modules, race detector, **TDD ceremony check**.

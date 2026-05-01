@@ -126,13 +126,9 @@ else
   fail "go test should pass (got: $out)"
 fi
 
-out=$(echo '{"tool_input": {"command": "terraform destroy"}}' | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/guard-dangerous-bash.sh)
-decision="$(echo "$out" | jq -r '.hookSpecificOutput.permissionDecision')"
-if [ "$decision" = "deny" ]; then
-  pass "terraform destroy denied"
-else
-  fail "terraform destroy should be denied (got: $decision)"
-fi
+# v1.3.0: terraform destroy + kubectl + helm + docker push removed from
+# upstream scope; smoke test for the terraform destroy deny removed too.
+# Add equivalent rules + tests to your project fork if your team uses these.
 
 # Bypass class: short form of --no-verify.
 out=$(echo '{"tool_input": {"command": "git commit -n -m oops"}}' | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/guard-dangerous-bash.sh)

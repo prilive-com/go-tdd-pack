@@ -147,6 +147,54 @@ constraint, the cheapest first step would be flipping `go-bloat-reviewer`
 to `sonnet` (mechanical pattern detection) and watching for regressions
 in delete-list quality. Don't do this without explicit operator buy-in.
 
+## Adding project-specific guards (DevOps, trading, etc.)
+
+This pack ships **only universal Go-development safety**:
+
+- universal git/shell hazards (--no-verify family, force-push, history rewrite, rm -rf, sudo, curl|bash)
+- production database hazards (psql/mysql/mongo against production hosts, DROP/TRUNCATE on production, `--accept-data-loss`)
+- generic credential leakage (cloud providers, GitHub/Slack/Anthropic/OpenAI tokens, DB DSNs with passwords, PEM private keys)
+
+**Out of upstream scope** (intentional, v1.3.0):
+
+- Infrastructure-as-code: `terraform destroy/apply`, `helm upgrade/install`, `kubectl`.
+- Container operations: `docker push`.
+- Domain-specific blast-radius commands (e.g. `cmd/sell_all` for a trading bot, `liquidate`, `force-close`, `docker volume rm <project>_*`).
+
+If your project uses any of these, add the rules to **your project's
+fork** of `.claude/hooks/guard-dangerous-bash.sh`. Pattern to copy:
+
+```bash
+# === <PROJECT NAME> PROJECT GUARDS (not upstream) ===
+
+# IaC example (re-add if your project uses Terraform):
+if echo "$COMMAND" | grep -Eq 'terraform[[:space:]]+destroy'; then
+  deny "Refusing: terraform destroy. Infrastructure teardown requires explicit human execution."
+fi
+
+# k8s example (re-add if your project uses Kubernetes):
+if echo "$COMMAND" | grep -Eq '^[[:space:]]*kubectl([[:space:]]|$)'; then
+  ask "kubectl changes cluster state. Confirm context is not production."
+fi
+
+# Trading-bot example (project-specific blast radius):
+if echo "$COMMAND" | grep -Eq '(^|[;&|])[[:space:]]*(go[[:space:]]+run[[:space:]]+\./)?cmd/sell_all'; then
+  deny "Refusing: cmd/sell_all liquidates all holdings. Use the documented operator runbook only."
+fi
+
+# Volume-destruction example (re-add for any project with named volumes):
+if echo "$COMMAND" | grep -Eq '(^|[;&|])[[:space:]]*docker[[:space:]]+volume[[:space:]]+rm[[:space:]].*<your-project>'; then
+  deny "Refusing: docker volume rm against project volumes destroys local DB state."
+fi
+```
+
+Also add the matching `permissions.deny` / `permissions.ask` entries
+to your project's `.claude/settings.json` for defense-in-depth.
+
+When you re-integrate from upstream (quarterly per the integration
+guide), preserve your project guards — they live in your fork, not in
+the upstream pack.
+
 ## MCP server registration
 
 Project MCP servers live at `.mcp.json` in the repo root, NOT under

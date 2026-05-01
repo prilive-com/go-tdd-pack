@@ -89,13 +89,11 @@ if echo "$COMMAND" | grep -Eq 'git[[:space:]]+reset[[:space:]]+--hard[[:space:]]
   deny "Refusing: git reset --hard origin/* discards local work irrecoverably. Stash or branch first."
 fi
 
-# Infrastructure destruction (DataTalks.Club incident, Feb 2026).
-if echo "$COMMAND" | grep -Eq 'terraform[[:space:]]+destroy'; then
-  deny "Refusing: terraform destroy. Infrastructure teardown requires explicit human execution, not agent approval."
-fi
-if echo "$COMMAND" | grep -Eq 'terraform[[:space:]]+apply.*-auto-approve'; then
-  deny "Refusing: terraform apply -auto-approve skips plan review. Run 'terraform plan' first and review the diff."
-fi
+# NOTE (v1.3.0): infrastructure-as-code patterns (terraform destroy / apply,
+# kubectl, helm, docker push) were removed from upstream to keep this hook
+# focused on Go development. Projects that DO use IaC / Kubernetes / container
+# registries should add equivalent rules to their own .claude/hooks/ in their
+# project fork. See MAINTAINING.md "Adding project-specific guards".
 
 # Destructive filesystem operations.
 if echo "$COMMAND" | grep -Eq '(^|[[:space:]])rm[[:space:]]+-[rRfF]+[[:space:]]+(/([[:space:]]|$)|/\*|~|~/|\$HOME|\$\{HOME\})'; then
@@ -138,18 +136,10 @@ fi
 if echo "$COMMAND" | grep -Eq '^[[:space:]]*git[[:space:]]+tag([[:space:]]|$)'; then
   ask "git tag modifies history. Confirm this is an intended release tag."
 fi
-if echo "$COMMAND" | grep -Eq 'docker[[:space:]]+push'; then
-  ask "docker push publishes an image. Confirm registry and tag."
-fi
-if echo "$COMMAND" | grep -Eq '^[[:space:]]*kubectl([[:space:]]|$)'; then
-  ask "kubectl changes cluster state. Confirm context is not production."
-fi
-if echo "$COMMAND" | grep -Eq 'terraform[[:space:]]+apply'; then
-  ask "terraform apply. Confirm the plan has been reviewed and the workspace is correct."
-fi
-if echo "$COMMAND" | grep -Eq 'helm[[:space:]]+(upgrade|install)'; then
-  ask "helm upgrade/install changes cluster state. Confirm chart version and namespace."
-fi
+
+# NOTE (v1.3.0): docker push / kubectl / terraform apply / helm upgrade-install
+# ASK rules removed from upstream — same scope-narrowing as the deny block
+# above. Add them back in your project fork if your team uses these tools.
 
 # Default: allow. Claude Code's own permissions.allow list still applies on top.
 pass
