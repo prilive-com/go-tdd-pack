@@ -51,13 +51,21 @@ pass() { jq -n '{}'; exit 0; }
 if echo "$COMMAND" | grep -Eq '(^|[[:space:]])--no-verify([[:space:]]|$)'; then
   deny "Refusing: --no-verify bypasses pre-commit hooks. Fix the underlying hook failure instead. (See issue #40117.)"
 fi
-# Short form of --no-verify: `git commit -n` (same bypass class).
-if echo "$COMMAND" | grep -Eq 'git[[:space:]]+(.*[[:space:]])?commit([[:space:]].*)?[[:space:]]-n([[:space:]]|$)'; then
-  deny "Refusing: 'git commit -n' is the short form of --no-verify (pre-commit bypass). Fix the failing hook instead."
+# Short form of --no-verify: `git commit -n` in any flag-cluster position
+# (`-n`, `-nm`, `-mn`, `-ne`, `-mne`, etc — Unix short-flag concatenation).
+# v1.0.0 caught only `-n` standalone. v1.1.0 partially fixed it. v1.1.1 closes
+# `-nm`-style glued clusters and any flag order, per consultant adversarial test.
+if echo "$COMMAND" | grep -Eq 'git[[:space:]]+(.*[[:space:]])?commit[[:space:]]+(.*[[:space:]])?-[a-zA-Z]*n[a-zA-Z]*([[:space:]]|$)'; then
+  deny "Refusing: 'git commit -n' (or -nm / -mn / -ne ... in any flag cluster) is the short form of --no-verify (pre-commit bypass). Fix the failing hook instead."
 fi
-# Git config bypass that disables hooks at the command level.
+# Git config bypass that disables hooks at the command level (--c form).
 if echo "$COMMAND" | grep -Eq 'git[[:space:]]+(.*[[:space:]])?-c[[:space:]]+core\.hooksPath'; then
   deny "Refusing: 'git -c core.hooksPath' disables the project's git hooks. Use the configured hooks; if they're failing, fix them."
+fi
+# Same bypass via env vars: GIT_CONFIG_COUNT + GIT_CONFIG_KEY_*=core.hooksPath.
+# Per git-config(1), this injects config equivalent to -c at runtime.
+if echo "$COMMAND" | grep -Eq 'GIT_CONFIG_KEY_[0-9]+[[:space:]]*=[[:space:]]*([\"'"'"']?)core\.hooksPath\1'; then
+  deny "Refusing: GIT_CONFIG_KEY_*=core.hooksPath is the env-var equivalent of -c core.hooksPath (disables git hooks). Same class as #40117."
 fi
 if echo "$COMMAND" | grep -Eq '(^|[[:space:]])(HUSKY=0|GIT_HOOKS=0)(=| )'; then
   deny "Refusing: hook-bypass environment variable. Pre-commit hooks exist to catch real failures."

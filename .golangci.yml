@@ -1,14 +1,29 @@
 # golangci-lint v2 configuration for go-claude-starter projects.
 #
-# G104 ("errors not checked") is NOT globally suppressed here — that's the
-# entire point of error handling discipline in Go. errcheck (enabled with
-# check-blank: true) covers the same concern with better precision.
+# Per the v2 migration (https://golangci-lint.run/docs/product/migration-guide/):
+#   - linter settings live under `linters.settings.*` (was `linters-settings.*`)
+#   - exclusion rules live under `linters.exclusions.rules` (was `issues.exclude-rules`)
+#   - `formatters` is its own top-level section (was inside `linters`)
+#   - `version: "2"` MUST be at the top
+#
+# v1.0.0 / v1.1.0 of this starter mixed `version: "2"` with v1 keys, which
+# silently degraded the lint pass. v1.1.1 fixes that. Run
+# `golangci-lint config verify` after any edit to this file.
+#
+# G104 ("errors not checked") is intentionally NOT globally suppressed —
+# `errcheck` (with check-blank: true) covers the same concern with better
+# precision. G404 (weak random) is suppressed only for test files because
+# deterministic seeds are fine in tests.
 
 version: "2"
 
 run:
   timeout: 5m
   tests: true
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
 
 linters:
   default: none
@@ -31,31 +46,29 @@ linters:
     - unparam
     - whitespace
 
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+
+    revive:
+      severity: warning
+      rules:
+        - name: context-as-argument
+        - name: error-return
+        - name: error-strings
+        - name: exported
+          disabled: true
+
+  exclusions:
+    rules:
+      # Allow weak random in test files (deterministic seeds are fine for tests).
+      - path: _test\.go
+        linters:
+          - gosec
+        text: "G404"
+
 formatters:
   enable:
     - gofmt
     - goimports
-
-issues:
-  max-issues-per-linter: 0
-  max-same-issues: 0
-  exclude-rules:
-    # Allow weak random in test files (deterministic seeds are fine for tests)
-    - path: _test\.go
-      linters:
-        - gosec
-      text: "G404"
-
-linters-settings:
-  errcheck:
-    check-type-assertions: true
-    check-blank: true
-
-  revive:
-    severity: warning
-    rules:
-      - name: context-as-argument
-      - name: error-return
-      - name: error-strings
-      - name: exported
-        disabled: true

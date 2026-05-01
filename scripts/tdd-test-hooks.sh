@@ -137,6 +137,50 @@ else
   fail "git -c core.hooksPath should be denied (got: $decision)"
 fi
 
+# v1.1.1 closure: -nm glued short flags (Unix flag-cluster syntax).
+out=$(echo '{"tool_input": {"command": "git commit -nm msg"}}' | bash .claude/hooks/guard-dangerous-bash.sh)
+decision="$(echo "$out" | jq -r '.hookSpecificOutput.permissionDecision // "pass"')"
+if [ "$decision" = "deny" ]; then
+  pass "git commit -nm denied (glued short flags)"
+else
+  fail "git commit -nm should be denied (got: $decision)"
+fi
+
+# v1.1.1 closure: flag-order swap.
+out=$(echo '{"tool_input": {"command": "git commit -mn msg"}}' | bash .claude/hooks/guard-dangerous-bash.sh)
+decision="$(echo "$out" | jq -r '.hookSpecificOutput.permissionDecision // "pass"')"
+if [ "$decision" = "deny" ]; then
+  pass "git commit -mn denied (flag order)"
+else
+  fail "git commit -mn should be denied (got: $decision)"
+fi
+
+# v1.1.1 closure: -ne or any cluster containing n.
+out=$(echo '{"tool_input": {"command": "git commit -ne foo"}}' | bash .claude/hooks/guard-dangerous-bash.sh)
+decision="$(echo "$out" | jq -r '.hookSpecificOutput.permissionDecision // "pass"')"
+if [ "$decision" = "deny" ]; then
+  pass "git commit -ne denied (n in cluster)"
+else
+  fail "git commit -ne should be denied (got: $decision)"
+fi
+
+# v1.1.1 closure: env-var equivalent of -c core.hooksPath.
+out=$(echo '{"tool_input": {"command": "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit"}}' | bash .claude/hooks/guard-dangerous-bash.sh)
+decision="$(echo "$out" | jq -r '.hookSpecificOutput.permissionDecision // "pass"')"
+if [ "$decision" = "deny" ]; then
+  pass "GIT_CONFIG_KEY_*=core.hooksPath denied (env-var hooks bypass)"
+else
+  fail "GIT_CONFIG_KEY_*=core.hooksPath should be denied (got: $decision)"
+fi
+
+# Regression: legitimate commits must still pass.
+out=$(echo '{"tool_input": {"command": "git commit -m msg"}}' | bash .claude/hooks/guard-dangerous-bash.sh)
+if [ "$(echo "$out" | jq 'has("hookSpecificOutput")')" = "false" ]; then
+  pass "git commit -m passes through (no false-positive)"
+else
+  fail "git commit -m should pass (got: $out)"
+fi
+
 echo
 echo "Testing scan-for-secrets.sh..."
 
