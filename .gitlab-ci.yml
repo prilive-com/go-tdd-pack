@@ -53,18 +53,21 @@ test:
 staticcheck:
   stage: verify
   script:
-    - go install honnef.co/go/tools/cmd/staticcheck@latest
+    # Routed through make tools so STATICCHECK_VERSION env var (set in CI
+    # variables) actually pins the version. Defaults to @latest.
+    - make tools
     - staticcheck ./...
 
 deadcode:
   stage: verify
   script:
-    - go install golang.org/x/tools/cmd/deadcode@latest
-    - deadcode ./... | tee deadcode.txt
-    - test ! -s deadcode.txt
+    - make tools
+    - bash scripts/check-deadcode.sh
   # Advisory by default. deadcode is famously noisy on libraries
   # (intentionally-unused public APIs), generated code, reflective code.
-  # Service projects with low false-positive rate can flip to `false`.
+  # Service projects with low false-positive rate can set
+  # DEADCODE_ALLOW_FAILURE=false in CI variables AND flip allow_failure
+  # below to false.
   allow_failure: true
 
 allowed-modules:

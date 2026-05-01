@@ -120,6 +120,61 @@ them.
 3. Update `.claude/rules/go-style.md` "Go 1.26+ specifics" section.
 4. Bump the **major** version (consumers' CI may break).
 
+## Subagent model choice
+
+All 6 reviewer subagents (`go-reviewer`, `go-architect`,
+`go-concurrency-reviewer`, `go-security-reviewer`, `go-test-engineer`,
+`go-bloat-reviewer`) use `model: opus`. This is a **deliberate
+quality-over-cost trade-off** by the user, not a missed optimization.
+
+The original v1.1.0 spec recommended a sonnet/opus split (sonnet for
+the more mechanical reviewers — bloat, test-engineer — to save tokens).
+The user explicitly directed otherwise: "always use the most powerful
+and latest model." That preference is durable: don't propose downgrading
+agent models for cost or latency reasons in future starter versions.
+
+The `model: opus` alias auto-tracks the latest Opus release (Opus 4.7
+at the time of v1.1.x), so this scales forward without per-version
+maintenance.
+
+If a future maintainer's context changes and cost becomes a real
+constraint, the cheapest first step would be flipping `go-bloat-reviewer`
+to `sonnet` (mechanical pattern detection) and watching for regressions
+in delete-list quality. Don't do this without explicit operator buy-in.
+
+## MCP server registration
+
+Project MCP servers live at `.mcp.json` in the repo root, NOT under
+`.claude/`. Claude CLI only reads `.mcp.json` at the project root. The
+`enabledMcpjsonServers: ["gopls"]` entry in `.claude/settings.json` is
+the explicit allowlist (CVE-2025-59536 defense) — it points to the
+entry inside `.mcp.json`. The CVE was about a previous bug where MCP
+servers could execute before the user accepted the trust dialog;
+current Claude Code requires explicit one-time approval even with the
+allowlist set.
+
+Keep `.mcp.json` minimal and schema-shaped (`{"mcpServers": {...}}`).
+Do not add `_comment` arrays — this prose belongs here.
+
+## Tool installation policy
+
+`scripts/install-go-tools.sh` defaults every tool to `@latest` (with
+env-var override per tool, e.g. `STATICCHECK_VERSION=2026.1.1`).
+`govulncheck` is intentionally always `@latest` because vulnerability
+databases need fresh data.
+
+For team-wide reproducibility, **pin in your CI** by setting the
+`*_VERSION` env vars in your CI variables. The CI files
+(`.gitlab-ci.yml`, `.github/workflows/ci.yml`) call `make tools`
+instead of inlining `go install ...@latest`, so env-var overrides
+take effect end-to-end.
+
+The starter does NOT pin upstream defaults to specific tags because:
+- The right pinned version varies by Go release.
+- A stale pinned default would silently rot between starter releases.
+- Honest "@latest by default; pin in your CI" is more sustainable than
+  "we pin for you" with quarterly maintenance debt.
+
 ## Versioning
 
 Semver in `.claude/VERSION`:

@@ -44,7 +44,14 @@ fi
 if command -v deadcode >/dev/null 2>&1; then
   echo "== deadcode =="
   deadcode ./... | tee /tmp/deadcode.txt
-  test ! -s /tmp/deadcode.txt
+  if [ -s /tmp/deadcode.txt ]; then
+    if [ "${DEADCODE_ALLOW_FAILURE:-true}" = "true" ]; then
+      echo "deadcode: findings present (advisory; set DEADCODE_ALLOW_FAILURE=false to hard-fail)"
+    else
+      echo "deadcode: findings present and DEADCODE_ALLOW_FAILURE=false; failing."
+      exit 1
+    fi
+  fi
 fi
 
 if command -v golangci-lint >/dev/null 2>&1; then
