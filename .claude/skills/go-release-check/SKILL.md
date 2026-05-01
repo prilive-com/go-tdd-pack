@@ -1,8 +1,8 @@
 ---
 name: go-release-check
-description: Pre-release Go checklist for services, libraries, and CLIs.
+description: Pre-release Go checklist for services, libraries, and CLIs (tests + race + lint + govulncheck + allowed-modules + TDD ceremony + CHANGELOG + API docs). Use when the user asks to release, ship, deploy, cut a tag, prepare a release, or do a pre-release / pre-deploy check.
 license: MIT
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Go Release Check

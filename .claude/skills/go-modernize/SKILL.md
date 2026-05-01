@@ -1,8 +1,9 @@
 ---
 name: go-modernize
-description: Apply Go 1.26 modernization analyzers to bring code up to current idioms. Use after dependency bumps, during cleanup passes, or when reviewing a stale module.
+description: Apply Go 1.26 modernization analyzers (`go fix`) to bring a package or module up to current idioms. Mass-rewrites code; only invoke explicitly when the operator asks to modernize.
+disable-model-invocation: true
 license: MIT
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Go Modernize

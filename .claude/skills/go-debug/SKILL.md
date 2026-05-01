@@ -1,8 +1,8 @@
 ---
 name: go-debug
-description: Debug Go failures by reproducing, tracing root cause, fixing minimally, and verifying with tests.
+description: Debug Go failures by reproducing the bug as a focused test, tracing root cause, fixing minimally, and verifying with race-enabled tests. Use when the user mentions a bug, panic, deadlock, race, leak, hang, crash, segfault, regression, flaky test, or any Go failure that needs reproducing — for non-Tier-1 paths only (Tier 1 bugs use go-tdd-bugfix).
 license: MIT
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Go Debug

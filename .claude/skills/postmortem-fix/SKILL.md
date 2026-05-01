@@ -1,8 +1,9 @@
 ---
 name: postmortem-fix
-description: Turn an escaped defect or production incident into a concrete prevention patch plan.
+description: Turn an escaped defect or production incident into a concrete prevention patch plan (root cause + control gap + multi-layer fix). Declaring an incident is intentional; only invoke explicitly when the operator says this is post-incident or postmortem work.
+disable-model-invocation: true
 license: MIT
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Postmortem Fix

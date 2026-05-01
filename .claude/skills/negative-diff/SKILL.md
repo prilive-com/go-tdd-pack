@@ -1,8 +1,8 @@
 ---
 name: negative-diff
-description: Post-implementation cleanup pass that explicitly looks for code to delete, inline, or reuse rather than add. Run after implementation is complete and tests pass.
+description: Post-implementation cleanup pass that explicitly looks for code to delete, inline, or reuse rather than add. Use after any implementation finishes and tests pass — before opening a PR — to remove AI-generated bloat, single-use abstractions, speculative config, dead exports, and tests that mirror implementation. Trigger when the user says "clean up", "simplify", "shrink the diff", "reduce bloat", "prepare PR", or whenever a PR exceeds ~200 lines.
 license: MIT
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Negative Diff

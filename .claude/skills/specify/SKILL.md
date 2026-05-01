@@ -1,8 +1,8 @@
 ---
 name: specify
-description: Spec-driven Layer 0. Use before writing any non-trivial code. Drives Specify -> Plan -> Tasks -> Implement gate, capturing intent and acceptance criteria as a tracked spec under specs/.
+description: Spec-driven Layer 0 — capture intent, non-goals, acceptance criteria as a tracked spec under specs/ before writing any non-trivial code. Drives Specify -> Plan -> Tasks -> Implement with three human approval gates. Use whenever the user asks to design, plan, spec out, scope, or implement something that spans more than ~1 hour, touches public API, touches a Tier 1 path, or has non-trivial business invariants.
 license: MIT
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Specify - Layer 0 Spec Gate

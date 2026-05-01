@@ -1,8 +1,9 @@
 ---
 name: migration-review
-description: Review a database migration (SQL, golang-migrate, goose, Flyway, etc.) for safety, reversibility, and correctness.
+description: Review a database migration (SQL, golang-migrate, goose, Flyway, etc.) for safety, reversibility, zero-downtime correctness. DB safety review is high-stakes; only invoke explicitly when reviewing a migration.
+disable-model-invocation: true
 license: MIT
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Migration Review

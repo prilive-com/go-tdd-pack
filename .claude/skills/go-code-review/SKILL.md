@@ -1,8 +1,8 @@
 ---
 name: go-code-review
-description: Run the universal Staff+ Go code review process against the current diff. Applies REVIEW.md and rules in .claude/rules/.
+description: Run a Staff+ Go code review against the current diff (correctness, security, concurrency, AI-bloat, TDD ceremony, tests). Use when the user asks to review, audit, look at, sanity-check, or get a second opinion on the current changes / branch / PR. Applies REVIEW.md and rules in .claude/rules/.
 license: MIT
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Go Code Review

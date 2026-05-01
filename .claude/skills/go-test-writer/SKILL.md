@@ -1,8 +1,8 @@
 ---
 name: go-test-writer
-description: Write Go tests following the team's conventions. Table-driven, race-enabled, with pgx and HTTP patterns supported. Verifies results before reporting done.
+description: Write or extend Go tests following team conventions — table-driven, race-enabled, with pgx (testcontainers / pgxmock) and HTTP (httptest) patterns. Use when the user asks to add tests, write a test, write a regression test, write a fuzz/property test, or extend test coverage. Verifies results before reporting done.
 license: MIT
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Go Test Writer

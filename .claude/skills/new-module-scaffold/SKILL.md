@@ -1,8 +1,8 @@
 ---
 name: new-module-scaffold
-description: Scaffold a new service, package, or subsystem in this Go repo following team conventions.
+description: Scaffold a new Go service, package, or subsystem following the existing repo conventions (matches existing structure, names, entry points, test layouts). Use when the user asks to scaffold, create, or set up a new package / module / service / binary / worker / handler.
 license: MIT
-version: 1.0.0
+version: 1.1.0
 ---
 
 # New Module Scaffold

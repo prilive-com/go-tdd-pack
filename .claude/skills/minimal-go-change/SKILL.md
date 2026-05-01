@@ -1,8 +1,8 @@
 ---
 name: minimal-go-change
-description: Plan and implement the smallest safe Go change. Use for routine Go work outside Tier 1.
+description: Plan and implement the smallest safe Go change with red-before-green where tractable. Use for any routine Go change to non-Tier-1 paths — small features, bug fixes, refactors, lint cleanups, dependency bumps, or any change where the user says "implement", "add", "fix", "update", "change", or "refactor" and the touched paths are NOT covered by .tdd/tdd-config.json tier1_path_regexes.
 license: MIT
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Minimal Go Change
