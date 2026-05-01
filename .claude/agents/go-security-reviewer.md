@@ -111,7 +111,7 @@ reachable abuse paths — name them specifically or don't report them.
 
 ### MCP / plugin exposure
 
-- New entry in `.claude/mcp.json`: trusted source? Pinned? Read-only?
+- New entry in `.mcp.json` (project root): trusted source? Pinned? Read-only?
 - Must also appear in `.claude/settings.json` `enabledMcpjsonServers`
   (CVE-2025-59536 defense).
 - `enableAllProjectMcpServers: true` is the CVE vector. Refuse.

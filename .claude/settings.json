@@ -20,8 +20,6 @@
     "the deterministic floor — these hooks are in-session prevention."
   ],
 
-  "defaultMode": "default",
-
   "enableAllProjectMcpServers": false,
   "enabledMcpjsonServers": ["gopls"],
 

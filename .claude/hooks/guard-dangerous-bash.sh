@@ -15,6 +15,14 @@
 
 set -euo pipefail
 
+# Fail closed if jq is missing — this hook is a primary safety boundary.
+if ! command -v jq >/dev/null 2>&1; then
+  cat <<'JSON'
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Required hook dependency 'jq' is missing; refusing to evaluate dangerous-bash safety policy. Install jq: apt-get install jq / brew install jq / apk add jq."}}
+JSON
+  exit 0
+fi
+
 INPUT="$(cat)"
 COMMAND="$(printf '%s' "$INPUT" | jq -r '.tool_input.command // ""')"
 
@@ -42,6 +50,14 @@ pass() { jq -n '{}'; exit 0; }
 # Pre-commit bypass (issue #40117 — Claude Code 27 Mar 2026, 6 bypassed commits).
 if echo "$COMMAND" | grep -Eq '(^|[[:space:]])--no-verify([[:space:]]|$)'; then
   deny "Refusing: --no-verify bypasses pre-commit hooks. Fix the underlying hook failure instead. (See issue #40117.)"
+fi
+# Short form of --no-verify: `git commit -n` (same bypass class).
+if echo "$COMMAND" | grep -Eq 'git[[:space:]]+(.*[[:space:]])?commit([[:space:]].*)?[[:space:]]-n([[:space:]]|$)'; then
+  deny "Refusing: 'git commit -n' is the short form of --no-verify (pre-commit bypass). Fix the failing hook instead."
+fi
+# Git config bypass that disables hooks at the command level.
+if echo "$COMMAND" | grep -Eq 'git[[:space:]]+(.*[[:space:]])?-c[[:space:]]+core\.hooksPath'; then
+  deny "Refusing: 'git -c core.hooksPath' disables the project's git hooks. Use the configured hooks; if they're failing, fix them."
 fi
 if echo "$COMMAND" | grep -Eq '(^|[[:space:]])(HUSKY=0|GIT_HOOKS=0)(=| )'; then
   deny "Refusing: hook-bypass environment variable. Pre-commit hooks exist to catch real failures."
@@ -78,8 +94,9 @@ if echo "$COMMAND" | grep -Eq '(^|[[:space:]])rm[[:space:]]+-[rRfF]+[[:space:]]+
   deny "Refusing: rm -rf against /, ~, or \$HOME. Recovery is not possible."
 fi
 
-# Piped-to-shell remote execution (supply chain).
-if echo "$COMMAND" | grep -Eq '(curl|wget)[[:space:]][^|]*\|[[:space:]]*(sh|bash|zsh)([[:space:]]|$)'; then
+# Piped-to-shell remote execution (supply chain). Allow optional `sudo` between
+# the pipe and the shell — the sudo variant is a known bypass class.
+if echo "$COMMAND" | grep -Eq '(curl|wget)[[:space:]][^|]*\|[[:space:]]*(sudo[[:space:]]+)?(sh|bash|zsh)([[:space:]]|$)'; then
   deny "Refusing: piping remote content to a shell. Download, inspect, then run explicitly."
 fi
 

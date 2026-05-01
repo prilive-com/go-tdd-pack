@@ -15,9 +15,11 @@ automatically — no per-clone setup required.
 ├── AGENTS.md            # Mirror of CLAUDE.md for cross-tool compatibility
 ├── REVIEW.md            # Staff+ review rubric (used by go-reviewer agent)
 ├── Makefile             # Convenience targets: make ci / make test / ...
+├── .mcp.json            # Project MCP servers (gopls). MUST be at repo root,
+│                        # not under .claude/ — Claude CLI only reads .mcp.json
+│                        # at the project root for project-scoped MCP.
 ├── .claude/             # Claude CLI auto-loads this
-│   ├── settings.json    # Permissions + hook registration
-│   ├── mcp.json         # gopls MCP server (Go diagnostics)
+│   ├── settings.json    # Permissions + hook registration + MCP allowlist
 │   ├── allowed-modules.txt  # Slopsquat allowlist
 │   ├── rules/           # Loaded on demand from CLAUDE.md
 │   ├── agents/          # Reviewer subagents (auto-discovered)

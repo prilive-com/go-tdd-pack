@@ -21,8 +21,11 @@ them.
   - `settings.json` — permissions + hook registration. Path-based
     deny rules + dangerous-bash deny patterns. Hook timeouts in
     seconds. Edit carefully — every consumer inherits this.
-  - `mcp.json` — gopls MCP server. Must also be listed in
-    `settings.json` `enabledMcpjsonServers` (CVE-2025-59536 defense).
+  - **Note:** project MCP servers (gopls) live at `.mcp.json` in the
+    repo root, NOT under `.claude/`. Claude CLI only reads `.mcp.json`
+    at the project root. The `enabledMcpjsonServers: ["gopls"]` entry
+    in `settings.json` is the explicit allowlist (CVE-2025-59536
+    defense) — it points to the entry inside the root `.mcp.json`.
   - `allowed-modules.txt` — slopsquat allowlist. Defaults to standard
     Go ecosystem; first line is the org placeholder for the cloner to
     fill in.

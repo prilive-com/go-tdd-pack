@@ -12,7 +12,7 @@ go install golang.org/x/tools/cmd/goimports@latest
 go install golang.org/x/exp/cmd/apidiff@latest
 go install golang.org/x/exp/cmd/gorelease@latest
 
-# gopls for the MCP server defined in .claude/mcp.json
+# gopls for the MCP server defined in .mcp.json (project root)
 go install golang.org/x/tools/gopls@latest
 
 echo "==> Tools installed."

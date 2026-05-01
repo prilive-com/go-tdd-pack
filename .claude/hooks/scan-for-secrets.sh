@@ -17,6 +17,14 @@
 
 set -euo pipefail
 
+# Fail closed if jq is missing — this hook is a primary safety boundary.
+if ! command -v jq >/dev/null 2>&1; then
+  cat <<'JSON'
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Required hook dependency 'jq' is missing; refusing to evaluate secret-scan policy. Install jq: apt-get install jq / brew install jq / apk add jq."}}
+JSON
+  exit 0
+fi
+
 INPUT="$(cat)"
 TOOL="$(printf '%s' "$INPUT" | jq -r '.tool_name // ""')"
 FILE_PATH="$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // ""')"

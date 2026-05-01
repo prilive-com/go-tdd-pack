@@ -15,22 +15,10 @@
 set -euo pipefail
 
 PAYLOAD="$(cat)"
-FILE="$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.file_path // .tool_input.path // empty' 2>/dev/null || echo '')"
-[[ -z "$FILE" ]] && exit 0
 
-# Always-allow paths (orthogonal to TDD discipline).
-case "$FILE" in
-  */.tdd/*|*/.claude/*|*.md|*/docs/*|*/specs/*|*/archive/*|*/CHANGELOG.md) exit 0 ;;
-  *_test.go) exit 0 ;;
-esac
-
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
-CONFIG="$PROJECT_DIR/.tdd/tdd-config.json"
-PLAN="$PROJECT_DIR/.tdd/current-plan.md"
-
-# No config means TDD ceremony not configured for this project — allow.
-[[ ! -f "$CONFIG" ]] && exit 0
-
+# jq guard MUST come before any jq invocation. The previous version called jq
+# at line 18 to extract FILE and then exited 0 on empty FILE — which fails OPEN
+# (Tier 1 edits silently allowed) when jq is missing. Order matters here.
 if ! command -v jq >/dev/null 2>&1; then
   cat >&2 <<'HOOK_MSG'
 [require-tdd-state] BLOCKED: jq is required for the TDD gate hook.
@@ -49,6 +37,23 @@ of the missing dependency and wait for them to install it.
 HOOK_MSG
   exit 2
 fi
+
+# Now safe to use jq.
+FILE="$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.file_path // .tool_input.path // empty' 2>/dev/null || echo '')"
+[[ -z "$FILE" ]] && exit 0
+
+# Always-allow paths (orthogonal to TDD discipline).
+case "$FILE" in
+  */.tdd/*|*/.claude/*|*.md|*/docs/*|*/specs/*|*/archive/*|*/CHANGELOG.md) exit 0 ;;
+  *_test.go) exit 0 ;;
+esac
+
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+CONFIG="$PROJECT_DIR/.tdd/tdd-config.json"
+PLAN="$PROJECT_DIR/.tdd/current-plan.md"
+
+# No config means TDD ceremony not configured for this project — allow.
+[[ ! -f "$CONFIG" ]] && exit 0
 
 # Match the file against tier1_path_regexes.
 MATCHED="no"
