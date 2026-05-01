@@ -39,14 +39,23 @@ HOOK_MSG
 fi
 
 # Now safe to use jq.
-FILE="$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.file_path // .tool_input.path // empty' 2>/dev/null || echo '')"
-[[ -z "$FILE" ]] && exit 0
-
-# Always-allow paths (orthogonal to TDD discipline).
-case "$FILE" in
-  */.tdd/*|*/.claude/*|*.md|*/docs/*|*/specs/*|*/archive/*|*/CHANGELOG.md) exit 0 ;;
-  *_test.go) exit 0 ;;
-esac
+#
+# Defensive path extraction: collect every candidate path the tool might be
+# touching. Current Edit/Write/MultiEdit shapes only set tool_input.file_path
+# (sometimes .path), but future tool variants may use .files[].file_path or
+# .edits[].file_path. Reading all four keeps the gate correct under shape drift.
+PATHS="$(printf '%s' "$PAYLOAD" | jq -r '
+  [
+    .tool_input.file_path?,
+    .tool_input.path?,
+    (.tool_input.files[]?.file_path?),
+    (.tool_input.edits[]?.file_path?)
+  ]
+  | map(select(. != null and . != ""))
+  | unique
+  | .[]
+' 2>/dev/null || true)"
+[[ -z "$PATHS" ]] && exit 0
 
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 CONFIG="$PROJECT_DIR/.tdd/tdd-config.json"
@@ -55,23 +64,37 @@ PLAN="$PROJECT_DIR/.tdd/current-plan.md"
 # No config means TDD ceremony not configured for this project — allow.
 [[ ! -f "$CONFIG" ]] && exit 0
 
-# Match the file against tier1_path_regexes.
-MATCHED="no"
-while IFS= read -r pattern; do
-  [[ -z "$pattern" ]] && continue
-  if printf '%s' "$FILE" | grep -qE "$pattern"; then
-    MATCHED="yes"
-    break
-  fi
-done < <(jq -r '.tier1_path_regexes[]? // empty' "$CONFIG")
+# Read tier1 regexes once (avoid re-reading per-file in the loop).
+TIER1_REGEXES="$(jq -r '.tier1_path_regexes[]? // empty' "$CONFIG")"
 
-[[ "$MATCHED" != "yes" ]] && exit 0
+# Walk every candidate path. Skip always-allow paths. Collect any that match
+# Tier 1 — if at least one matches, the whole tool call must satisfy the gate.
+TIER1_MATCHED=()
+while IFS= read -r FILE; do
+  [[ -z "$FILE" ]] && continue
+  case "$FILE" in
+    */.tdd/*|*/.claude/*|*.md|*/docs/*|*/specs/*|*/archive/*|*/CHANGELOG.md) continue ;;
+    *_test.go) continue ;;
+  esac
+  while IFS= read -r pattern; do
+    [[ -z "$pattern" ]] && continue
+    if printf '%s' "$FILE" | grep -qE "$pattern"; then
+      TIER1_MATCHED+=("$FILE")
+      break
+    fi
+  done <<< "$TIER1_REGEXES"
+done <<< "$PATHS"
 
-# Tier 1 path. TDD ceremony required.
+[[ ${#TIER1_MATCHED[@]} -eq 0 ]] && exit 0
+
+# At least one path matches Tier 1. TDD ceremony required.
+# Build a one-line file list for the deny message.
+FILE_LIST="$(printf '  %s\n' "${TIER1_MATCHED[@]}")"
+
 if [[ ! -f "$PLAN" ]]; then
   cat >&2 <<HOOK_MSG
-[require-tdd-state] BLOCKED edit to Tier 1 high-stakes path:
-  $FILE
+[require-tdd-state] BLOCKED edit to Tier 1 high-stakes path(s):
+$FILE_LIST
 
 <claude-directive>
 This is an AUTOMATED TDD GATE, not a user denial. No .tdd/current-plan.md
@@ -101,9 +124,8 @@ done < <(jq -r '.required_markers[]? // empty' "$CONFIG")
 
 if [[ ${#MISSING[@]} -gt 0 ]]; then
   cat >&2 <<HOOK_MSG
-[require-tdd-state] BLOCKED edit to Tier 1 high-stakes path:
-  $FILE
-
+[require-tdd-state] BLOCKED edit to Tier 1 high-stakes path(s):
+$FILE_LIST
 The plan at .tdd/current-plan.md is missing required markers:
 HOOK_MSG
   for m in "${MISSING[@]}"; do echo "  - $m" >&2; done

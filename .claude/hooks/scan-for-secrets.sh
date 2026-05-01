@@ -29,18 +29,63 @@ INPUT="$(cat)"
 TOOL="$(printf '%s' "$INPUT" | jq -r '.tool_name // ""')"
 FILE_PATH="$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // ""')"
 
-# Extract the content that would be written, regardless of tool shape.
-# - Write: .tool_input.content
-# - Edit:  .tool_input.new_string  (or the full new file_text for whole-file edits)
-# - MultiEdit: aggregate all new_strings
-CONTENT="$(printf '%s' "$INPUT" | jq -r '
-  [
-    (.tool_input.content // empty),
-    (.tool_input.new_string // empty),
-    (.tool_input.file_text // empty),
-    (.tool_input.edits[]?.new_string // empty)
-  ] | join("\n")
-')"
+# Extract content to scan. Two strategies:
+#
+# 1. Reconstruction (preferred for Edit / MultiEdit when python3 is available
+#    and the target file exists): apply the replacement to the file's current
+#    content and scan the result. Closes the "straddle" hole where a secret is
+#    split between an existing line prefix (`apikey = "`) and a new edit value
+#    (`sk_live_..."`); the snippet alone matches no pattern, but the result does.
+#
+# 2. Snippet-only fallback (Write tool, or python3 missing, or new file): scan
+#    the joined `content` / `new_string` / `file_text` / `edits[].new_string`
+#    snippets. This is what v1.0–1.1 did unconditionally.
+#
+# python3 is used because bash parameter expansion (`${var/pat/repl}`) treats
+# `pat` as a glob, which is wrong for arbitrary user content. Python's
+# str.replace handles arbitrary characters cleanly.
+
+CONTENT=""
+
+if command -v python3 >/dev/null 2>&1 \
+   && [ -n "$FILE_PATH" ] && [ -f "$FILE_PATH" ] \
+   && { [ "$TOOL" = "Edit" ] || [ "$TOOL" = "MultiEdit" ]; }; then
+  CONTENT="$(printf '%s' "$INPUT" | python3 -c '
+import sys, json
+data = json.load(sys.stdin)
+fp = data.get("tool_input", {}).get("file_path", "")
+try:
+    content = open(fp).read()
+except OSError:
+    sys.exit(0)
+tool = data.get("tool_name", "")
+ti = data.get("tool_input", {})
+if tool == "Edit":
+    old = ti.get("old_string", "")
+    new = ti.get("new_string", "")
+    if old:
+        content = content.replace(old, new, 1)
+elif tool == "MultiEdit":
+    for edit in ti.get("edits", []) or []:
+        old = edit.get("old_string", "")
+        new = edit.get("new_string", "")
+        if old:
+            content = content.replace(old, new, 1)
+sys.stdout.write(content)
+' 2>/dev/null || true)"
+fi
+
+# Fallback or non-Edit tools: scan the snippets directly.
+if [ -z "$CONTENT" ]; then
+  CONTENT="$(printf '%s' "$INPUT" | jq -r '
+    [
+      (.tool_input.content // empty),
+      (.tool_input.new_string // empty),
+      (.tool_input.file_text // empty),
+      (.tool_input.edits[]?.new_string // empty)
+    ] | join("\n")
+  ')"
+fi
 
 emit_decision() {
   jq -n --arg d "$1" --arg r "$2" '{

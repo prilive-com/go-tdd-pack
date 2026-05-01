@@ -84,6 +84,30 @@ else
   fail "three-segment Tier 1 should be blocked (got: '$out')"
 fi
 
+# v1.2.0: defensive multi-path extraction. files[] shape.
+out=$(echo '{"tool_input":{"files":[{"file_path":"internal/utils/helper.go"},{"file_path":"internal/payments/charge.go"}]}}' | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+if [[ "$out" == *"exit:2"* ]] && [[ "$out" == *"internal/payments/charge.go"* ]]; then
+  pass "MultiEdit files[] blocks if any Tier 1 path"
+else
+  fail "MultiEdit files[] should block (got: '$out')"
+fi
+
+# v1.2.0: defensive multi-path extraction. edits[].file_path shape.
+out=$(echo '{"tool_input":{"edits":[{"file_path":"internal/auth/jwt.go","old_string":"x","new_string":"y"}]}}' | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+if [[ "$out" == *"exit:2"* ]] && [[ "$out" == *"internal/auth/jwt.go"* ]]; then
+  pass "MultiEdit edits[].file_path blocks if Tier 1"
+else
+  fail "MultiEdit edits[].file_path should block (got: '$out')"
+fi
+
+# v1.2.0: all non-Tier-1 paths in a multi-path edit must pass.
+out=$(echo '{"tool_input":{"files":[{"file_path":"internal/utils/helper.go"},{"file_path":"docs/foo.md"}]}}' | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "MultiEdit with all non-Tier-1 paths passes"
+else
+  fail "MultiEdit with non-Tier-1 paths should pass (got: '$out')"
+fi
+
 echo
 echo "Testing guard-dangerous-bash.sh..."
 
@@ -197,6 +221,27 @@ if [ "$(echo "$out" | jq 'has("hookSpecificOutput")')" = "false" ]; then
   pass "harmless content passes"
 else
   fail "harmless content should pass (got: $out)"
+fi
+
+# v1.2.0: straddle case. The new_string alone is a harmless placeholder fragment
+# (`AKIA... within an empty assignment`); v1.1.x snippet-only scanning would not
+# catch the AWS-key shape because it never sees the assignment context. With
+# python3 reconstruction, the post-edit file content is scanned and the secret is
+# caught. Skipped gracefully if python3 is unavailable.
+if command -v python3 >/dev/null 2>&1; then
+  TMPDIR_STRADDLE=$(mktemp -d)
+  printf 'package x\n\nvar APIKey = ""\n' > "$TMPDIR_STRADDLE/x.go"
+  PAYLOAD="$(jq -n --arg fp "$TMPDIR_STRADDLE/x.go" '{tool_name:"Edit",tool_input:{file_path:$fp,old_string:"APIKey = \"\"",new_string:"APIKey = \"AKIAIOSFODNN7EXAMPLE\""}}')"
+  out=$(printf '%s' "$PAYLOAD" | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/scan-for-secrets.sh)
+  decision="$(echo "$out" | jq -r '.hookSpecificOutput.permissionDecision // "pass"')"
+  rm -rf "$TMPDIR_STRADDLE"
+  if [ "$decision" = "deny" ]; then
+    pass "straddle: secret value glued onto existing prefix denied"
+  else
+    fail "straddle case should be denied (got: $decision)"
+  fi
+else
+  pass "straddle test skipped (python3 not installed; snippet-only fallback)"
 fi
 
 echo
