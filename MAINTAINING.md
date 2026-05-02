@@ -259,15 +259,68 @@ Developers who do not want cross-model review never invoke the skill.
 Failures (codex missing, not logged in, timeout, network) are silent
 and non-blocking — the skill exits 0 with a one-line note.
 
-**Default model is the newest frontier (`gpt-5.5`).**
+**Tier-aware model selection (v1.2.0).**
 
-Per user direction. Newest model = best general reasoning quality.
-The constraint that GPT-5.5 requires ChatGPT auth (not API key) is
-fine because the user authenticates via `codex login` against their
-ChatGPT subscription. If the developer uses `CODEX_API_KEY` instead,
-they should override `SECOND_OPINION_MODEL=gpt-5.4` (or
-`gpt-5.3-codex` for cheaper) since GPT-5.5 is unavailable via API
-key.
+The skill auto-invokes on **any non-trivial code change**, not just
+Tier 1 paths. To keep cost and latency reasonable across that broad
+scope, the skill picks the model based on whether the diff touches a
+Tier 1 path:
+
+- Touches a Tier 1 path (per `.tdd/tdd-config.json` regexes) →
+  `SECOND_OPINION_MODEL_TIER1` (default `gpt-5.5`, the newest frontier).
+- Otherwise → `SECOND_OPINION_MODEL_DEFAULT` (default `gpt-5.4-mini`,
+  faster and cheaper).
+
+This converts the Tier 1 concept from "gating yes/no" into "how deep
+should the review be." Both defaults are overrideable per env var.
+`SECOND_OPINION_MODEL` (legacy single knob) still works — if set, both
+tiers use that model.
+
+`gpt-5.5` requires ChatGPT auth (not API key). If a developer has only
+`CODEX_API_KEY` set, the skill silently falls back to
+`SECOND_OPINION_FALLBACK_MODEL` (default `gpt-5.4`); `make doctor`
+warns about this combination so the developer knows what to expect.
+
+**Mechanical filters keep volume sensible.**
+
+Removing the Tier 1 path filter from auto-invocation means the skill
+could theoretically fire on every code change. To prevent noise and
+budget burn, the skill applies four cheap mechanical guards before
+invoking Codex on a diff:
+
+1. `skip_globs` — never review files matching these paths regardless
+   of size: `*.md`, `*.txt`, `CHANGELOG*`, `README*`, `LICENSE*`,
+   `.editorconfig`, `.gitignore`, `go.sum`, `.github/*`,
+   `.gitlab-ci.yml`. Keeps docs / lockfiles / CI configs out.
+2. `min_substantive_lines: 5` — drops whitespace-only and pure-comment
+   `+/-` lines from the count. A 50-line gofmt diff reads as 0
+   substantive lines and skips. A 6-line bug fix reviews.
+3. Lower bound: 10 total `+/-` lines.
+4. Upper bound: 2000 total `+/-` lines (lowered from 4000 in v1.2.0
+   per 2026 AI-review benchmarks — quality drops above ~1000-2000).
+
+If you want stricter scope (e.g. revert to Tier-1-only), set the env
+var `SECOND_OPINION_DISABLE=1` for non-Tier-1 sessions, or future
+versions can reintroduce a `tier1_only` mode if real usage shows the
+broad scope creates too much noise.
+
+**Why no rate budget / per-hour cap.**
+
+Consultant proposals included per-session and per-hour rate budgets
+(typical of hook-based CI tools like CodeRabbit). The skill mechanism
+already throttles naturally — Claude only invokes when its judgment
+matches the description. We don't ship the rate budget machinery
+because it solves a problem the skill architecture doesn't have.
+
+**Why no policy.json or new scripts.**
+
+A consultant proposed adding `.second-opinion/policy.json`, eight
+scripts (classify / build-packet / redact / run / check-adjudication /
+clean / route), and a templates directory. Rejected because the
+single-file skill is the right shape for "copy folder and forget."
+Adding nine files for one optional feature drifts the pack toward
+framework. If the trial shows the skill needs modes / state /
+templates, revisit in a later release with usage data.
 
 **Anti-deference framing in the prompt and in the skill body.**
 

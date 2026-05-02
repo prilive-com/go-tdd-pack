@@ -4,28 +4,33 @@ description: |
   Get a cross-model second opinion on a plan or code change before
   implementing it. Calls OpenAI Codex CLI (read-only) to review the
   current plan, the current diff, or a specific snippet. Returns
-  honest findings — not blocking, advisory only. Use this BEFORE
-  implementing non-trivial changes, especially on Tier 1 paths
-  (money, auth, migrations, anything matching .tdd/tdd-config.json
-  tier1_path_regexes), or when the user says "second opinion",
-  "ask codex", "what would another model think", or "/second-opinion".
+  honest findings — not blocking, advisory only. Use BEFORE any
+  non-trivial code change (Tier 1 or not), or when the user says
+  "second opinion", "ask codex", "what would another model think",
+  or "/second-opinion".
 when_to_use: |
-  Auto-invoke before:
-    - Implementing any Tier 1 plan that involves >50 lines or
-      cross-package logic.
-    - Fixing a Tier 1 bug whose root cause you are not 100% sure of.
-    - Any architecture / API design decision the user explicitly
-      asks you to think hard about.
+  Auto-invoke before any non-trivial code change, regardless of Tier:
+    - Implementing a new feature, function, type, or significant logic.
+    - Fixing a bug whose root cause you are not 100% sure of.
+    - Any cross-package or cross-file change.
+    - Any architecture / API design decision.
+    - Refactor that touches >30 lines or changes public API surface.
+    - Any change on a Tier 1 path (always, regardless of size; uses a
+      stronger model for these — see Step 3).
   Manually invoke when the user says:
     - "second opinion" / "ask codex" / "what would another model say"
     - "/second-opinion plan" / "/second-opinion diff" / "/second-opinion file <path>"
-  Skip when:
-    - The change is a typo, doc-only, formatting, or single-line bugfix.
+  Skip when (the truly trivial cases):
+    - The change is a typo, formatting, or doc-only edit.
+    - The change is a single-line bugfix with a mechanically obvious cause.
+    - The change is to non-code project files (.gitignore, .editorconfig,
+      CHANGELOG, README cosmetic edits) with no behavior impact.
     - You already have explicit user APPROVED on a Tier 1 plan and
       are mid-implementation (the spec gate already cleared it).
     - The user said "skip second opinion" or "/second-opinion off".
+    - SECOND_OPINION_DISABLE=1 is set, OR `codex` is not installed.
 license: MIT
-version: 1.0.0
+version: 1.2.0
 ---
 
 # Second Opinion (cross-model review via Codex CLI)
@@ -116,11 +121,44 @@ target_text="$(git diff HEAD 2>/dev/null)"
 target_kind="diff"
 [ -z "$target_text" ] && { echo "Nothing to review."; exit 0; }
 
-# Diff size guards (skip if too small or too large):
+# Diff filters. Skip cheaply before invoking Codex.
+# Universal scope (any Tier) means we add 3 mechanical guards to keep
+# review volume sensible:
+#   1. skip_globs — paths never worth reviewing (docs, lockfiles, CI)
+#   2. min_substantive_lines — whitespace / comment-only diffs skip
+#   3. upper bound — diffs >2000 lines overwhelm the reviewer (per 2026
+#      AI-review benchmarks; AI quality breaks down ~1000-2000 lines)
 if [ "$target_kind" = "diff" ]; then
+  # 1. Filter out files matching skip_globs. If nothing is left, skip.
+  changed_files="$(git diff --name-only HEAD 2>/dev/null)"
+  reviewable_files=()
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    case "$f" in
+      *.md|*.txt|CHANGELOG*|*/CHANGELOG*|README*|*/README*|LICENSE*|*/LICENSE*|.editorconfig|.gitignore|*/.gitignore|go.sum|*/go.sum|.github/*|*/.github/*|.gitlab-ci.yml)
+        continue ;;
+      *)
+        reviewable_files+=("$f") ;;
+    esac
+  done <<< "$changed_files"
+
+  if [ ${#reviewable_files[@]} -eq 0 ]; then
+    echo "All changed files are in skip_globs (docs / lockfiles / CI); skipping second opinion."
+    exit 0
+  fi
+
+  # Re-take the diff scoped to just the reviewable files.
+  target_text="$(git diff HEAD -- "${reviewable_files[@]}" 2>/dev/null)"
+
+  # 2. Total +/- lines.
   lines="$(printf '%s\n' "$target_text" | grep -cE '^[+-][^+-]' || true)"
-  [ "$lines" -lt 10 ]   && { echo "Diff too small ($lines lines); skipping second opinion."; exit 0; }
-  [ "$lines" -gt 4000 ] && { echo "Diff too large ($lines lines); split before reviewing."; exit 0; }
+
+  # 3. Substantive lines (drop blank-only and pure-comment +/- lines).
+  substantive="$(printf '%s\n' "$target_text" | grep -E '^[+-][^+-]' | grep -vE '^[+-][[:space:]]*$|^[+-][[:space:]]*//|^[+-][[:space:]]*#' | wc -l | tr -d ' ')"
+
+  [ "$lines" -lt 10 ]      && { echo "Diff too small ($lines lines); skipping second opinion."; exit 0; }
+  [ "$lines" -gt 2000 ]    && { echo "Diff too large ($lines lines); split before reviewing (AI review quality drops above ~2000 lines)."; exit 0; }
+  [ "$substantive" -lt 5 ] && { echo "Diff has only $substantive substantive lines (whitespace/comment-only); skipping."; exit 0; }
 fi
 
 # Redaction. Mirrors patterns from .claude/hooks/scan-for-secrets.sh plus
@@ -191,14 +229,45 @@ REDACT_FILE=".claude/redact-patterns.txt"
 [ ! -f "$REDACT_FILE" ] && REDACT_FILE=""
 export REDACT_FILE
 
-# Default to the newest Codex model. Override with SECOND_OPINION_MODEL.
-# - gpt-5.5: newest frontier; ChatGPT auth only (NOT API key).
-# - gpt-5.4: flagship; works with both auth modes.
-# - gpt-5.3-codex: most capable agentic coding model.
-# If the primary model fails (unavailable / auth mismatch), the skill
-# retries once with SECOND_OPINION_FALLBACK_MODEL (default gpt-5.4).
-model="${SECOND_OPINION_MODEL:-gpt-5.5}"
+# Tier-aware model selection.
+# Universal scope means we review every non-trivial change. To keep cost
+# and latency reasonable, use a stronger model only when it earns its
+# keep — Tier 1 paths (money, auth, migrations, etc.) get the deep model;
+# everything else gets a faster cheaper one.
+#
+# Override either default with env vars:
+#   SECOND_OPINION_MODEL_TIER1   (default gpt-5.5; ChatGPT auth only)
+#   SECOND_OPINION_MODEL_DEFAULT (default gpt-5.4-mini; works with both auths)
+#   SECOND_OPINION_MODEL         (legacy single-knob; if set, used for both)
+#   SECOND_OPINION_FALLBACK_MODEL (used if the primary fails; default gpt-5.4)
+
+tier1_model="${SECOND_OPINION_MODEL_TIER1:-${SECOND_OPINION_MODEL:-gpt-5.5}}"
+default_model="${SECOND_OPINION_MODEL_DEFAULT:-${SECOND_OPINION_MODEL:-gpt-5.4-mini}}"
 fallback_model="${SECOND_OPINION_FALLBACK_MODEL:-gpt-5.4}"
+
+# Decide which model to use. Look at changed paths against the project's
+# Tier 1 regexes (.tdd/tdd-config.json). If any matches, this is a Tier 1
+# change and we use the deep model.
+model="$default_model"
+tier_label="non-Tier-1"
+if [ -f .tdd/tdd-config.json ] && command -v jq >/dev/null 2>&1; then
+  tier1_regexes="$(jq -r '.tier1_path_regexes[]? // empty' .tdd/tdd-config.json 2>/dev/null)"
+  if [ -n "$tier1_regexes" ]; then
+    # Use the same path source whether plan/diff/file mode.
+    paths_to_check="${changed_files:-}"
+    [ -z "$paths_to_check" ] && paths_to_check="$(git diff --name-only HEAD 2>/dev/null)"
+    if [ -n "$paths_to_check" ]; then
+      while IFS= read -r pattern; do
+        [ -z "$pattern" ] && continue
+        if printf '%s\n' "$paths_to_check" | grep -qE "$pattern"; then
+          model="$tier1_model"
+          tier_label="Tier 1 (path matches /$pattern/)"
+          break
+        fi
+      done <<< "$tier1_regexes"
+    fi
+  fi
+fi
 
 prompt="$(cat <<EOF
 You are an external technical reviewer for a Go codebase. You are NOT the
@@ -247,6 +316,7 @@ OUTPUT — JSON only, no prose around it:
 PROJECT CONTEXT (first 200 lines of CLAUDE.md, redacted):
 $(head -n 200 CLAUDE.md 2>/dev/null | red_full)
 
+CHANGE SCOPE: $tier_label
 TARGET UNDER REVIEW (kind: $target_kind):
 $(printf '%s' "$target_text" | red_full)
 EOF
@@ -291,7 +361,7 @@ if [ -z "$response" ]; then
   exit 0
 fi
 
-printf '## Second opinion (model: %s)\n\n' "$used_model"
+printf '## Second opinion (scope: %s, model: %s)\n\n' "$tier_label" "$used_model"
 printf '%s\n' "$response"
 ```
 
