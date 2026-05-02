@@ -241,6 +241,107 @@ else
 fi
 
 echo
+echo "Testing require-second-opinion.sh (mandatory enforcement)..."
+
+# Use a temp project root so we don't touch the real .tdd/.
+TMPROOT_RSO=$(mktemp -d)
+cp -r .claude .tdd "$TMPROOT_RSO/" 2>/dev/null
+rm -f "$TMPROOT_RSO/.tdd/second-opinion-completed.md"
+
+# Code edit without adjudication file → must deny.
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"cmd/status/main.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_RSO" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "Edit on cmd/status/main.go without adjudication denied"
+else
+  fail "Edit without adjudication should be denied (got: $out)"
+fi
+
+# Mutating Bash without adjudication → must deny.
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"cat > internal/x.go <<EOF\npackage x\nEOF"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_RSO" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "Bash 'cat > file.go' without adjudication denied"
+else
+  fail "Bash bypass attempt should be denied (got: $out)"
+fi
+
+# Read-only Bash → must pass.
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"git status"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_RSO" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "Read-only Bash 'git status' passes through"
+else
+  fail "Read-only Bash should pass through (got: '$out')"
+fi
+
+# Edit on README.md → must pass (always-allow path).
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"README.md"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_RSO" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "Edit on README.md passes through (always-allow path)"
+else
+  fail "README.md should pass through (got: '$out')"
+fi
+
+# With adjudication file present → must pass.
+touch "$TMPROOT_RSO/.tdd/second-opinion-completed.md"
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"cmd/status/main.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_RSO" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "Edit allowed once adjudication artifact exists"
+else
+  fail "Edit with adjudication should pass (got: '$out')"
+fi
+
+# Killswitch → must pass.
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"cmd/status/main.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_RSO" SECOND_OPINION_DISABLE=1 \
+    timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "SECOND_OPINION_DISABLE=1 killswitch bypasses the hook"
+else
+  fail "killswitch should bypass (got: '$out')"
+fi
+
+rm -rf "$TMPROOT_RSO"
+
+echo
+echo "Testing guard-bash-pipefail.sh..."
+
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"go build ./... 2>&1 | head -10"}}' \
+  | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/guard-bash-pipefail.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "go build | head without pipefail denied"
+else
+  fail "go build | head without pipefail should be denied (got: $out)"
+fi
+
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"set -o pipefail; go build ./... 2>&1 | head -10"}}' \
+  | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/guard-bash-pipefail.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "set -o pipefail; go build | head allowed"
+else
+  fail "pipefail-protected pipe should pass (got: '$out')"
+fi
+
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"go build ./..."}}' \
+  | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/guard-bash-pipefail.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "go build alone (no pipe) passes"
+else
+  fail "go build without pipe should pass (got: '$out')"
+fi
+
+echo
 echo "Self-test: timeout wrapper kills a hanging hook within budget..."
 TMPHOOK="$(mktemp)"
 cat > "$TMPHOOK" <<'HANG'

@@ -25,6 +25,10 @@ CLAUDE.local.md
 # /second-opinion skill: codex stderr / debug capture (gitignored — may contain
 # code fragments and prompt content that should not enter git history)
 .tdd/second-opinion-debug.log
+# /second-opinion skill: per-cycle adjudication artifact (regenerated each cycle)
+.tdd/second-opinion-completed.md
+# require-second-opinion.sh enforcement audit log (local; contains paths only)
+.tdd/second-opinion-enforcement.log
 
 # TDD state (committed deliberately by default — uncomment to ignore in-flight)
 # .tdd/current-plan.md

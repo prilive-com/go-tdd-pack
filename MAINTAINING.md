@@ -357,6 +357,109 @@ value (rarely invoked, findings rarely useful, sycophancy creeps in),
 the branch is abandoned. main stays at the version before the skill
 was added.
 
+## Mandatory enforcement of /second-opinion (v1.3.0 of skill)
+
+The skill alone is not sufficient enforcement: it auto-invokes via
+description matching, which means Claude judges per task whether the
+description applies. In real use, Claude judged a non-trivial change
+("obvious cleanup" on cmd/status/main.go) as exempt and skipped the
+flow. The trial period surfaced this within 2 days.
+
+To make the flow truly mandatory, the pack adds two PreToolUse hooks
+on the `feature/second-opinion` branch:
+
+### `.claude/hooks/require-second-opinion.sh`
+
+Matches `Edit|Write|MultiEdit|Bash`. Mechanically denies code-changing
+tool calls until `.tdd/second-opinion-completed.md` exists with mtime
+within the last 60 minutes. The skill writes that file at the end of
+its workflow (Step 6 of SKILL.md).
+
+For Tier 1 paths, the hook ADDITIONALLY requires the existing TDD
+APPROVED markers in `.tdd/current-plan.md` (same as the existing
+`require-tdd-state.sh` hook — this hook is additive, not redundant).
+
+For trivial changes (docs, lockfiles, CI configs, files under
+`.tdd/` / `.claude/` / `.second-opinion/`), the hook passes through —
+its skip list mirrors the skill's skip_globs so the same set of
+trivial cases that the skill auto-skips also bypass the hook.
+
+For mutating Bash commands (`sed -i`, `gofmt -w`, `cat > file.go`,
+`tee`, `>> file.go`, `go mod tidy`, `go get`, `go install`, `truncate`,
+`perl -i`, `goimports -w`), the hook also denies if the
+adjudication artifact is missing. Without this, Claude could bypass
+Edit/Write/MultiEdit entirely by writing files via Bash.
+
+### `.claude/hooks/guard-bash-pipefail.sh`
+
+Matches `Bash`. Denies any command that pipes Go-tool output (`go
+build`, `go test`, `go vet`, `golangci-lint`, etc.) through another
+command (`head`, `tail`, `tee`, `grep`) without `set -o pipefail`.
+Without pipefail, the upstream tool's exit code is replaced by the
+downstream command's exit code (typically 0 for `head`/`tail`/`tee`),
+so real failures look like successes. This hook prevents that silent
+masking. Real failure example seen in production:
+`go build ./... 2>&1 | head -10 && echo "exit: $?"` reported exit 0
+despite the build failing.
+
+### Defense in depth (workaround for known PreToolUse bugs)
+
+Per known Claude Code bugs (anthropics/claude-code #37210, #18312,
+#41151, #21988, #4669), PreToolUse `permissionDecision: "deny"` is
+not 100% reliable on Edit. The deny may be silently ignored on macOS,
+or shadowed by a `Bash` entry in `permissions.allow`. The
+`require-second-opinion.sh` hook applies four redundant layers when
+denying:
+
+1. **chmod 444 the target file** (restored after 8 seconds). Even if
+   the JSON deny is ignored, the OS rejects the write.
+2. **JSON `permissionDecision: "deny"`** on stdout. Primary mechanism.
+3. **stderr message with `<claude-directive>` markup**. Works around
+   #24327 (Opus 4.6+ stop-instead-of-act on hook block).
+4. **Exit code 2**. Works around #41151 / #21988 (JSON deny ignored,
+   exit code respected by some Claude Code versions).
+
+`settings.json` deliberately does NOT include `Bash` in
+`permissions.allow` to avoid the #18312 shadow.
+
+### Killswitch
+
+`SECOND_OPINION_DISABLE=1` env var bypasses the hook entirely.
+Documented as "emergency only — use with explicit user approval."
+There is no file-marker bypass (deliberately — env var is harder to
+forget about than a file).
+
+### What this prevents
+
+The exact failure mode that occurred in real use:
+- Claude proposes `Edit(cmd/status/main.go)` for a "small cleanup"
+  without having invoked the second-opinion skill.
+- Hook fires, sees no adjudication artifact (or stale > 60 min).
+- Hook denies via four layers.
+- Claude reads the `<claude-directive>`, invokes the skill, writes
+  the adjudication, retries. Edit now succeeds.
+
+### What this does NOT add (rejected from a consultant's larger plan)
+
+- No `.devflow/` framework directory (would duplicate `.tdd/` with
+  no functional benefit).
+- No `policy.json` config file (existing `.tdd/tdd-config.json` is
+  the source of Tier 1 regexes).
+- No `current.json` state machine with multiple statuses (the
+  adjudication file's existence + mtime is the entire state).
+- No `expires_at` field (mtime-within-60-minutes serves the same
+  purpose).
+- No 8 lifecycle scripts (start/approve/waive/close/etc.) — the
+  skill writes the artifact, the hook reads it, that's the whole
+  protocol.
+- No per-component waiver mechanism (one env var is enough).
+- No 4-tier model (Tier 1 / non-Tier-1 covers the cases; existing
+  TDD config defines Tier 1).
+
+The combined design is mechanical enforcement at the right layer
+(PreToolUse) with redundancy for the known unreliability bugs,
+without scope-creeping into a framework.
+
 ## MCP server registration
 
 Project MCP servers live at `.mcp.json` in the repo root, NOT under

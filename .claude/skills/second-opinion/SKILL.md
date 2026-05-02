@@ -414,11 +414,52 @@ Then continue based on Tier:
 This skill **adds zero new manual steps**. The only operator inputs
 are the same TDD `APPROVED` gates you already had for Tier 1.
 
-### Step 6 — Do NOT auto-edit code based on the review
+### Step 6 — Write the adjudication artifact (REQUIRED)
+
+After Step 5, write a small artifact file. The
+`require-second-opinion.sh` PreToolUse hook checks this file before
+allowing any subsequent Edit / Write / MultiEdit / mutating-Bash call.
+Without this file, the next code-changing tool call will be **denied
+with exit 2**.
+
+Run this from the project root after you have decided on every finding:
+
+```bash
+mkdir -p .tdd
+cat > .tdd/second-opinion-completed.md <<EOF
+# Second opinion adjudication
+date: $(date -u +%FT%TZ)
+scope: <Tier 1 or non-Tier-1, copy the value from the chat header you printed>
+model: <the model name from the chat header>
+files_in_scope:
+$(printf '  - %s\n' "$@")
+findings_total: <N>
+adjudication_summary: |
+  <one paragraph summarizing your stance — accepts vs rejects vs
+   pushbacks, what changed in the plan/code as a result>
+adjudicated_by: claude
+EOF
+```
+
+The hook treats this file as valid for **60 minutes** from its mtime.
+After that window the hook treats it as stale and re-blocks. This is
+deliberate — adjudications should be tied to the work you just
+reviewed, not reused on a different change tomorrow.
+
+### Step 7 — Do NOT auto-edit code based on the review
 
 The skill is advisory. You may UPDATE A PLAN based on accepted
 findings. You may not silently EDIT PRODUCTION CODE based on
 findings without going through the normal user-approval flow.
+
+### When you skipped the skill (no adjudication needed)
+
+If the skill exited early (all changed files in skip_globs, diff too
+small, codex not installed, `SECOND_OPINION_DISABLE=1`), you do NOT
+write the adjudication file. The hook also skips for those cases —
+both the skill's filters and the hook's `is_always_allowed_path`
+function mirror the same skip list, so the hook will pass-through
+when the skill would skip.
 
 ## Anti-deference quick check
 
