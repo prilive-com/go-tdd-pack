@@ -234,6 +234,53 @@ if [[ "$adj_ok" != "true" ]]; then
        "no_second_opinion" "$TARGET"
 fi
 
+# PARTIAL discipline check (trial-feedback hardening): every 'stance: PARTIAL' entry in the
+# adjudication artifact must have a substantive 'rejected:' field. Catches
+# the sycophancy-theatre failure mode where Claude labels a finding
+# PARTIAL while functionally accepting 100% of it (label drift). Real
+# in-trial example: F2 labeled PARTIAL with 100% ACCEPT behaviour, no
+# rejected substance.
+#
+# Anti-patterns rejected: blank, nothing, n/a, none, -, <10 chars.
+# YAML comment lines (^# or ^[[:space:]]+#) are skipped — the template
+# carries commented-out hints for the conditional fields.
+partial_violation="$(awk '
+  /^[[:space:]]*#/ { next }
+  /^[[:space:]]*-[[:space:]]*id:/ {
+    if (in_finding && stance == "PARTIAL") {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", rejected_text)
+      lc = tolower(rejected_text)
+      if (rejected_text == "" || lc == "nothing" || lc == "n/a" || lc == "none" || lc == "-" || length(rejected_text) < 10) {
+        print current_id; exit 0
+      }
+    }
+    in_finding = 1; stance = ""; rejected_text = ""
+    sub(/.*id:[[:space:]]*/, "", $0); current_id = $0
+    next
+  }
+  /^[[:space:]]+stance:/ {
+    sub(/.*stance:[[:space:]]*/, "", $0); stance = $0; next
+  }
+  /^[[:space:]]+rejected:/ {
+    sub(/.*rejected:[[:space:]]*/, "", $0); rejected_text = $0; next
+  }
+  END {
+    if (in_finding && stance == "PARTIAL") {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", rejected_text)
+      lc = tolower(rejected_text)
+      if (rejected_text == "" || lc == "nothing" || lc == "n/a" || lc == "none" || lc == "-" || length(rejected_text) < 10) {
+        print current_id
+      }
+    }
+  }
+' "$ADJUDICATION" 2>/dev/null)"
+
+if [[ -n "$partial_violation" ]]; then
+  audit "partial_empty_rejection" "{\"finding\":\"$partial_violation\"}"
+  deny "PARTIAL stance on finding ${partial_violation} has empty/insubstantive 'rejected:' field (matches anti-pattern: blank/nothing/n/a/none/-/<10 chars). PARTIAL is the load-bearing slot for sycophancy-theatre (labeling PARTIAL while functionally accepting 100%). Fill 'rejected:' with a concrete claim you disagree with, or change the stance to ACCEPT/PUSHBACK. See .claude/skills/second-opinion/SKILL.md Step 4." \
+       "partial_empty_rejection" "$TARGET"
+fi
+
 # Tier 1 paths additionally require the existing TDD APPROVED markers.
 if [[ "$is_tier1" == "true" ]]; then
   if [[ ! -f "$TDD_PLAN" ]]; then

@@ -311,7 +311,180 @@ else
   fail "killswitch should bypass (got: '$out')"
 fi
 
+# PARTIAL discipline check (trial-feedback hardening): every 'stance: PARTIAL' must have a
+# substantive 'rejected:' field. Catches the sycophancy-theatre failure
+# mode where Claude labels PARTIAL while functionally accepting 100%.
+
+# PARTIAL with empty 'rejected:' → must deny.
+cat > "$TMPROOT_RSO/.tdd/second-opinion-completed.md" <<'EOF'
+# Second opinion adjudication
+date: 2026-05-03T00:00:00Z
+findings:
+  - id: F1
+    severity: P1
+    stance: PARTIAL
+    accepted: I will refactor the helper function as suggested.
+    rejected:
+    why_split: I agree with the reviewer here.
+adjudicated_by: claude
+EOF
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"cmd/status/main.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_RSO" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "PARTIAL with empty 'rejected:' field denied"
+else
+  fail "PARTIAL+empty rejected should be denied (got: $out)"
+fi
+
+# PARTIAL with anti-pattern 'rejected: nothing' → must deny.
+cat > "$TMPROOT_RSO/.tdd/second-opinion-completed.md" <<'EOF'
+# Second opinion adjudication
+date: 2026-05-03T00:00:00Z
+findings:
+  - id: F2
+    severity: P0
+    stance: PARTIAL
+    accepted: I will add the test the reviewer requested.
+    rejected: nothing
+    why_split: The reviewer is right on every point.
+adjudicated_by: claude
+EOF
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"cmd/status/main.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_RSO" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "PARTIAL with 'rejected: nothing' anti-pattern denied"
+else
+  fail "PARTIAL+'nothing' should be denied (got: $out)"
+fi
+
+# PARTIAL with substantive 'rejected:' → must pass.
+cat > "$TMPROOT_RSO/.tdd/second-opinion-completed.md" <<'EOF'
+# Second opinion adjudication
+date: 2026-05-03T00:00:00Z
+findings:
+  - id: F3
+    severity: P1
+    stance: PARTIAL
+    accepted: I will add the missing nil check at line 42.
+    rejected: The reviewer claims the whole function should be rewritten — that is over-scope; the bug is local.
+    why_split: The defect is real but the proposed scope is wrong; smaller fix matches the actual evidence.
+adjudicated_by: claude
+EOF
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"cmd/status/main.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_RSO" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "PARTIAL with substantive 'rejected:' field passes"
+else
+  fail "PARTIAL+substantive rejected should pass (got: '$out')"
+fi
+
+# ACCEPT stance does not need PARTIAL markers → must pass.
+cat > "$TMPROOT_RSO/.tdd/second-opinion-completed.md" <<'EOF'
+# Second opinion adjudication
+date: 2026-05-03T00:00:00Z
+findings:
+  - id: F4
+    severity: P2
+    stance: ACCEPT
+adjudicated_by: claude
+EOF
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"cmd/status/main.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_RSO" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "ACCEPT stance (no PARTIAL markers needed) passes"
+else
+  fail "ACCEPT stance should pass without PARTIAL markers (got: '$out')"
+fi
+
+# Mixed: PARTIAL with substantive rejected + ACCEPT in same file → must pass.
+cat > "$TMPROOT_RSO/.tdd/second-opinion-completed.md" <<'EOF'
+# Second opinion adjudication
+date: 2026-05-03T00:00:00Z
+findings:
+  - id: F5
+    severity: P1
+    stance: ACCEPT
+  - id: F6
+    severity: P2
+    stance: PARTIAL
+    accepted: I will rename the variable for clarity as suggested.
+    rejected: The reviewer suggests extracting a helper function — that adds indirection without payoff for a one-call site.
+    why_split: Renaming improves readability; helper extraction would be premature abstraction here.
+adjudicated_by: claude
+EOF
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"cmd/status/main.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_RSO" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "Mixed ACCEPT + valid PARTIAL passes"
+else
+  fail "Mixed valid adjudication should pass (got: '$out')"
+fi
+
 rm -rf "$TMPROOT_RSO"
+
+# redact-patterns loader (trial-feedback hardening): extract load_redact_patterns from SKILL.md
+# and run it against fixture files. Catches regression of the comment-
+# filter + regex-validator that protects against silent diff emptying.
+echo
+echo "Testing load_redact_patterns (extracted from SKILL.md)..."
+
+TMPRP=$(mktemp -d)
+# Extract the function definition from SKILL.md (between 'load_redact_patterns()' and the matching closing brace at column 0).
+awk '/^load_redact_patterns\(\) \{/,/^\}$/' .claude/skills/second-opinion/SKILL.md > "$TMPRP/lib.sh"
+echo "DEBUG_LOG=$TMPRP/debug.log" > "$TMPRP/runner.sh"
+cat "$TMPRP/lib.sh" >> "$TMPRP/runner.sh"
+echo 'load_redact_patterns "$1"' >> "$TMPRP/runner.sh"
+
+# Patterns file with comments, blanks, valid + invalid regex.
+cat > "$TMPRP/patterns.txt" <<'EOF'
+# Universal patterns (cloud keys, DB DSNs, ...)
+# Lines starting with hash are comments
+
+\bsvc-[a-z0-9]{8,}\b
+
+# This next one is malformed (unbalanced paren):
+\b(broken[a-z+\b
+\b[a-z]+\.internal\.example\.com\b
+EOF
+
+validated="$(bash "$TMPRP/runner.sh" "$TMPRP/patterns.txt" 2>/dev/null)"
+n="$(awk 'END {print NR}' "$validated" 2>/dev/null || echo 0)"
+if [ "$n" -eq 2 ]; then
+  pass "load_redact_patterns keeps 2 valid patterns from mixed file (got $n)"
+else
+  fail "load_redact_patterns expected 2 valid patterns; got $n. File contents: $(cat "$validated" 2>/dev/null)"
+fi
+
+# Comment-only file → empty validated output, no crash.
+cat > "$TMPRP/comments-only.txt" <<'EOF'
+# Just comments
+# Nothing to redact
+
+# More comments
+EOF
+validated="$(bash "$TMPRP/runner.sh" "$TMPRP/comments-only.txt" 2>/dev/null)"
+n="$(awk 'END {print NR}' "$validated" 2>/dev/null || echo 0)"
+if [ "$n" -eq 0 ]; then
+  pass "load_redact_patterns handles comment-only file (0 patterns, no crash)"
+else
+  fail "comment-only file should yield 0 patterns; got $n"
+fi
+
+# Invalid-regex log entry must appear in DEBUG_LOG.
+if grep -q 'invalid regex skipped' "$TMPRP/debug.log" 2>/dev/null; then
+  pass "load_redact_patterns logs invalid regex to DEBUG_LOG"
+else
+  fail "DEBUG_LOG should contain 'invalid regex skipped' entry"
+fi
+
+rm -rf "$TMPRP"
 
 echo
 echo "Testing guard-bash-pipefail.sh..."

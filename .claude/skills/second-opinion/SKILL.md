@@ -169,6 +169,50 @@ fi
 # Per-project patterns (internal hostnames, custom token formats, schema
 # names) go in .claude/redact-patterns.txt — see
 # .claude/redact-patterns.txt.example for the template.
+#
+# Trial-feedback hardening: load_redact_patterns() pre-filters the user file
+# (drops comments + blanks) AND validates each remaining regex with
+# grep -E before handing it to awk. Without this, a comment line like
+# "# Universal patterns (cloud keys...)" with an unbalanced "(" was
+# being parsed as regex and silently emptying the entire diff on
+# bsd-awk (macOS default). Codex was then invoked with an empty
+# TARGET and billed for nothing.
+
+DEBUG_LOG="${SECOND_OPINION_DEBUG_LOG:-.tdd/second-opinion-debug.log}"
+mkdir -p .tdd 2>/dev/null
+
+load_redact_patterns() {
+  # Read raw .claude/redact-patterns.txt; emit only non-comment,
+  # non-blank, regex-validated lines into a mktemp file. Bad lines
+  # are logged to DEBUG_LOG and skipped. Always returns 0 — a bad
+  # patterns file never blocks the hook; the redactor falls back to
+  # universal-only patterns.
+  local raw="$1"
+  [ -f "$raw" ] || return 0
+  local validated; validated="$(mktemp 2>/dev/null || echo "/tmp/redact.$$")"
+  local total=0 bad=0 rc=0
+  while IFS= read -r p || [ -n "$p" ]; do
+    # Skip blank lines and comments (allow leading whitespace).
+    printf '%s\n' "$p" | grep -qE '^[[:space:]]*[^[:space:]#]' || continue
+    total=$((total+1))
+    # grep -E exits 0 (match) or 1 (no match) on valid regex; >=2 on
+    # syntax error. Anything > 1 means the pattern is malformed.
+    rc=0
+    echo '' | grep -E -- "$p" >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -le 1 ]; then
+      printf '%s\n' "$p" >> "$validated"
+    else
+      bad=$((bad+1))
+      printf '[redact-patterns] WARN: invalid regex skipped: %s\n' "$p" \
+        >> "$DEBUG_LOG" 2>/dev/null || true
+    fi
+  done < "$raw"
+  if [ "$bad" -gt 0 ]; then
+    printf '[redact-patterns] %d/%d custom pattern(s) skipped as invalid; see %s.\n' \
+      "$bad" "$total" "$DEBUG_LOG" >&2
+  fi
+  printf '%s\n' "$validated"
+}
 
 red_pem_multiline() {
   if command -v python3 >/dev/null 2>&1; then
@@ -188,7 +232,15 @@ red() {
   awk '
     BEGIN {
       patfile = ENVIRON["REDACT_FILE"]
-      while (patfile != "" && (getline p < patfile) > 0) pats[++n] = p
+      # Patterns are pre-validated by load_redact_patterns. Belt-and-
+      # suspenders: still skip comment / blank lines here in case the
+      # loader is bypassed or extended later.
+      while (patfile != "" && (getline p < patfile) > 0) {
+        if (p ~ /^[[:space:]]*$/) continue
+        if (p ~ /^[[:space:]]*#/) continue
+        pats[++n] = p
+      }
+      close(patfile)
     }
     {
       line = $0
@@ -216,7 +268,8 @@ red() {
       gsub(/eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/, "[REDACTED-JWT]", line)
       # Inline bearer token
       gsub(/[Bb]earer[[:space:]]+[A-Za-z0-9._-]{20,}/, "Bearer [REDACTED]", line)
-      # Project-specific extras from .claude/redact-patterns.txt
+      # Project-specific extras from .claude/redact-patterns.txt (already
+      # comment-filtered AND regex-validated by load_redact_patterns).
       for (i = 1; i <= n; i++) gsub(pats[i], "[REDACTED]", line)
       print line
     }'
@@ -225,8 +278,8 @@ red() {
 # Pipeline: multi-line PEM scrub → line-oriented redaction.
 red_full() { red_pem_multiline | red; }
 
-REDACT_FILE=".claude/redact-patterns.txt"
-[ ! -f "$REDACT_FILE" ] && REDACT_FILE=""
+# Build the validated patterns file (or empty if user has none).
+REDACT_FILE="$(load_redact_patterns .claude/redact-patterns.txt)"
 export REDACT_FILE
 
 # Tier-aware model selection.
@@ -266,6 +319,34 @@ if [ -f .tdd/tdd-config.json ] && command -v jq >/dev/null 2>&1; then
         fi
       done <<< "$tier1_regexes"
     fi
+  fi
+fi
+
+# Run redaction once and validate before invoking Codex. Without this
+# guard, a malformed redact pattern or an over-broad regex can silently
+# strip the diff to nothing — Codex is invoked with an empty TARGET,
+# returns "no diff content provided", and the audit log records a
+# "successful" review with zero findings. Both billing waste and audit
+# corruption.
+redacted_target="$(printf '%s' "$target_text" | red_full)"
+target_len=${#target_text}
+redacted_len=${#redacted_target}
+
+# 50-byte minimum: a real plan/diff has at least a header line.
+if [ "$redacted_len" -lt 50 ]; then
+  echo "Redaction produced ${redacted_len} bytes from ${target_len} bytes input; skipping second opinion." >&2
+  echo "Likely cause: malformed/over-broad pattern in .claude/redact-patterns.txt — see ${DEBUG_LOG}." >&2
+  exit 0
+fi
+
+# Ratio check: any input >100 bytes should retain >10% post-redaction.
+# Below that, a single overly broad pattern is probably eating everything.
+if [ "$target_len" -gt 100 ]; then
+  ratio_pct=$(( redacted_len * 100 / target_len ))
+  if [ "$ratio_pct" -lt 10 ]; then
+    echo "Redaction stripped ${ratio_pct}% of input (raw: ${target_len}B, redacted: ${redacted_len}B); skipping second opinion." >&2
+    echo "Likely cause: over-broad pattern in .claude/redact-patterns.txt — see ${DEBUG_LOG}." >&2
+    exit 0
   fi
 fi
 
@@ -318,7 +399,7 @@ $(head -n 200 CLAUDE.md 2>/dev/null | red_full)
 
 CHANGE SCOPE: $tier_label
 TARGET UNDER REVIEW (kind: $target_kind):
-$(printf '%s' "$target_text" | red_full)
+$redacted_target
 EOF
 )"
 
@@ -376,10 +457,30 @@ The response is JSON. Parse it. For each finding:
      followed by 3+ sentences explaining the underlying technical claim.
      The phrase is a discipline marker — it forces you to articulate
      "why" instead of silently deferring.
-   - **P0 reject / partial**: write at least 3 sentences of rationale.
+   - **PARTIAL stance at any severity** (most-abused slot — see below):
+     MUST include all three sub-sections, each with substantive content:
+     ```
+     What I am accepting: <concrete change you are making>
+     What I am rejecting: <concrete claim you disagree with — NOT "nothing"/"n/a"/"none">
+     Why this split is correct: <≥2 sentences explaining the partition>
+     ```
+   - **P0 reject**: write at least 3 sentences of rationale.
    - **P1**: at least 2 sentences if not plain accept.
    - **P2**: 1 sentence is enough; silent accept OK.
    - **P3**: optional rationale.
+
+   PARTIAL is the load-bearing case because two failure modes hide there:
+   - **Sycophancy theatre**: accepting 100% of the finding while labeling
+     PARTIAL to look more independent.
+   - **Deference theatre**: rejecting 100% of the finding while labeling
+     PARTIAL to look polite.
+
+   If you cannot fill all three sub-sections with substantive content,
+   you do not have a PARTIAL — you have an ACCEPT or a PUSHBACK. Choose
+   the honest label. The `require-second-opinion.sh` hook scans the
+   adjudication artifact (Step 6) and denies the next code-changing
+   tool call if any PARTIAL entry has an empty `What I am rejecting:`
+   field (`nothing`, `n/a`, `none`, `-`, blank).
 
 4. **Anti-deference rules:**
    - "External reviewer flagged X" is NEVER the reason. The reason
@@ -437,6 +538,19 @@ findings_total: <N>
 adjudication_summary: |
   <one paragraph summarizing your stance — accepts vs rejects vs
    pushbacks, what changed in the plan/code as a result>
+findings:
+  # One block per finding. Required keys: id, severity, stance.
+  # PARTIAL stance ALSO requires: accepted, rejected, why_split (each
+  # substantive — "nothing"/"n/a"/"none"/blank are rejected by the hook).
+  - id: F1
+    severity: <P0|P1|P2|P3>
+    stance: <ACCEPT|REJECT|PARTIAL|PUSHBACK>
+    # For PARTIAL only:
+    # accepted: <what you are taking from the finding>
+    # rejected: <what you disagree with — substantive, not "nothing">
+    # why_split: <≥2 sentences>
+    # For P0 ACCEPT only:
+    # why_correct: <≥3 sentences explaining the technical claim>
 adjudicated_by: claude
 EOF
 ```
