@@ -42,8 +42,8 @@ test BEFORE root-cause analysis.
 ### Gate 1 - User confirms reproduction
 
 Stop and ask: **"Bug reproduced as a failing test. Red proof at
-`.tdd/red-proof.md`. Is this the right reproduction? Reply APPROVED or
-correct."**
+`.tdd/red-proof.md`. Is this the right reproduction? Reply
+`APPROVED SPEC` (or plain `APPROVED`) to confirm, or `CHANGES <reason>`."**
 
 After APPROVED, set:
 
@@ -63,28 +63,48 @@ Human approved spec: yes
 3. Identify the **minimum fix** (no scope creep).
 4. Identify **adjacent code paths** that could share the same root cause.
 
-### Gate 2 - User approves the fix
+### Gate 2 - Green authorization (red proof valid AND fix may begin)
 
 Stop and ask: **"Root cause documented. Minimum fix identified at
-`.tdd/current-plan.md`. Reply APPROVED to begin implementation."**
+`.tdd/current-plan.md`. Reply `APPROVED GREEN` (or plain `APPROVED`)
+to authorize the fix implementation, or `CHANGES <reason>`. Note:
+APPROVED GREEN means red proof is valid AND I can begin implementing
+the fix."**
 
 After APPROVED, set:
 
 ```
 Red phase confirmed: yes
-Human approved implementation: yes
+Green phase authorized: yes
 ```
 
-The hook now permits Edit/Write on Tier 1 paths.
+The edit-time hooks now permit Edit/Write on Tier 1 production paths.
 
 ### Phase 3 - Fix
 
-1. Apply the minimum fix. Do NOT edit the failing test.
+1. Apply the minimum fix. Do NOT edit the failing test (the phase-aware
+   test policy will deny test edits after `Red phase confirmed: yes`).
 2. Run the failing test. Must go green.
 3. Run full sweep: `go test -race -count=1 ./...`. Must be green.
-4. Add regression tests for adjacent code paths.
-5. Set markers: `Fix applied: yes`, `Regression tests added: yes`.
-6. Commit:
+4. Capture verbatim passing test output to `.tdd/green-proof.md`.
+5. Add regression tests for adjacent code paths.
+6. Set markers: `Fix applied: yes`, `Regression tests added: yes`.
+
+### Gate 3 - Implementation review (commit gate)
+
+1. Run `/second-opinion diff` on the staged Tier 1 fix diff. Adjudicate
+   findings; the skill writes `.tdd/second-opinion-completed.md`.
+2. Stop and ask: **"Fix complete. Diff is staged.
+   `.tdd/green-proof.md` and `.tdd/second-opinion-completed.md` are
+   ready. Reply `APPROVED IMPLEMENTATION` (or plain `APPROVED`) to
+   authorize the green commit, or `CHANGES <reason>`."**
+3. After APPROVED, set:
+
+   ```
+   Implementation reviewed: yes
+   ```
+
+4. Commit:
 
    ```
    git commit -m "red(<id>): tests pin <bug>"  (if not already done)
@@ -100,18 +120,20 @@ The hook now permits Edit/Write on Tier 1 paths.
 
 ### Phase 5 - Final state
 
-1. Confirm all markers are `yes`.
+1. Confirm all four gate markers are `yes`.
 2. Update CHANGELOG.md.
 3. Report back: bug summary, root cause, fix scope, regression tests
    added.
 
 ## Gate vocabulary
 
-- **APPROVED** - advance phase
-- **CHANGES <reason>** - revise, re-ask
-- **STOP** - halt
+- **APPROVED SPEC** / `APPROVED` (gate 1) — confirm reproduction
+- **APPROVED GREEN** / `APPROVED` (gate 2) — authorize fix implementation
+- **APPROVED IMPLEMENTATION** / `APPROVED` (gate 3) — allow commit
+- **CHANGES <reason>** — revise, re-ask
+- **STOP** — halt
 
-Never self-approve.
+Never self-approve any of the four markers.
 
 ## Failure modes to avoid
 

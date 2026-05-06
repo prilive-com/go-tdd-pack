@@ -5,10 +5,17 @@ Cycle ID: <ID>
 Change type: bugfix
 Tier: <1|2|3>
 
+<!-- TDD ceremony markers. Set each ONLY after the matching operator APPROVED reply. -->
+<!-- Four-gate model — see docs/specs/tdd-gate-conflict-resolution-spec.md -->
+<!--   M1 (gate 1 — APPROVED SPEC):           Human approved spec -->
+<!--   M2 (set after red proof captured):      Red phase confirmed -->
+<!--   M3 (gate 2 — APPROVED GREEN):           Green phase authorized -->
+<!--   M4 (gate 3 — APPROVED IMPLEMENTATION): Implementation reviewed -->
 Bug reproduced: no
 Human approved spec: no
 Red phase confirmed: no
-Human approved implementation: no
+Green phase authorized: no
+Implementation reviewed: no
 Fix applied: no
 Regression tests added: no
 Bug-elsewhere check complete: no

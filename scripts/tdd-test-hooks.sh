@@ -515,6 +515,304 @@ else
 fi
 
 echo
+echo "Testing 4-marker model + alias + phase-aware test policy (require-tdd-state.sh)..."
+
+# Set up an isolated project root with the .tdd/.claude pack so the hook
+# reads the new config via CLAUDE_PROJECT_DIR.
+TMPROOT_TDD=$(mktemp -d)
+mkdir -p "$TMPROOT_TDD/.tdd" "$TMPROOT_TDD/.claude"
+cp .tdd/tdd-config.json "$TMPROOT_TDD/.tdd/"
+
+# Test: M1+M2 yes, M3 missing → deny (the deadlock state from the trial run).
+cat > "$TMPROOT_TDD/.tdd/current-plan.md" <<'EOF'
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: no
+Implementation reviewed: no
+EOF
+out=$(echo '{"tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_TDD" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+if [[ "$out" == *"exit:2"* ]] && [[ "$out" == *"Green phase authorized"* ]]; then
+  pass "Tier 1 prod edit with M3=no denied (deadlock state)"
+else
+  fail "M3=no should deny with new marker name (got: '$out')"
+fi
+
+# Test: M1+M2+M3 (new name) yes → allow.
+cat > "$TMPROOT_TDD/.tdd/current-plan.md" <<'EOF'
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: yes
+Implementation reviewed: no
+EOF
+out=$(echo '{"tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_TDD" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "Tier 1 prod edit with M1+M2+M3 (new names) allowed"
+else
+  fail "All 3 edit-time markers should allow (got: '$out')"
+fi
+
+# Test: alias — old "Human approved implementation: yes" honored as M3.
+cat > "$TMPROOT_TDD/.tdd/current-plan.md" <<'EOF'
+Human approved spec: yes
+Red phase confirmed: yes
+Human approved implementation: yes
+EOF
+out=$(echo '{"tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_TDD" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]] && [[ "$out" == *"DEPRECATION"* ]]; then
+  pass "Tier 1 prod edit with old marker alias allowed + deprecation warning"
+else
+  fail "Old marker name should be aliased with deprecation (got: '$out')"
+fi
+
+# Test: phase-aware test policy — _test.go in Tier 1 dir before red confirmed → allow.
+cat > "$TMPROOT_TDD/.tdd/current-plan.md" <<'EOF'
+Human approved spec: yes
+Red phase confirmed: no
+EOF
+out=$(echo '{"tool_input":{"file_path":"internal/auth/handler_test.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_TDD" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "Tier 1 _test.go edit in red phase (M2=no) allowed"
+else
+  fail "Test edit in red phase should allow (got: '$out')"
+fi
+
+# Test: phase-aware test policy — _test.go after red confirmed → deny.
+cat > "$TMPROOT_TDD/.tdd/current-plan.md" <<'EOF'
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: no
+EOF
+out=$(echo '{"tool_input":{"file_path":"internal/auth/handler_test.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_TDD" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+if [[ "$out" == *"exit:2"* ]] && [[ "$out" == *"after red phase confirmed"* ]]; then
+  pass "Tier 1 _test.go edit after red confirmed denied (phase-aware policy)"
+else
+  fail "Test edit after red confirmed should deny (got: '$out')"
+fi
+
+# Test: emergency override — allow_after_red_confirmed=true permits the edit.
+cp .tdd/tdd-config.json "$TMPROOT_TDD/.tdd/tdd-config.json"
+jq '.test_file_policy.allow_after_red_confirmed = true' \
+  "$TMPROOT_TDD/.tdd/tdd-config.json" > "$TMPROOT_TDD/.tdd/tdd-config.json.tmp" \
+  && mv "$TMPROOT_TDD/.tdd/tdd-config.json.tmp" "$TMPROOT_TDD/.tdd/tdd-config.json"
+out=$(echo '{"tool_input":{"file_path":"internal/auth/handler_test.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_TDD" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "allow_after_red_confirmed=true overrides phase-aware deny"
+else
+  fail "emergency override should allow (got: '$out')"
+fi
+
+# Restore config
+cp .tdd/tdd-config.json "$TMPROOT_TDD/.tdd/tdd-config.json"
+
+# Test: non-Tier-1 _test.go — never gated, regardless of phase.
+cat > "$TMPROOT_TDD/.tdd/current-plan.md" <<'EOF'
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+out=$(echo '{"tool_input":{"file_path":"internal/utils/helper_test.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_TDD" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "Non-Tier-1 _test.go edit always allowed (regardless of phase)"
+else
+  fail "Non-Tier-1 test edit should always allow (got: '$out')"
+fi
+
+rm -rf "$TMPROOT_TDD"
+
+echo
+echo "Testing gate-tier1-commit.sh (commit-time gate)..."
+
+# Set up a real git repo so the hook can run `git diff --cached`.
+TMPROOT_GTC=$(mktemp -d)
+git init -q "$TMPROOT_GTC"
+( cd "$TMPROOT_GTC" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMPROOT_GTC/.tdd" "$TMPROOT_GTC/.claude" "$TMPROOT_GTC/internal/auth" "$TMPROOT_GTC/internal/utils"
+cp .tdd/tdd-config.json "$TMPROOT_GTC/.tdd/"
+echo "package auth" > "$TMPROOT_GTC/internal/auth/handler.go"
+echo "package utils" > "$TMPROOT_GTC/internal/utils/helper.go"
+( cd "$TMPROOT_GTC" && git add . && git commit -q -m "initial" )
+
+# Stage a Tier 1 production edit.
+echo "// modified" >> "$TMPROOT_GTC/internal/auth/handler.go"
+( cd "$TMPROOT_GTC" && git add internal/auth/handler.go )
+
+# Test: git commit with Tier 1 staged but plan missing M4 → deny.
+cat > "$TMPROOT_GTC/.tdd/current-plan.md" <<'EOF'
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: yes
+Implementation reviewed: no
+EOF
+out=$(echo '{"tool_input":{"command":"git commit -m \"green(test): impl\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GTC" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "git commit on Tier 1 with M4=no denied"
+else
+  fail "M4=no commit should deny (got: $out)"
+fi
+
+# Test: red() commit is exempt — even with M4=no, should allow.
+out=$(echo '{"tool_input":{"command":"git commit -m \"red(test): failing tests\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GTC" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "red() commit exempt from M4 check"
+else
+  fail "red() commit should be exempt (got: '$out')"
+fi
+
+# Test: M4 yes but green-proof missing → deny.
+cat > "$TMPROOT_GTC/.tdd/current-plan.md" <<'EOF'
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: yes
+Implementation reviewed: yes
+EOF
+out=$(echo '{"tool_input":{"command":"git commit -m \"green(test): impl\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GTC" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "Commit denied when green-proof.md missing"
+else
+  fail "Missing green-proof should deny (got: $out)"
+fi
+
+# Test: M4 yes + green-proof but no adjudication → deny.
+echo "green output" > "$TMPROOT_GTC/.tdd/green-proof.md"
+out=$(echo '{"tool_input":{"command":"git commit -m \"green(test): impl\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GTC" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "Commit denied when adjudication missing"
+else
+  fail "Missing adjudication should deny (got: $out)"
+fi
+
+# Test: all gates satisfied → allow.
+touch "$TMPROOT_GTC/.tdd/second-opinion-completed.md"
+out=$(echo '{"tool_input":{"command":"git commit -m \"green(test): impl\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GTC" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "Commit allowed when M4 + green-proof + fresh adjudication present"
+else
+  fail "All gates satisfied should allow (got: '$out')"
+fi
+
+# Test: stale adjudication (>60min) → deny.
+touch -t 202001010000 "$TMPROOT_GTC/.tdd/second-opinion-completed.md"
+out=$(echo '{"tool_input":{"command":"git commit -m \"green(test): impl\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GTC" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "Stale adjudication (>60min mtime) denied"
+else
+  fail "Stale adjudication should deny (got: $out)"
+fi
+touch "$TMPROOT_GTC/.tdd/second-opinion-completed.md"  # restore freshness
+
+# Test: only non-Tier-1 staged → always allow regardless of markers.
+( cd "$TMPROOT_GTC" && git restore --staged . 2>/dev/null && git checkout -- internal/auth/handler.go )
+echo "// utils mod" >> "$TMPROOT_GTC/internal/utils/helper.go"
+( cd "$TMPROOT_GTC" && git add internal/utils/helper.go )
+cat > "$TMPROOT_GTC/.tdd/current-plan.md" <<'EOF'
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: yes
+Implementation reviewed: no
+EOF
+out=$(echo '{"tool_input":{"command":"git commit -m \"chore: utils\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GTC" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "Non-Tier-1 commit allowed regardless of M4"
+else
+  fail "Non-Tier-1 commit should always allow (got: '$out')"
+fi
+
+# Test: false positive — bash command containing literal "git commit" in
+# argument body but not as the actual command should NOT match.
+out=$(echo '{"tool_input":{"command":"echo \"git commit how-to: see docs\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GTC" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "echo containing 'git commit' inside string passes through"
+else
+  fail "echo with 'git commit' in string should pass (got: '$out')"
+fi
+
+# Test: killswitch.
+echo "// re-mod" >> "$TMPROOT_GTC/internal/auth/handler.go"
+( cd "$TMPROOT_GTC" && git add internal/auth/handler.go )
+cat > "$TMPROOT_GTC/.tdd/current-plan.md" <<'EOF'
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: yes
+Implementation reviewed: no
+EOF
+out=$(echo '{"tool_input":{"command":"git commit -m \"green(test): impl\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GTC" TDD_COMMIT_GATE_DISABLE=1 \
+    timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "TDD_COMMIT_GATE_DISABLE=1 killswitch bypasses commit gate"
+else
+  fail "killswitch should bypass (got: '$out')"
+fi
+
+rm -rf "$TMPROOT_GTC"
+
+echo
+echo "Testing migrate-tdd-markers.sh..."
+
+TMPROOT_MIG=$(mktemp -d)
+mkdir -p "$TMPROOT_MIG/.tdd"
+cat > "$TMPROOT_MIG/.tdd/old-plan.md" <<'EOF'
+# Plan
+
+Human approved spec: yes
+Red phase confirmed: yes
+Human approved implementation: no
+EOF
+bash scripts/migrate-tdd-markers.sh "$TMPROOT_MIG/.tdd/old-plan.md" >/dev/null 2>&1
+if grep -qF 'Green phase authorized: no' "$TMPROOT_MIG/.tdd/old-plan.md" \
+   && grep -qF 'Implementation reviewed: no' "$TMPROOT_MIG/.tdd/old-plan.md" \
+   && ! grep -qF 'Human approved implementation:' "$TMPROOT_MIG/.tdd/old-plan.md"; then
+  pass "migrate-tdd-markers.sh renames M3 + adds M4"
+else
+  fail "migration script did not produce expected output (got: $(cat "$TMPROOT_MIG/.tdd/old-plan.md"))"
+fi
+
+# Idempotent: running again should be a no-op.
+before="$(cat "$TMPROOT_MIG/.tdd/old-plan.md")"
+bash scripts/migrate-tdd-markers.sh "$TMPROOT_MIG/.tdd/old-plan.md" >/dev/null 2>&1
+after="$(cat "$TMPROOT_MIG/.tdd/old-plan.md")"
+if [ "$before" = "$after" ]; then
+  pass "migrate-tdd-markers.sh is idempotent on already-migrated plan"
+else
+  fail "second run mutated plan (before vs after differ)"
+fi
+
+rm -rf "$TMPROOT_MIG"
+
+echo
 echo "Self-test: timeout wrapper kills a hanging hook within budget..."
 TMPHOOK="$(mktemp)"
 cat > "$TMPHOOK" <<'HANG'

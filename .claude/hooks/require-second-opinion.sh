@@ -281,17 +281,55 @@ if [[ -n "$partial_violation" ]]; then
        "partial_empty_rejection" "$TARGET"
 fi
 
-# Tier 1 paths additionally require the existing TDD APPROVED markers.
+# Tier 1 paths additionally require the edit-time TDD APPROVED markers.
+# 2026-05-05 redesign: M1 + M2 + M3 (spec, red, green-authorized). M4
+# (Implementation reviewed) is checked at commit time by gate-tier1-commit.sh,
+# not here. Backwards-compat alias: old "Human approved implementation: yes"
+# is accepted for "Green phase authorized: yes" with stderr deprecation.
 if [[ "$is_tier1" == "true" ]]; then
   if [[ ! -f "$TDD_PLAN" ]]; then
     deny "Tier 1 path ($TARGET) requires .tdd/current-plan.md with APPROVED markers from the operator." \
          "tier1_no_plan" "$TARGET"
   fi
-  for marker in "Human approved spec: yes" "Red phase confirmed: yes" "Human approved implementation: yes"; do
-    if ! grep -qF "$marker" "$TDD_PLAN" 2>/dev/null; then
-      deny "Tier 1 path ($TARGET) missing TDD marker in .tdd/current-plan.md: '$marker'. Complete the TDD ceremony before edit." \
-           "tier1_marker_missing" "$TARGET"
+  TDD_CONFIG_FILE="${ROOT}/.tdd/tdd-config.json"
+  # Resolve required edit-time markers from config (prefer the new field).
+  required_markers=()
+  if [[ -f "$TDD_CONFIG_FILE" ]] && command -v jq >/dev/null 2>&1; then
+    while IFS= read -r m; do
+      [[ -n "$m" ]] && required_markers+=("$m")
+    done < <(jq -r '
+      if (.required_markers_edit_time | type) == "array"
+      then .required_markers_edit_time[]?
+      else .required_markers[]? // empty
+      end
+    ' "$TDD_CONFIG_FILE" 2>/dev/null)
+  fi
+  # Sane default if config missing or empty (matches the new 4-marker design).
+  if [[ ${#required_markers[@]} -eq 0 ]]; then
+    required_markers=("Human approved spec: yes" "Red phase confirmed: yes" "Green phase authorized: yes")
+  fi
+  # Read marker_aliases (new -> old) for backwards-compat.
+  alias_pairs=""
+  if [[ -f "$TDD_CONFIG_FILE" ]] && command -v jq >/dev/null 2>&1; then
+    alias_pairs="$(jq -r '.marker_aliases // {} | to_entries[] | "\(.key)\t\(.value)"' "$TDD_CONFIG_FILE" 2>/dev/null || true)"
+  fi
+  for marker in "${required_markers[@]}"; do
+    if grep -qF "$marker" "$TDD_PLAN" 2>/dev/null; then
+      continue
     fi
+    # Try alias.
+    alias=""
+    if [[ -n "$alias_pairs" ]]; then
+      while IFS=$'\t' read -r k v; do
+        [[ "$k" == "$marker" ]] && alias="$v"
+      done <<< "$alias_pairs"
+    fi
+    if [[ -n "$alias" ]] && grep -qF "$alias" "$TDD_PLAN" 2>/dev/null; then
+      echo "[require-second-opinion] DEPRECATION: plan uses old marker '$alias' (renamed to '$marker'). Run scripts/migrate-tdd-markers.sh." >&2
+      continue
+    fi
+    deny "Tier 1 path ($TARGET) missing TDD edit-time marker in .tdd/current-plan.md: '$marker'. Complete the matching gate before editing — see docs/specs/tdd-gate-conflict-resolution-spec.md." \
+         "tier1_marker_missing" "$TARGET"
   done
 fi
 

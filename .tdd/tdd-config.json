@@ -18,11 +18,37 @@
     "notification", "email", "sms", "webhook",
     "idempotency", "reconciliation", "queue", "worker", "rollback"
   ],
-  "allow_test_file_edits_without_gate": true,
   "allow_docs_and_claude_edits_without_gate": true,
+
+  "_test_file_policy_doc": "Phase-aware test-file policy. Replaces the older allow_test_file_edits_without_gate flag. Test edits are allowed during spec/red phases (writing failing tests), denied after red is confirmed (the documented 'don't edit tests in green phase' rule). Set allow_after_red_confirmed: true only when the operator explicitly authorizes return to red — document reason in commit message.",
+  "test_file_policy": {
+    "allow_before_spec_approved": true,
+    "allow_in_red_phase": true,
+    "allow_after_red_confirmed": false
+  },
+
+  "_markers_doc": "Four-marker TDD ceremony. Edit-time hooks (require-tdd-state, require-second-opinion Tier-1 leg) require the first three; commit-time hook (gate-tier1-commit) additionally requires the fourth. Setting any marker without the matching operator APPROVED reply is self-approval and is forbidden.",
+  "required_markers_edit_time": [
+    "Human approved spec: yes",
+    "Red phase confirmed: yes",
+    "Green phase authorized: yes"
+  ],
+  "required_markers_commit_time": [
+    "Human approved spec: yes",
+    "Red phase confirmed: yes",
+    "Green phase authorized: yes",
+    "Implementation reviewed: yes"
+  ],
+
+  "_marker_aliases_doc": "Backwards-compat aliases. The hook accepts the old name but emits a stderr deprecation warning. Drop in next major version (2026-Q3 target).",
+  "marker_aliases": {
+    "Green phase authorized: yes": "Human approved implementation: yes"
+  },
+
+  "_legacy_required_markers_doc": "Used by the existing require-tdd-state.sh path for backwards-compat. Reads the new edit-time markers; old name is honored via alias.",
   "required_markers": [
     "Human approved spec: yes",
     "Red phase confirmed: yes",
-    "Human approved implementation: yes"
+    "Green phase authorized: yes"
   ]
 }

@@ -11,6 +11,17 @@
 #   reports of Opus 4.6+ stopping on hook blocks instead of acting on
 #   the feedback.
 # - jq is required. The hook fails closed with a clear error if jq is missing.
+#
+# 2026-05-05 redesign (see docs/specs/tdd-gate-conflict-resolution-spec.md):
+# - Four-marker model. Edit-time markers are M1+M2+M3 (spec, red, green-
+#   authorized). M4 (Implementation reviewed) is checked at commit time
+#   by gate-tier1-commit.sh, not here.
+# - Backwards-compat alias: old "Human approved implementation: yes" is
+#   honored as "Green phase authorized: yes" with a stderr deprecation
+#   warning. Drop the alias in the next major version.
+# - Phase-aware test-file policy. Tier-1 test files are no longer always
+#   exempt; they are governed by .test_file_policy in the config so the
+#   "don't edit tests in green phase" rule can be enforced.
 
 set -euo pipefail
 
@@ -67,14 +78,14 @@ PLAN="$PROJECT_DIR/.tdd/current-plan.md"
 # Read tier1 regexes once (avoid re-reading per-file in the loop).
 TIER1_REGEXES="$(jq -r '.tier1_path_regexes[]? // empty' "$CONFIG")"
 
-# Walk every candidate path. Skip always-allow paths. Collect any that match
-# Tier 1 — if at least one matches, the whole tool call must satisfy the gate.
+# Walk every candidate path. Skip always-allow non-test paths (docs, .claude,
+# CHANGELOG, archive). Test files are NOT in the always-allow list anymore —
+# they go through phase-aware policy (see test_file_policy below).
 TIER1_MATCHED=()
 while IFS= read -r FILE; do
   [[ -z "$FILE" ]] && continue
   case "$FILE" in
     */.tdd/*|*/.claude/*|*.md|*/docs/*|*/specs/*|*/archive/*|*/CHANGELOG.md) continue ;;
-    *_test.go) continue ;;
   esac
   while IFS= read -r pattern; do
     [[ -z "$pattern" ]] && continue
@@ -87,14 +98,102 @@ done <<< "$PATHS"
 
 [[ ${#TIER1_MATCHED[@]} -eq 0 ]] && exit 0
 
-# At least one path matches Tier 1. TDD ceremony required.
-# Build a one-line file list for the deny message.
-FILE_LIST="$(printf '  %s\n' "${TIER1_MATCHED[@]}")"
+# Categorize Tier-1-matched files into test files and production files.
+# They are governed by different rules:
+#   - Production files: must have M1+M2+M3 set on the plan.
+#   - Test files: governed by test_file_policy (phase-aware).
+TIER1_TESTS=()
+TIER1_PROD=()
+for f in "${TIER1_MATCHED[@]}"; do
+  case "$f" in
+    *_test.go) TIER1_TESTS+=("$f") ;;
+    *) TIER1_PROD+=("$f") ;;
+  esac
+done
+
+# Helper: render a Tier-1-matched path list for deny messages.
+fmt_paths() {
+  local IFS=$'\n'
+  printf '  %s\n' "$@"
+}
+
+# ---- Test-file policy ------------------------------------------------------
+#
+# Phase-aware. The default config allows test edits before/during red phase
+# and denies them after red is confirmed (the documented "don't edit tests
+# in green phase" rule). Operators can flip allow_after_red_confirmed: true
+# in config when the spec was incomplete and a return to red phase is needed.
+if [[ ${#TIER1_TESTS[@]} -gt 0 ]]; then
+  ALLOW_BEFORE_SPEC="$(jq -r '.test_file_policy.allow_before_spec_approved // true' "$CONFIG")"
+  ALLOW_IN_RED="$(jq -r '.test_file_policy.allow_in_red_phase // true' "$CONFIG")"
+  ALLOW_AFTER_RED="$(jq -r '.test_file_policy.allow_after_red_confirmed // false' "$CONFIG")"
+
+  M1_SET=false
+  M2_SET=false
+  if [[ -f "$PLAN" ]]; then
+    grep -qF 'Human approved spec: yes' "$PLAN" && M1_SET=true
+    grep -qF 'Red phase confirmed: yes' "$PLAN" && M2_SET=true
+  fi
+
+  if [[ "$M2_SET" == "true" && "$ALLOW_AFTER_RED" != "true" ]]; then
+    test_list="$(fmt_paths "${TIER1_TESTS[@]}")"
+    cat >&2 <<HOOK_MSG
+[require-tdd-state] BLOCKED edit to Tier 1 test file(s) after red phase confirmed:
+$test_list
+
+<claude-directive>
+This is an AUTOMATED TDD GATE. Editing tests after the red phase has been
+confirmed is forbidden by default — that would let you change the test to
+match the implementation, defeating the point of red-before-green. The
+documented rule is: "If tests need changes, the spec was incomplete. STOP,
+return to red."
+
+You MUST do one of:
+  1. STOP and tell the operator that the spec was incomplete. Ask whether
+     to revert "Red phase confirmed: yes" to "no" and rewrite the spec
+     and red proof. The operator must explicitly authorize a return to
+     red phase.
+  2. If the operator has already authorized return to red, set
+     "Red phase confirmed: no" in .tdd/current-plan.md FIRST, then make
+     the test edits, then re-capture .tdd/red-proof.md.
+  3. EMERGENCY ONLY: the operator may flip
+     test_file_policy.allow_after_red_confirmed: true in
+     .tdd/tdd-config.json. Document the reason in the commit message.
+     This is not for routine use.
+
+Do NOT proceed with the edit without operator authorization.
+</claude-directive>
+HOOK_MSG
+    exit 2
+  fi
+
+  if [[ "$M1_SET" == "false" && "$ALLOW_BEFORE_SPEC" != "true" ]]; then
+    test_list="$(fmt_paths "${TIER1_TESTS[@]}")"
+    cat >&2 <<HOOK_MSG
+[require-tdd-state] BLOCKED edit to Tier 1 test file(s) before spec approved:
+$test_list
+
+<claude-directive>
+This project's test_file_policy.allow_before_spec_approved is false. Test
+edits require an approved spec first. Run the go-tdd-feature or
+go-tdd-bugfix skill, draft the spec, and ask for APPROVED SPEC at gate 1
+before writing tests.
+</claude-directive>
+HOOK_MSG
+    exit 2
+  fi
+
+  # Otherwise: in spec or red phase, test edits are allowed by default.
+fi
+
+# ---- Production-file gate -------------------------------------------------
+[[ ${#TIER1_PROD[@]} -eq 0 ]] && exit 0
+PROD_LIST="$(fmt_paths "${TIER1_PROD[@]}")"
 
 if [[ ! -f "$PLAN" ]]; then
   cat >&2 <<HOOK_MSG
 [require-tdd-state] BLOCKED edit to Tier 1 high-stakes path(s):
-$FILE_LIST
+$PROD_LIST
 
 <claude-directive>
 This is an AUTOMATED TDD GATE, not a user denial. No .tdd/current-plan.md
@@ -106,7 +205,7 @@ You MUST do the following autonomously, in order:
      go-tdd-bugfix skill (for bug fixes / regressions).
   2. Copy .tdd/templates/{feature,bugfix}-plan.md to .tdd/current-plan.md.
   3. Fill in the spec sections.
-  4. STOP and ask the human for explicit APPROVED at the spec gate (Gate 1).
+  4. STOP and ask the human for explicit APPROVED SPEC at gate 1.
 
 Do NOT proceed with the edit. Do NOT self-approve. Do NOT bypass the hook
 by editing markers without an APPROVED reply from the human.
@@ -115,17 +214,52 @@ HOOK_MSG
   exit 2
 fi
 
-# Plan exists. Check the required markers from config.
+# Plan exists. Resolve the edit-time required markers (prefer the new field
+# name; fall back to legacy required_markers for older configs).
+EDIT_TIME_MARKERS_RAW="$(jq -r '
+  if (.required_markers_edit_time | type) == "array"
+  then .required_markers_edit_time[]?
+  else .required_markers[]? // empty
+  end
+' "$CONFIG")"
+
+# Build the alias map (new -> old). For each required marker, if the new
+# name is missing but the alias is present, accept with deprecation warning.
+ALIAS_PAIRS="$(jq -r '
+  .marker_aliases // {} | to_entries[] | "\(.key)\t\(.value)"
+' "$CONFIG")"
+
+# Walk required markers. Track missing (with no acceptable alias) for the deny
+# message; emit a single deprecation summary if any alias was used.
 MISSING=()
+ALIAS_USED=()
 while IFS= read -r marker; do
   [[ -z "$marker" ]] && continue
-  grep -q "^$marker$" "$PLAN" || MISSING+=("$marker")
-done < <(jq -r '.required_markers[]? // empty' "$CONFIG")
+  if grep -qF "$marker" "$PLAN"; then
+    continue
+  fi
+  # Look up alias for this marker.
+  alias=""
+  while IFS=$'\t' read -r k v; do
+    [[ "$k" == "$marker" ]] && alias="$v"
+  done <<< "$ALIAS_PAIRS"
+  if [[ -n "$alias" ]] && grep -qF "$alias" "$PLAN"; then
+    ALIAS_USED+=("$alias -> $marker")
+    continue
+  fi
+  MISSING+=("$marker")
+done <<< "$EDIT_TIME_MARKERS_RAW"
+
+if [[ ${#ALIAS_USED[@]} -gt 0 ]]; then
+  echo "[require-tdd-state] DEPRECATION: plan uses old marker name(s):" >&2
+  for a in "${ALIAS_USED[@]}"; do echo "  $a" >&2; done
+  echo "[require-tdd-state] Run scripts/migrate-tdd-markers.sh to update the plan. The alias will be removed in the next major version." >&2
+fi
 
 if [[ ${#MISSING[@]} -gt 0 ]]; then
   cat >&2 <<HOOK_MSG
 [require-tdd-state] BLOCKED edit to Tier 1 high-stakes path(s):
-$FILE_LIST
+$PROD_LIST
 The plan at .tdd/current-plan.md is missing required markers:
 HOOK_MSG
   for m in "${MISSING[@]}"; do echo "  - $m" >&2; done
@@ -138,13 +272,22 @@ the required APPROVED markers are not all set.
 You MUST:
   1. STOP. Do not edit any Tier 1 production file.
   2. Identify which gate is missing approval:
-     - "Human approved spec: yes" missing -> ask for Gate 1 APPROVED.
-     - "Red phase confirmed: yes" missing -> write failing tests first,
-       capture verbatim output to .tdd/red-proof.md.
-     - "Human approved implementation: yes" missing -> ask for Gate 2 APPROVED.
-  3. The operator approves with the literal word APPROVED. Any other
-     reply is not an approval. NEVER self-approve by setting a marker
-     without an explicit human reply.
+     - "Human approved spec: yes" missing       -> gate 1 not approved.
+       Ask operator: "APPROVED SPEC for <cycle-id>?"
+     - "Red phase confirmed: yes" missing       -> red proof not done.
+       Write failing tests; capture verbatim output to .tdd/red-proof.md;
+       set the marker yourself once the artifact exists.
+     - "Green phase authorized: yes" missing    -> gate 2 not approved.
+       Ask operator: "APPROVED GREEN for <cycle-id>?" The operator's
+       APPROVED GREEN authorizes you to begin writing the implementation.
+  3. The operator approves with the literal word APPROVED (or
+     APPROVED SPEC / APPROVED GREEN for clarity). Any other reply is
+     not an approval. NEVER self-approve by setting a marker without
+     an explicit human reply.
+
+Note: M4 "Implementation reviewed: yes" is NOT required at edit time.
+That marker is checked at commit time by gate-tier1-commit.sh after the
+operator says APPROVED IMPLEMENTATION at gate 3.
 </claude-directive>
 HOOK_MSG
   exit 2

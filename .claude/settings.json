@@ -158,6 +158,11 @@
             "type": "command",
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/require-second-opinion.sh",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/gate-tier1-commit.sh",
+            "timeout": 10
           }
         ]
       },
