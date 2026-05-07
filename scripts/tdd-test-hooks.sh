@@ -40,28 +40,44 @@ fi
 echo
 echo "Testing require-tdd-state.sh..."
 
-out=$(echo '{"tool_input": {"file_path": "CHANGELOG.md"}}' | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+# D-SO-07: isolate these tests from the project's real .tdd/ state.
+# Pre-fix, the tests below ran the hook directly without setting
+# CLAUDE_PROJECT_DIR, so the hook read pwd/.tdd/current-plan.md from
+# the running project. When the project was mid-cycle (M1+M2+M3=yes)
+# the hook correctly allowed Tier 1 edits — but the tests expected
+# denial under an idle plan. Five tests failed depending on the
+# project's plan-marker state, masking real bugs.
+#
+# Fix: stub project root with the same tdd-config.json the project
+# uses, BUT no current-plan.md. The hook then blocks Tier 1 edits
+# (its "no plan, block" path at require-tdd-state.sh ~line 193) which
+# is exactly what the BLOCK tests expect.
+TMPROOT_EARLY=$(mktemp -d)
+mkdir -p "$TMPROOT_EARLY/.tdd" "$TMPROOT_EARLY/.claude"
+cp .tdd/tdd-config.json "$TMPROOT_EARLY/.tdd/"
+
+out=$(echo '{"tool_input": {"file_path": "CHANGELOG.md"}}' | CLAUDE_PROJECT_DIR="$TMPROOT_EARLY" timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
 if [[ "$out" == *"exit:0"* ]]; then
   pass "CHANGELOG.md allowed"
 else
   fail "CHANGELOG.md should be allowed (got: '$out')"
 fi
 
-out=$(echo '{"tool_input": {"file_path": "internal/foo/bar_test.go"}}' | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+out=$(echo '{"tool_input": {"file_path": "internal/foo/bar_test.go"}}' | CLAUDE_PROJECT_DIR="$TMPROOT_EARLY" timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
 if [[ "$out" == *"exit:0"* ]]; then
   pass "_test.go allowed"
 else
   fail "_test.go should be allowed (got: '$out')"
 fi
 
-out=$(echo '{"tool_input": {"file_path": "internal/utils/helper.go"}}' | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+out=$(echo '{"tool_input": {"file_path": "internal/utils/helper.go"}}' | CLAUDE_PROJECT_DIR="$TMPROOT_EARLY" timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
 if [[ "$out" == *"exit:0"* ]]; then
   pass "non-Tier 1 Go file allowed"
 else
   fail "non-Tier 1 should be allowed (got: '$out')"
 fi
 
-out=$(echo '{"tool_input": {"file_path": "internal/payments/charge.go"}}' | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+out=$(echo '{"tool_input": {"file_path": "internal/payments/charge.go"}}' | CLAUDE_PROJECT_DIR="$TMPROOT_EARLY" timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
 if [[ "$out" == *"exit:2"* ]] && [[ "$out" == *"BLOCKED"* ]]; then
   pass "Tier 1 file with no plan blocked"
 else
@@ -69,7 +85,7 @@ else
 fi
 
 # Two-segment layout: internal/<feature>/file.go
-out=$(echo '{"tool_input": {"file_path": "internal/auth/handler.go"}}' | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+out=$(echo '{"tool_input": {"file_path": "internal/auth/handler.go"}}' | CLAUDE_PROJECT_DIR="$TMPROOT_EARLY" timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
 if [[ "$out" == *"exit:2"* ]] && [[ "$out" == *"BLOCKED"* ]]; then
   pass "Tier 1 two-segment layout blocked"
 else
@@ -77,7 +93,7 @@ else
 fi
 
 # Three-segment layout: internal/<group>/<feature>/file.go
-out=$(echo '{"tool_input": {"file_path": "internal/modules/payments/charge.go"}}' | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+out=$(echo '{"tool_input": {"file_path": "internal/modules/payments/charge.go"}}' | CLAUDE_PROJECT_DIR="$TMPROOT_EARLY" timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
 if [[ "$out" == *"exit:2"* ]] && [[ "$out" == *"BLOCKED"* ]]; then
   pass "Tier 1 three-segment layout blocked"
 else
@@ -85,7 +101,7 @@ else
 fi
 
 # v1.2.0: defensive multi-path extraction. files[] shape.
-out=$(echo '{"tool_input":{"files":[{"file_path":"internal/utils/helper.go"},{"file_path":"internal/payments/charge.go"}]}}' | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+out=$(echo '{"tool_input":{"files":[{"file_path":"internal/utils/helper.go"},{"file_path":"internal/payments/charge.go"}]}}' | CLAUDE_PROJECT_DIR="$TMPROOT_EARLY" timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
 if [[ "$out" == *"exit:2"* ]] && [[ "$out" == *"internal/payments/charge.go"* ]]; then
   pass "MultiEdit files[] blocks if any Tier 1 path"
 else
@@ -93,7 +109,7 @@ else
 fi
 
 # v1.2.0: defensive multi-path extraction. edits[].file_path shape.
-out=$(echo '{"tool_input":{"edits":[{"file_path":"internal/auth/jwt.go","old_string":"x","new_string":"y"}]}}' | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+out=$(echo '{"tool_input":{"edits":[{"file_path":"internal/auth/jwt.go","old_string":"x","new_string":"y"}]}}' | CLAUDE_PROJECT_DIR="$TMPROOT_EARLY" timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
 if [[ "$out" == *"exit:2"* ]] && [[ "$out" == *"internal/auth/jwt.go"* ]]; then
   pass "MultiEdit edits[].file_path blocks if Tier 1"
 else
@@ -101,7 +117,7 @@ else
 fi
 
 # v1.2.0: all non-Tier-1 paths in a multi-path edit must pass.
-out=$(echo '{"tool_input":{"files":[{"file_path":"internal/utils/helper.go"},{"file_path":"docs/foo.md"}]}}' | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+out=$(echo '{"tool_input":{"files":[{"file_path":"internal/utils/helper.go"},{"file_path":"docs/foo.md"}]}}' | CLAUDE_PROJECT_DIR="$TMPROOT_EARLY" timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
 if [[ "$out" == *"exit:0"* ]]; then
   pass "MultiEdit with all non-Tier-1 paths passes"
 else
@@ -109,6 +125,9 @@ else
 fi
 
 echo
+
+rm -rf "$TMPROOT_EARLY"
+
 echo "Testing guard-dangerous-bash.sh..."
 
 out=$(echo '{"tool_input": {"command": "git commit --no-verify"}}' | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/guard-dangerous-bash.sh)
