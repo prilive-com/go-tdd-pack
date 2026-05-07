@@ -1,9 +1,22 @@
 #!/usr/bin/env bash
-# PreToolUse hook on Bash. Gates `git commit`, `git tag`, and `git push`
-# for Tier 1 cycles.
+# PreToolUse hook on Bash. Gates `git commit` for Tier 1 cycles.
 #
 # Created 2026-05-05 as part of the four-gate redesign — see
 # docs/specs/tdd-gate-conflict-resolution-spec.md.
+#
+# Why commit-only (D-SO-05, 2026-05-08): this hook's gating logic
+# inspects `git diff --cached` (staged files) to decide whether Tier 1
+# production is in play. That signal is meaningful for `git commit`
+# but not for `git push` (which operates on already-committed history,
+# not on staging) or `git tag` (which references a commit, not staging).
+# An earlier version of this script matched all three operations in
+# its regex, but the gating logic only ever made sense for commit. The
+# header and the regex now agree — commit-only.
+#
+# If you want to gate push or tag, that is a separate hook concern: the
+# right signal there is the range of unpushed commits or the commit
+# being tagged, not staged-files state. That is out of scope for this
+# hook; track as a follow-up if needed.
 #
 # Why this hook exists:
 #   The edit-time hook (require-tdd-state.sh) only checks the FIRST three
@@ -57,10 +70,15 @@ mkdir -p "$ROOT/.tdd" 2>/dev/null
 CMD="$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.command // empty' 2>/dev/null)"
 [[ -z "$CMD" ]] && exit 0
 
-# Match git commit / tag / push at command start (allow leading whitespace).
+# Match git commit at command start (allow leading whitespace).
 # The anchor avoids matching command bodies that mention "git commit" in
 # comments or quoted strings.
-COMMITS_RE='(^|;|&&|\|\|)[[:space:]]*git[[:space:]]+(commit|tag|push)([[:space:]]|$)'
+#
+# D-SO-05 (2026-05-08): regex previously matched (commit|tag|push). The
+# gating logic only inspects staged files — meaningful for commit, not
+# for push or tag. Aligning the regex with what the script actually
+# does. Header doc was updated in the same commit.
+COMMITS_RE='(^|;|&&|\|\|)[[:space:]]*git[[:space:]]+commit([[:space:]]|$)'
 if ! printf '%s' "$CMD" | grep -qE "$COMMITS_RE"; then
   exit 0
 fi

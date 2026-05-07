@@ -786,6 +786,29 @@ else
   fail "echo with 'git commit' in string should pass (got: '$out')"
 fi
 
+# D-SO-05: git push passes through entirely (regex now commit-only).
+# Pre-fix the regex matched (commit|tag|push), but the gating logic
+# only inspected staged files — meaningless for push (which acts on
+# committed history). Now the regex is commit-only.
+out=$(echo '{"tool_input":{"command":"git push origin main"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GTC" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "git push passes through (D-SO-05: commit-only regex)"
+else
+  fail "git push should pass through (got: '$out')"
+fi
+
+# D-SO-05: git tag passes through entirely.
+out=$(echo '{"tool_input":{"command":"git tag v1.0.0"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GTC" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "git tag passes through (D-SO-05: commit-only regex)"
+else
+  fail "git tag should pass through (got: '$out')"
+fi
+
 # Test: killswitch.
 echo "// re-mod" >> "$TMPROOT_GTC/internal/auth/handler.go"
 ( cd "$TMPROOT_GTC" && git add internal/auth/handler.go )
