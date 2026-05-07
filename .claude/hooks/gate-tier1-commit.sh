@@ -169,10 +169,19 @@ DIRECTIVE
   exit 2
 }
 
-# Classify subject. red() commits are exempt (they're the red-phase commit).
-# Anything else (green, refactor, etc.) needs M4.
+# Classify subject. red() commits are exempt from the M4 marker BUT
+# must touch only Tier 1 test files — never Tier 1 production. The TDD
+# red phase ships failing tests, not production code.
+#
+# Pre-fix the red(...) case branch exited 0 unconditionally, letting
+# `red(foo): bypass` with production Tier 1 staged skip the M4 marker
+# entirely. The TIER1_PROD non-empty guard below blocks that bypass.
 case "$SUBJECT" in
   red\(*|red:*)
+    if [[ ${#TIER1_PROD[@]} -gt 0 ]]; then
+      deny "red_commit_with_production_files" \
+           "red() commit must ship only failing tests, not production code. Production Tier 1 staged: ${TIER1_PROD[*]}. If the red phase legitimately needs a stub for a brand-new package, STOP and verify with the operator before committing."
+    fi
     audit "allow" "red_commit_exempt"
     exit 0
     ;;

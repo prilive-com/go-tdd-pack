@@ -666,15 +666,42 @@ else
   fail "M4=no commit should deny (got: $out)"
 fi
 
-# Test: red() commit is exempt — even with M4=no, should allow.
+# red() commit with production Tier 1 staged -> DENY.
+# Pre-fix, the case branch in gate-tier1-commit.sh exited 0 for any
+# subject matching `red(...)` regardless of what was staged. This
+# allowed `red(foo): bypass` with production code staged to bypass
+# the M4 marker entirely. The TIER1_PROD non-empty guard inside the
+# red() case denies production-bearing red() commits.
+out=$(echo '{"tool_input":{"command":"git commit -m \"red(test): bypass attempt\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GTC" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "red() commit with production Tier 1 staged is DENIED"
+else
+  fail "red() with production Tier 1 staged must deny (got: '$out')"
+fi
+
+# red() commit with test-only staged -> ALLOW.
+# Demonstrates the legitimate red-phase test-writing case is preserved.
+# Note: with test-only staged, TIER1_PROD ends up empty and the hook
+# exits early before reaching the red() case. So this is really
+# testing that the early-exit path works for test-only commits.
+( cd "$TMPROOT_GTC" && git restore --staged . 2>/dev/null )
+echo "package auth" > "$TMPROOT_GTC/internal/auth/handler_test.go"
+( cd "$TMPROOT_GTC" && git add internal/auth/handler_test.go )
 out=$(echo '{"tool_input":{"command":"git commit -m \"red(test): failing tests\""}}' \
   | CLAUDE_PROJECT_DIR="$TMPROOT_GTC" timeout "${HOOK_TIMEOUT:-5}" \
     bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
 if [[ "$out" == *"exit:0"* ]]; then
-  pass "red() commit exempt from M4 check"
+  pass "red() commit with test-only staged still allowed (preserves legitimate red phase)"
 else
-  fail "red() commit should be exempt (got: '$out')"
+  fail "red() with test-only staged must allow (got: '$out')"
 fi
+# Restore production staging for the remaining tests.
+( cd "$TMPROOT_GTC" && git restore --staged . 2>/dev/null )
+rm -f "$TMPROOT_GTC/internal/auth/handler_test.go"
+( cd "$TMPROOT_GTC" && git add internal/auth/handler.go )
 
 # Test: M4 yes but green-proof missing → deny.
 cat > "$TMPROOT_GTC/.tdd/current-plan.md" <<'EOF'
