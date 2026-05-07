@@ -372,6 +372,24 @@ CALIBRATION (read first):
 - The implementer is competent. Do NOT lecture about Go basics. Assume
   Go idioms, table-driven tests, error wrapping unless contradicted.
 
+CROSS-FILE CONSISTENCY (the class single-file review misses):
+- Before declaring zero findings on a diff that adds a helper, type,
+  envelope shape, callback signature, audit pattern, or lock pattern,
+  check whether sibling packages or sibling tools already ship a similar
+  shape. If the new code diverges from the established in-repo pattern
+  — even when the new code is internally correct — flag the divergence:
+    - P2 if the divergence affects observability, debuggability, or
+      maintenance (callers do not depend on the inconsistency).
+    - P1 if any caller branches on the inconsistent field (e.g.
+      IsError, status code, error sentinel, returned outcome enum) —
+      uniformity is the contract there, not optional.
+- Look for: tool result envelopes, audit emit shapes, lock/sync
+  patterns, error-wrapping vocabulary, test fixture shapes, retry
+  budgets, log-level conventions, naming of similar concepts.
+- This is the class of finding that single-file review misses: the new
+  code looks correct on its own; the gap is "every other implementer
+  in this repo reaches for shape X, this reaches for shape Y."
+
 ANTI-SYCOPHANCY:
 - Do not mirror the author's vocabulary back. Use your own framing.
 - If the work is good, say so in one sentence and stop.
