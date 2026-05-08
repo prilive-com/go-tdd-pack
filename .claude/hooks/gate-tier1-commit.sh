@@ -1,29 +1,30 @@
 #!/usr/bin/env bash
 # PreToolUse hook on Bash. Gates `git commit`, `git tag`, and `git push`
-# for Tier 1 cycles.
+# in two independent layers:
 #
-# Created 2026-05-05 as part of the four-gate redesign — see
-# docs/specs/tdd-gate-conflict-resolution-spec.md.
+#   1. INTEGRATION GUARDS (project-wide invariants from
+#      .tdd/tdd-config.json `integration_guards`). Always fire when guards
+#      are defined, regardless of TDD cycle state. Encode invariants like
+#      "no direct calls to API X outside wrapper Y", catch project-wide
+#      regressions a grep can find that plan-review can't.
 #
-# Why this hook exists:
-#   The edit-time hook (require-tdd-state.sh) only checks the FIRST three
-#   markers (spec, red, green-authorized). It cannot enforce that the
-#   operator reviewed the implementation AFTER it was written, because
-#   at edit time there's no implementation to review yet.
+#   2. TDD CEREMONY CHECKS (M4 marker, green-proof, fresh adjudication).
+#      Fire only when an active cycle exists (`.tdd/current-plan.md`
+#      present) AND the staged change touches Tier 1 production paths.
+#      Enforce the post-implementation review for high-stakes work.
 #
-#   This hook closes that loop. At commit time, for any commit that
-#   touches Tier 1 production paths (per .tdd/tdd-config.json), it
-#   requires:
-#     - Marker M4 "Implementation reviewed: yes" set on the plan
-#     - .tdd/green-proof.md exists (proof that tests went green)
-#     - .tdd/second-opinion-completed.md is fresh (mtime <60min)
+# Layer split rationale: integration guards are project-wide — they apply
+# to ANY commit that violates them. TDD ceremony checks are cycle-specific —
+# they only make sense for active Tier 1 work. The original v1.6.0 design
+# conflated the two; a real-trial finding (pack-self dogfooding) showed
+# that guards were dormant on commits that didn't happen to stage Tier 1
+# files. This split fixes that.
 #
-#   "red(<id>):" commits are exempt (they ARE the red phase commit).
-#   "refactor(<id>):" commits require M4 (refactor is post-green).
+# Created 2026-05-05 (TDD gate redesign);
+# integration guards added 2026-05-07 (parasitoid trial feedback);
+# layer split done 2026-05-08 (pack-self dogfooding).
 #
-# Failure mode: deny via JSON + stderr + exit 2 (defense in depth, same
-# as require-second-opinion.sh).
-#
+# Failure mode: deny via JSON + stderr + exit 2 (defense in depth).
 # Killswitch: TDD_COMMIT_GATE_DISABLE=1 env var.
 
 set -euo pipefail
@@ -49,25 +50,19 @@ ADJUDICATION="$ROOT/.tdd/second-opinion-completed.md"
 AUDIT_LOG="$ROOT/.tdd/tdd-commit-gate.log"
 mkdir -p "$ROOT/.tdd" 2>/dev/null
 
-# No config means TDD ceremony not configured — allow.
+# No config means TDD ceremony not configured AND no project-wide guards
+# defined — allow.
 [[ ! -f "$CONFIG" ]] && exit 0
-# No plan means no active Tier 1 cycle — allow.
-[[ ! -f "$PLAN" ]] && exit 0
 
 CMD="$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.command // empty' 2>/dev/null)"
 [[ -z "$CMD" ]] && exit 0
 
 # Match git commit / tag / push at command start (allow leading whitespace).
-# The anchor avoids matching command bodies that mention "git commit" in
-# comments or quoted strings.
 COMMITS_RE='(^|;|&&|\|\|)[[:space:]]*git[[:space:]]+(commit|tag|push)([[:space:]]|$)'
 if ! printf '%s' "$CMD" | grep -qE "$COMMITS_RE"; then
   exit 0
 fi
 
-# Identify the staged Tier 1 production files (if we're inside a git repo).
-# `git diff --cached --name-only` gives the staged set; if there are none
-# (e.g., commit -a), fall back to `git diff --name-only` plus untracked.
 cd "$ROOT" 2>/dev/null || exit 0
 if ! git rev-parse --git-dir >/dev/null 2>&1; then
   exit 0
@@ -75,7 +70,6 @@ fi
 
 CHANGED_FILES="$(git diff --cached --name-only 2>/dev/null)"
 if [[ -z "$CHANGED_FILES" ]]; then
-  # commit -a / commit -am / nothing staged: fall back to working tree changes
   CHANGED_FILES="$(git diff --name-only 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null)"
 fi
 [[ -z "$CHANGED_FILES" ]] && exit 0
@@ -85,7 +79,7 @@ TIER1_PROD=()
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
   case "$f" in
-    *_test.go) continue ;;  # tests don't trigger the commit gate
+    *_test.go) continue ;;
     */.tdd/*|*/.claude/*|*.md|*/docs/*|*/specs/*|*/archive/*|*/CHANGELOG.md) continue ;;
   esac
   while IFS= read -r pattern; do
@@ -97,38 +91,14 @@ while IFS= read -r f; do
   done <<< "$TIER1_REGEXES"
 done <<< "$CHANGED_FILES"
 
-# Nothing Tier-1 staged → allow.
-[[ ${#TIER1_PROD[@]} -eq 0 ]] && exit 0
+# ---- Helpers (used by both integration-guards and ceremony layers) -------
 
-# Detect commit-message subject for red()/refactor()/green()/etc. classification.
-# The operator may pass -m "subject" inline or use a prepared message file.
-# We extract the -m value with a portable awk; if no -m, we don't know the
-# subject and assume green() semantics (most cautious).
-SUBJECT="$(printf '%s\n' "$CMD" | awk '
-  {
-    n = split($0, parts, " ")
-    for (i = 1; i <= n; i++) {
-      if (parts[i] == "-m" || parts[i] == "--message") {
-        # Reconstruct quoted subject from following parts.
-        msg = ""
-        for (j = i+1; j <= n; j++) {
-          if (msg == "") msg = parts[j]; else msg = msg " " parts[j]
-        }
-        # Strip leading/trailing single or double quotes.
-        gsub(/^["\x27]+|["\x27]+$/, "", msg)
-        print msg
-        exit
-      }
-    }
-  }
-')"
-
-# Helpers.
 audit() {
   local decision="$1" reason="$2"
+  local count="${#TIER1_PROD[@]}"
   local ts; ts="$(date -u +%FT%TZ)"
   printf '%s decision=%s reason=%s files=%d cmd=%q\n' \
-    "$ts" "$decision" "$reason" "${#TIER1_PROD[@]}" "$CMD" \
+    "$ts" "$decision" "$reason" "$count" "$CMD" \
     >> "$AUDIT_LOG" 2>/dev/null || true
 }
 
@@ -169,67 +139,10 @@ DIRECTIVE
   exit 2
 }
 
-# Classify subject. red() commits are exempt (they're the red-phase commit).
-# Anything else (green, refactor, etc.) needs M4.
-case "$SUBJECT" in
-  red\(*|red:*)
-    audit "allow" "red_commit_exempt"
-    exit 0
-    ;;
-esac
-
-# Require M4 marker (with backwards-compat alias if any future renaming).
-M4="Implementation reviewed: yes"
-if ! grep -qF "$M4" "$PLAN"; then
-  deny "missing marker '$M4'" \
-    "Tier 1 commit blocked: .tdd/current-plan.md is missing 'Implementation reviewed: yes'. Operator must say APPROVED IMPLEMENTATION at gate 3 before this marker can be set. See docs/specs/tdd-gate-conflict-resolution-spec.md."
-fi
-
-# Require green-proof artifact.
-if [[ ! -f "$GREEN_PROOF" ]]; then
-  deny "missing .tdd/green-proof.md" \
-    "Tier 1 commit blocked: .tdd/green-proof.md does not exist. Capture verbatim test-passing output (the green proof) before committing the green phase."
-fi
-
-# Require fresh second-opinion adjudication (<60min mtime).
-if [[ ! -f "$ADJUDICATION" ]]; then
-  deny "missing .tdd/second-opinion-completed.md" \
-    "Tier 1 commit blocked: .tdd/second-opinion-completed.md does not exist. Run /second-opinion diff on the staged Tier 1 diff to produce the adjudication artifact."
-fi
-if [[ -z "$(find "$ADJUDICATION" -mmin -60 -print 2>/dev/null)" ]]; then
-  deny "stale .tdd/second-opinion-completed.md (mtime > 60min)" \
-    "Tier 1 commit blocked: .tdd/second-opinion-completed.md is older than 60 minutes. Re-run /second-opinion diff on the current staged diff."
-fi
-
-# ---- Integration guards (added 2026-05-07) --------------------------------
-#
-# Project-level static-analysis guards. Each guard is a regex pattern that,
-# if matched in a file outside allowed_globs, fails the commit. Encodes
-# project-wide invariants that aren't easily expressed as integration tests
-# (e.g., "no direct calls to API X outside wrapper Y").
-#
-# Origin: parasitoid trial-period feedback (2026-05-07). Plan-review caught
-# 9 design bugs but missed 3 integration bugs that were visible from a
-# wide-angle code read of the integrated repo. These guards encode known
-# integration assumptions so a grep can enforce them statically.
-#
-# Guards are FALLBACK protection. Write integration tests first; add a
-# guard for invariants tests can't reach. See go-integration-guards rule.
-
 # glob_to_regex: convert a shell glob (with ** for cross-directory) to an
-# anchored regex. Treats `**/` as ZERO-OR-MORE path segments (gitignore
-# convention) so a glob like "internal/intent/**/*.go" matches both
-# "internal/intent/tracker.go" (zero intermediate dirs) AND
-# "internal/intent/v2/tracker.go" (one or more).
-#
-# Examples:
-#   "internal/**/*.go"          -> ^internal/(.*/)?[^/]*\.go$
-#   "internal/intent/**/*.go"   -> ^internal/intent/(.*/)?[^/]*\.go$
-#   "**/*_test.go"              -> ^(.*/)?[^/]*_test\.go$
-#   "internal/intent/**"        -> ^internal/intent/.*$  (lone ** anywhere)
+# anchored regex. Treats `**/` as ZERO-OR-MORE path segments.
 glob_to_regex() {
   local g="$1"
-  # Escape regex specials (except *).
   g="${g//\\/\\\\}"
   g="${g//./\\.}"
   g="${g//+/\\+}"
@@ -238,29 +151,52 @@ glob_to_regex() {
   g="${g//\)/\\)}"
   g="${g//\[/\\[}"
   g="${g//\]/\\]}"
-  # Note: do NOT escape { } — they aren't POSIX ERE specials in this
-  # context, and bash's ${var//pat/repl} grammar mishandles literal } in
-  # the replacement (the closing brace of the substitution swallows it).
   g="${g//\^/\\^}"
   g="${g//\$/\\\$}"
-  # Protect wildcards. Order matters: handle **/ before ** before *.
-  g="${g//\*\*\//__DSS__}"  # **/ -> placeholder for "zero+ path segments"
-  g="${g//\*\*/__DS__}"     # ** (no trailing /) -> "any chars"
-  g="${g//\*/[^/]*}"        # * (single segment) -> non-slash chars
-  # Restore.
-  g="${g//__DSS__/(.*/)?}"  # zero or more "segment/" prefixes
-  g="${g//__DS__/.*}"        # any chars including /
+  g="${g//\*\*\//__DSS__}"
+  g="${g//\*\*/__DS__}"
+  g="${g//\*/[^/]*}"
+  g="${g//__DSS__/(.*/)?}"
+  g="${g//__DS__/.*}"
   printf '^%s$\n' "$g"
 }
 
-# Read the guards array. Pass count check first to skip cleanly if empty.
+# ---- LAYER 1: Integration guards (project-wide, always fire) -------------
+#
+# Fires on every commit when integration_guards is non-empty. Decoupled
+# from TDD cycle state — guards are project-wide invariants, not
+# ceremony-gated checks.
+#
+# Excluded dirs are configurable via integration_guards_exclude_dirs in
+# tdd-config.json. Default: .git, vendor, node_modules, .tdd, .claude
+# (which makes sense for downstream Go projects where .claude/.tdd contain
+# the installed pack — you don't want to grep your installed starter for
+# violations of YOUR project's invariants). The pack itself sets these to
+# the empty subset so guards CAN scan its own production files.
+
 GUARD_COUNT="$(jq -r '(.integration_guards // []) | length' "$CONFIG" 2>/dev/null || echo 0)"
 
 if [[ "${GUARD_COUNT:-0}" -gt 0 ]]; then
+  # Build the exclude-dir flags from config (or default).
+  EXCLUDE_DIRS_FLAGS=()
+  EXCLUDE_DIRS_RAW="$(jq -r '
+    if (.integration_guards_exclude_dirs | type) == "array"
+    then .integration_guards_exclude_dirs[]?
+    else "" end
+  ' "$CONFIG" 2>/dev/null)"
+  if [[ -z "$EXCLUDE_DIRS_RAW" ]]; then
+    # Default exclusions for downstream consumers.
+    EXCLUDE_DIRS_FLAGS=(--exclude-dir='.git' --exclude-dir='vendor' --exclude-dir='node_modules' --exclude-dir='.tdd' --exclude-dir='.claude')
+  else
+    while IFS= read -r d; do
+      [[ -z "$d" ]] && continue
+      EXCLUDE_DIRS_FLAGS+=(--exclude-dir="$d")
+    done <<< "$EXCLUDE_DIRS_RAW"
+  fi
+
   GUARD_VIOLATIONS_DENY=()
   GUARD_VIOLATIONS_WARN=()
 
-  # Iterate guards.
   while IFS= read -r guard_json; do
     [[ -z "$guard_json" ]] && continue
     name="$(jq -r '.name // "unnamed"' <<<"$guard_json")"
@@ -269,33 +205,26 @@ if [[ "${GUARD_COUNT:-0}" -gt 0 ]]; then
     rationale="$(jq -r '.rationale // ""' <<<"$guard_json")"
     [[ -z "$pattern" ]] && continue
 
-    # Build regex set for allowed_globs.
     allowed_regexes=()
     while IFS= read -r g; do
       [[ -z "$g" ]] && continue
       allowed_regexes+=("$(glob_to_regex "$g")")
     done < <(jq -r '.allowed_globs[]? // empty' <<<"$guard_json")
 
-    # Scan repo. Limit to source files; exclude vendor / .git / node_modules /
-    # tdd state. Use grep -lE for fast filename listing.
-    # Note: -- (end-of-options) goes AFTER --include / --exclude-dir flags.
-    # Placing -- before them would make GNU grep treat the flags as positional
-    # path arguments (caught during smoke testing — every "no match" case
-    # returned the .tdd/tdd-config.json path because the include filter was
-    # being ignored).
+    # GNU grep needs -- AFTER --include / --exclude-dir flags, otherwise
+    # treats those flags as positional path arguments. (Caught during
+    # smoke testing earlier.)
     matches="$(grep -rlE \
       --include='*.go' --include='*.sql' --include='*.sh' --include='*.py' \
-      --exclude-dir='.git' --exclude-dir='vendor' --exclude-dir='node_modules' \
-      --exclude-dir='.tdd' --exclude-dir='.claude' \
+      --include='*.json' --include='*.yaml' --include='*.yml' \
+      "${EXCLUDE_DIRS_FLAGS[@]}" \
       -- "$pattern" "$ROOT" 2>/dev/null || true)"
 
     [[ -z "$matches" ]] && continue
 
     while IFS= read -r f; do
       [[ -z "$f" ]] && continue
-      # Strip the project root prefix for cleaner messages and glob matching.
       rel="${f#${ROOT}/}"
-      # Check if file matches any allowed_glob.
       is_allowed=false
       for re in "${allowed_regexes[@]}"; do
         if [[ "$rel" =~ $re ]]; then
@@ -304,7 +233,6 @@ if [[ "${GUARD_COUNT:-0}" -gt 0 ]]; then
         fi
       done
       $is_allowed && continue
-      # Violation.
       msg="$name: $rel — $rationale"
       if [[ "$severity" == "warn" ]]; then
         GUARD_VIOLATIONS_WARN+=("$msg")
@@ -314,7 +242,6 @@ if [[ "${GUARD_COUNT:-0}" -gt 0 ]]; then
     done <<< "$matches"
   done < <(jq -c '.integration_guards[]? // empty' "$CONFIG" 2>/dev/null)
 
-  # Emit warnings (always to stderr + audit).
   if [[ ${#GUARD_VIOLATIONS_WARN[@]} -gt 0 ]]; then
     echo "[gate-tier1-commit] integration-guard warnings (${#GUARD_VIOLATIONS_WARN[@]}):" >&2
     for v in "${GUARD_VIOLATIONS_WARN[@]}"; do
@@ -323,11 +250,10 @@ if [[ "${GUARD_COUNT:-0}" -gt 0 ]]; then
     done
   fi
 
-  # Deny on any deny-severity violation.
   if [[ ${#GUARD_VIOLATIONS_DENY[@]} -gt 0 ]]; then
     audit "deny" "guard_violations=${#GUARD_VIOLATIONS_DENY[@]}"
     cat <<JSON
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Tier 1 commit blocked: ${#GUARD_VIOLATIONS_DENY[@]} integration-guard violation(s). See stderr for details."}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Commit blocked: ${#GUARD_VIOLATIONS_DENY[@]} integration-guard violation(s). See stderr for details."}}
 JSON
     cat >&2 <<DIRECTIVE
 [gate-tier1-commit] BLOCKED: ${#GUARD_VIOLATIONS_DENY[@]} integration-guard violation(s).
@@ -335,9 +261,8 @@ JSON
 <claude-directive>
 This is an AUTOMATED COMMIT GATE. The repo contains code that violates
 project-level integration guards declared in .tdd/tdd-config.json
-(integration_guards array). Integration guards encode invariants that
-should hold across the codebase — typically "no direct calls to API X
-outside wrapper Y" or "metadata key Z must be consistent."
+(integration_guards array). These are project-wide invariants — they
+fire on every commit when defined, not just Tier 1 cycles.
 
 Violations:
 DIRECTIVE
@@ -361,6 +286,67 @@ bug. See .claude/rules/go-integration-guards.md for the decision tree.
 DIRECTIVE
     exit 2
   fi
+fi
+
+# ---- LAYER 2: TDD ceremony checks (cycle-specific) -----------------------
+#
+# Only fire when an active cycle exists (PLAN present) AND the staged
+# change touches Tier 1 production paths. Enforces M4 + green-proof +
+# fresh adjudication for the green commit of a Tier 1 cycle.
+
+# No active cycle → no ceremony gate.
+[[ ! -f "$PLAN" ]] && { audit "allow" "no_active_cycle"; exit 0; }
+
+# No Tier 1 staged → ceremony doesn't apply.
+[[ ${#TIER1_PROD[@]} -eq 0 ]] && { audit "allow" "no_tier1_staged"; exit 0; }
+
+# Detect commit-message subject for red()/refactor()/green()/etc. classification.
+SUBJECT="$(printf '%s\n' "$CMD" | awk '
+  {
+    n = split($0, parts, " ")
+    for (i = 1; i <= n; i++) {
+      if (parts[i] == "-m" || parts[i] == "--message") {
+        msg = ""
+        for (j = i+1; j <= n; j++) {
+          if (msg == "") msg = parts[j]; else msg = msg " " parts[j]
+        }
+        gsub(/^["\x27]+|["\x27]+$/, "", msg)
+        print msg
+        exit
+      }
+    }
+  }
+')"
+
+# red() commits are exempt (they ARE the red-phase commit).
+case "$SUBJECT" in
+  red\(*|red:*)
+    audit "allow" "red_commit_exempt"
+    exit 0
+    ;;
+esac
+
+# Require M4 marker.
+M4="Implementation reviewed: yes"
+if ! grep -qF "$M4" "$PLAN"; then
+  deny "missing marker '$M4'" \
+    "Tier 1 commit blocked: .tdd/current-plan.md is missing 'Implementation reviewed: yes'. Operator must say APPROVED IMPLEMENTATION at gate 3 before this marker can be set. See docs/specs/tdd-gate-conflict-resolution-spec.md."
+fi
+
+# Require green-proof artifact.
+if [[ ! -f "$GREEN_PROOF" ]]; then
+  deny "missing .tdd/green-proof.md" \
+    "Tier 1 commit blocked: .tdd/green-proof.md does not exist. Capture verbatim test-passing output (the green proof) before committing the green phase."
+fi
+
+# Require fresh second-opinion adjudication (<60min mtime).
+if [[ ! -f "$ADJUDICATION" ]]; then
+  deny "missing .tdd/second-opinion-completed.md" \
+    "Tier 1 commit blocked: .tdd/second-opinion-completed.md does not exist. Run /second-opinion diff on the staged Tier 1 diff to produce the adjudication artifact."
+fi
+if [[ -z "$(find "$ADJUDICATION" -mmin -60 -print 2>/dev/null)" ]]; then
+  deny "stale .tdd/second-opinion-completed.md (mtime > 60min)" \
+    "Tier 1 commit blocked: .tdd/second-opinion-completed.md is older than 60 minutes. Re-run /second-opinion diff on the current staged diff."
 fi
 
 audit "allow" "all_gates_satisfied"

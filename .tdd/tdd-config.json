@@ -60,8 +60,69 @@
     "allowed_globs": "list of glob patterns; files matching any are exempt. Supports ** for cross-directory.",
     "rationale": "one sentence explaining what invariant this guards"
   },
-  "_integration_guards_examples_doc": "The empty array is the default. Each project should add its own guards over time — every shipped bug that a grep could have caught becomes a permanent guard.",
-  "integration_guards": [],
+  "_integration_guards_exclude_dirs_doc": "Directories the integration-guards scanner will skip. Default (when this field is absent) for downstream consumers: ['.git', 'vendor', 'node_modules', '.tdd', '.claude'] — those dirs hold the installed starter pack in downstream projects, and you don't want guards designed for YOUR project firing on the starter's code. The pack itself sets this to '[.git, vendor, node_modules, .tdd]' — keeps .tdd excluded (self-referential match: this config file IS in .tdd and contains the guard patterns themselves) but allows scanning .claude/ where the pack's own production hook/skill code lives.",
+  "integration_guards_exclude_dirs": [".git", "vendor", "node_modules", ".tdd"],
+
+  "_integration_guards_examples_doc": "Each project should add its own guards over time — every shipped bug that a grep could have caught becomes a permanent guard. The defaults below are PACK-SELF guards (encoding invariants for the starter pack itself, since this repo IS the pack); downstream Go projects should REPLACE these with their own project-specific invariants.",
+  "integration_guards": [
+    {
+      "name": "no_hardcoded_user_home_path",
+      "pattern": "/home/[a-z][a-z0-9_-]*|/Users/[A-Za-z]",
+      "severity": "deny",
+      "allowed_globs": [
+        "archive/**",
+        "docs/**/*.md",
+        "**/*.md"
+      ],
+      "rationale": "Hardcoded user paths break on other developers' machines. Use $PROJECT_ROOT, $PWD, $HOME, or relative paths. Reported via parasitoid trial pre-scan; surfaced two real test bugs on first scan."
+    },
+    {
+      "name": "no_eval_invocation_in_hooks",
+      "pattern": "(^|[;&|][[:space:]]*)eval[[:space:]]+",
+      "severity": "deny",
+      "allowed_globs": [
+        "archive/**",
+        "**/*.md"
+      ],
+      "rationale": "eval in hook scripts is a code-injection risk — input may flow from tool args under attacker control."
+    },
+    {
+      "name": "no_silent_error_suppression_in_hooks",
+      "pattern": "(^|[;&|[:space:]])set[[:space:]]+\\+e([[:space:]]|$)",
+      "severity": "deny",
+      "allowed_globs": [
+        "archive/**",
+        "**/*.md",
+        "**/*_test.sh",
+        "scripts/tdd-test-hooks.sh"
+      ],
+      "rationale": "Hook scripts must fail-fast (set -euo pipefail). 'set +e' silently ignores failures and lets the hook return success despite a real problem."
+    },
+    {
+      "name": "no_chmod_777_in_pack",
+      "pattern": "chmod[[:space:]]+(-R[[:space:]]+)?777",
+      "severity": "deny",
+      "allowed_globs": [
+        "archive/**",
+        "**/*.md",
+        ".claude/hooks/guard-dangerous-bash.sh",
+        ".claude/settings.json"
+      ],
+      "rationale": "World-writable permissions are a security risk. The starter pack denies chmod 777 in user code (guard-dangerous-bash.sh) and must not use it itself."
+    },
+    {
+      "name": "no_curl_pipe_shell_in_pack",
+      "pattern": "curl[[:space:]][^|]*\\|[[:space:]]*(bash|sh)",
+      "severity": "deny",
+      "allowed_globs": [
+        "archive/**",
+        "**/*.md",
+        ".claude/hooks/guard-dangerous-bash.sh",
+        ".claude/settings.json"
+      ],
+      "rationale": "curl|bash pipes remote code into a shell with no integrity check. The pack denies this in user code and must not use it itself."
+    }
+  ],
 
   "_second_opinion_doc": "Default Codex model for the /second-opinion skill. Resolution order: env var (SECOND_OPINION_MODEL_TIER1 / SECOND_OPINION_MODEL_DEFAULT / SECOND_OPINION_FALLBACK_MODEL) > this config block > skill's hardcoded fallback. Defaults below pin the most powerful model for both tiers — change to the latest available when a newer Codex model ships. Note: model_tier1 (gpt-5.5) requires ChatGPT-account auth via 'codex login'; with API-key auth the skill auto-falls-back to fallback_model.",
   "_second_opinion_v1_6_doc": "v1.6.0 Tier-1 artifact requirements. All three default to false for safe opt-in rollout; flip to true after the eval harness shows value for your codebase (see docs/specs/second-opinion-v1.6.0-spec.md §8 validation plan). The skill writes these artifacts when their requirement flag is true OR when Pass A is enabled (env var SECOND_OPINION_PASS_A_DISABLE=1 disables Pass A independently of the require flag).",

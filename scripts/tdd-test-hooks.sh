@@ -2,6 +2,11 @@
 # Smoke-test the TDD hooks. Run with `make tdd-test`.
 set -euo pipefail
 
+# Capture the project root once. Tests that cd into temp dirs need this
+# to invoke hooks that live in the project. Avoids hardcoded /home/X
+# paths that break for other developers.
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
 if ! command -v jq >/dev/null 2>&1; then
   echo "ERROR: jq is required to run the hook smoke tests." >&2
   echo "  Install: sudo apt-get install jq / brew install jq / apk add jq" >&2
@@ -1245,6 +1250,74 @@ fi
 rm -rf "$TMPROOT_MIG"
 
 echo
+echo "Testing layer-1 vs layer-2 split (guards fire independent of TDD cycle)..."
+
+# Pack-self dogfooding finding (2026-05-08): guards were dormant on commits
+# without active TDD cycles or staged Tier 1 files. After the layer split,
+# integration_guards fire on EVERY commit when defined; TDD ceremony checks
+# only fire when a cycle is active and Tier 1 is staged.
+
+TMPROOT_LAYERS=$(mktemp -d)
+git init -q "$TMPROOT_LAYERS"
+( cd "$TMPROOT_LAYERS" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMPROOT_LAYERS/.tdd" "$TMPROOT_LAYERS/.claude" "$TMPROOT_LAYERS/internal/utils"
+# Config with a guard but no Tier 1 paths and no plan.
+cat > "$TMPROOT_LAYERS/.tdd/tdd-config.json" <<'EOF'
+{
+  "tier1_path_regexes": [],
+  "integration_guards_exclude_dirs": [".git"],
+  "integration_guards": [
+    {"name":"no_chmod_777","pattern":"chmod[[:space:]]+777","severity":"deny","allowed_globs":[],"rationale":"security"}
+  ]
+}
+EOF
+echo "package u" > "$TMPROOT_LAYERS/internal/utils/helper.go"
+( cd "$TMPROOT_LAYERS" && git add . && git commit -q -m initial )
+
+# Test: guards fire even with NO Tier 1 paths, NO active plan, NO Tier 1 staged.
+echo "#!/bin/bash
+chmod 777 /tmp/x" > "$TMPROOT_LAYERS/scripts.sh"
+( cd "$TMPROOT_LAYERS" && git add scripts.sh )
+out=$(echo '{"tool_input":{"command":"git commit -m \"chore: x\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_LAYERS" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "Layer 1: guards fire on commit with no Tier 1 / no active plan"
+else
+  fail "Layer 1: guards should fire regardless of cycle state (got: $out)"
+fi
+
+# Test: pack-self exclude_dirs ('.tdd' excluded) avoids self-reference of
+# guard patterns stored in tdd-config.json. Set up a fresh tdd-config WITH
+# patterns; assert the violation report doesn't include tdd-config.json
+# itself (which would be the meta-bug — guard pattern matches itself).
+TMPROOT_SELFREF=$(mktemp -d)
+mkdir -p "$TMPROOT_SELFREF/.tdd"
+cat > "$TMPROOT_SELFREF/.tdd/tdd-config.json" <<'EOF'
+{
+  "tier1_path_regexes": [],
+  "integration_guards_exclude_dirs": [".git", ".tdd"],
+  "integration_guards": [
+    {"name":"no_chmod_777","pattern":"chmod[[:space:]]+777","severity":"deny","allowed_globs":[],"rationale":"security"}
+  ]
+}
+EOF
+git init -q "$TMPROOT_SELFREF"
+( cd "$TMPROOT_SELFREF" && git config user.email t@t && git config user.name t && git add . && git commit -q -m initial )
+out=$(echo '{"tool_input":{"command":"git commit -m \"chore: clean\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SELFREF" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>&1)
+if [[ "$out" != *"tdd-config.json"* ]]; then
+  pass "exclude_dirs '.tdd' avoids self-referential pattern match in tdd-config.json"
+else
+  fail "guard fired on its own pattern stored in tdd-config.json (got: '$out')"
+fi
+rm -rf "$TMPROOT_SELFREF"
+
+rm -rf "$TMPROOT_LAYERS"
+
+echo
 echo "Testing parasitoid trial-feedback fixes..."
 
 # Mutating-Bash detector false-positive fix: cat foo 2>/dev/null is
@@ -1296,7 +1369,7 @@ echo "initial" > "$TMPROOT_AB/README.md"
 cat >> "$TMPROOT_AB/README.md" <<'EOF'
 - TODO: write the auth section
 EOF
-out=$(cd "$TMPROOT_AB" && echo '{}' | bash /home/toha/go-projects-claude-starter/.claude/hooks/detect-ai-bloat.sh 2>&1)
+out=$(cd "$TMPROOT_AB" && echo '{}' | bash "$PROJECT_ROOT/.claude/hooks/detect-ai-bloat.sh" 2>&1)
 if [ -z "$out" ]; then
   pass "AI-bloat hook silent on markdown-only TODO edit (no advisory)"
 else
@@ -1315,7 +1388,7 @@ echo "package m
 // TODO: implement
 func Foo() {}
 func NewExportedSymbol() {}" > "$TMPROOT_AB/main.go"
-out=$(cd "$TMPROOT_AB" && echo '{}' | bash /home/toha/go-projects-claude-starter/.claude/hooks/detect-ai-bloat.sh 2>&1)
+out=$(cd "$TMPROOT_AB" && echo '{}' | bash "$PROJECT_ROOT/.claude/hooks/detect-ai-bloat.sh" 2>&1)
 if [[ "$out" == *"AI-bloat advisory"* ]]; then
   pass "AI-bloat hook still fires on .go TODO + new exported symbol"
 else
