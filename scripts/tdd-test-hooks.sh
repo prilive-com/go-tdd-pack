@@ -780,6 +780,191 @@ fi
 rm -rf "$TMPROOT_GTC"
 
 echo
+echo "Testing integration_guards (gate-tier1-commit.sh)..."
+
+# Set up a project with a guard and a green-ready cycle, then probe.
+TMPROOT_GRD=$(mktemp -d)
+git init -q "$TMPROOT_GRD"
+( cd "$TMPROOT_GRD" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMPROOT_GRD/.tdd" "$TMPROOT_GRD/.claude" \
+         "$TMPROOT_GRD/internal/auth" "$TMPROOT_GRD/internal/intent" \
+         "$TMPROOT_GRD/internal/orchestrator"
+
+# Base config + plan in green-commit-ready state (M4 yes, fresh artifacts).
+cp .tdd/tdd-config.json "$TMPROOT_GRD/.tdd/"
+cat > "$TMPROOT_GRD/.tdd/current-plan.md" <<'EOF'
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: yes
+Implementation reviewed: yes
+EOF
+echo "green output" > "$TMPROOT_GRD/.tdd/green-proof.md"
+touch "$TMPROOT_GRD/.tdd/second-opinion-completed.md"
+
+# Production files. orchestrator.go calls PlaceOrder directly (the bug);
+# intent/tracker.go does too but is allowlisted.
+cat > "$TMPROOT_GRD/internal/orchestrator/orchestrator.go" <<'EOF'
+package orchestrator
+func sell() { ExchangeService.PlaceOrder() }
+EOF
+cat > "$TMPROOT_GRD/internal/intent/tracker.go" <<'EOF'
+package intent
+func place() { ExchangeService.PlaceOrder() }
+EOF
+echo "package auth" > "$TMPROOT_GRD/internal/auth/handler.go"
+( cd "$TMPROOT_GRD" && git add . && git commit -q -m "initial" )
+
+# Stage a Tier 1 production change so the commit gate kicks in.
+echo "// modified" >> "$TMPROOT_GRD/internal/auth/handler.go"
+( cd "$TMPROOT_GRD" && git add internal/auth/handler.go )
+
+# Helper: install a guards array into the config.
+set_guards() {
+  local guards_json="$1"
+  jq ".integration_guards = $guards_json" \
+    "$TMPROOT_GRD/.tdd/tdd-config.json" \
+    > "$TMPROOT_GRD/.tdd/tdd-config.json.tmp"
+  mv "$TMPROOT_GRD/.tdd/tdd-config.json.tmp" "$TMPROOT_GRD/.tdd/tdd-config.json"
+}
+
+# Test: guard finds a violation outside allowed_globs → deny.
+set_guards '[{
+  "name": "no_direct_PlaceOrder",
+  "pattern": "ExchangeService\\.PlaceOrder",
+  "severity": "deny",
+  "allowed_globs": ["internal/intent/**/*.go"],
+  "rationale": "Order placement must route through IntentTracker"
+}]'
+out=$(echo '{"tool_input":{"command":"git commit -m \"green(test): impl\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GRD" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "Guard violation outside allowed_globs denies commit"
+else
+  fail "Guard outside allowed should deny (got: $out)"
+fi
+
+# Test: same guard, but EVERY violator is allowlisted → allow.
+set_guards '[{
+  "name": "no_direct_PlaceOrder",
+  "pattern": "ExchangeService\\.PlaceOrder",
+  "severity": "deny",
+  "allowed_globs": ["internal/intent/**/*.go", "internal/orchestrator/**/*.go"],
+  "rationale": "Allowlisted for this test"
+}]'
+out=$(echo '{"tool_input":{"command":"git commit -m \"green(test): impl\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GRD" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "Guard with all violators in allowed_globs allows commit"
+else
+  fail "All-allowed should pass (got: '$out')"
+fi
+
+# Test: warn-severity violation does NOT deny but is logged.
+set_guards '[{
+  "name": "stringly_typed_warn",
+  "pattern": "ExchangeService\\.PlaceOrder",
+  "severity": "warn",
+  "allowed_globs": [],
+  "rationale": "Prefer typed wrapper"
+}]'
+stderr_out=$(echo '{"tool_input":{"command":"git commit -m \"green(test): impl\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GRD" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>&1 >/dev/null; echo "exit:$?")
+if [[ "$stderr_out" == *"exit:0"* ]] && [[ "$stderr_out" == *"WARN: stringly_typed_warn"* ]]; then
+  pass "warn-severity guard logs warning but allows commit"
+else
+  fail "warn should pass+log (got: '$stderr_out')"
+fi
+
+# Test: empty guards array → allow (and existing checks still work).
+set_guards '[]'
+out=$(echo '{"tool_input":{"command":"git commit -m \"green(test): impl\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GRD" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "empty integration_guards array allows commit (no-op)"
+else
+  fail "empty guards should pass (got: '$out')"
+fi
+
+# Test: no matches → allow (pattern matches nothing in repo).
+set_guards '[{
+  "name": "nonexistent_pattern",
+  "pattern": "ThisPatternMatchesNothingInRepo123",
+  "severity": "deny",
+  "allowed_globs": [],
+  "rationale": "no matches expected"
+}]'
+out=$(echo '{"tool_input":{"command":"git commit -m \"green(test): impl\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GRD" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "guard with no matches allows commit"
+else
+  fail "no-match guard should pass (got: '$out')"
+fi
+
+# Test: ** glob crosses directories.
+mkdir -p "$TMPROOT_GRD/internal/intent/v2"
+cat > "$TMPROOT_GRD/internal/intent/v2/tracker.go" <<'EOF'
+package v2
+func place() { ExchangeService.PlaceOrder() }
+EOF
+( cd "$TMPROOT_GRD" && git add internal/intent/v2/ && git commit -q -m "init v2" )
+set_guards '[{
+  "name": "no_direct_PlaceOrder",
+  "pattern": "ExchangeService\\.PlaceOrder",
+  "severity": "deny",
+  "allowed_globs": ["internal/intent/**/*.go"],
+  "rationale": "Allowlist covers nested dirs via **"
+}]'
+# Re-stage the auth change after the v2 commit consumed staging.
+echo "// modified again" >> "$TMPROOT_GRD/internal/auth/handler.go"
+( cd "$TMPROOT_GRD" && git add internal/auth/handler.go )
+out=$(echo '{"tool_input":{"command":"git commit -m \"green(test): impl\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GRD" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+# orchestrator/orchestrator.go is still in repo and NOT in allowed_globs → deny
+# Even though v2/tracker.go is allowlisted via **
+if [ "$out" = "deny" ]; then
+  pass "** glob respects nested matches but still flags non-allowlisted files"
+else
+  fail "Mixed allowlist + violator should deny (got: $out)"
+fi
+
+# Test: multiple guards (one denies, one warns, both fire).
+set_guards '[
+  {
+    "name": "deny_one",
+    "pattern": "ExchangeService\\.PlaceOrder",
+    "severity": "deny",
+    "allowed_globs": ["internal/intent/**/*.go"],
+    "rationale": "primary deny rule"
+  },
+  {
+    "name": "warn_two",
+    "pattern": "func place\\b",
+    "severity": "warn",
+    "allowed_globs": [],
+    "rationale": "naming convention warning"
+  }
+]'
+stderr_out=$(echo '{"tool_input":{"command":"git commit -m \"green(test): impl\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GRD" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>&1 >/dev/null; echo "exit:$?")
+if [[ "$stderr_out" == *"exit:2"* ]] && [[ "$stderr_out" == *"deny_one"* ]] && [[ "$stderr_out" == *"warn_two"* ]]; then
+  pass "Multiple guards: deny + warn both reported, deny wins"
+else
+  fail "Multiple guards combo (got: '$stderr_out')"
+fi
+
+rm -rf "$TMPROOT_GRD"
+
+echo
 echo "Testing migrate-tdd-markers.sh..."
 
 TMPROOT_MIG=$(mktemp -d)

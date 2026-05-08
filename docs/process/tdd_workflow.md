@@ -131,6 +131,19 @@ The hooks are the structural defense. CLAUDE.md rules are advisory —
 documented incidents prove the agent will violate text rules under
 pressure.
 
+## Integration guards (commit-time)
+
+The commit gate also runs project-level **integration guards** — regex
+patterns declared in `.tdd/tdd-config.json` (`integration_guards` array).
+Guards encode invariants that aren't easily expressed as integration
+tests, e.g. "no direct calls to API X outside wrapper Y". On any guard
+violation outside the allowed-globs list, the commit is denied (or
+warned, if `severity: warn`).
+
+Guards are FALLBACK protection. Integration tests are primary. See
+[`.claude/rules/go-integration-guards.md`](../../.claude/rules/go-integration-guards.md)
+for the decision tree and schema.
+
 ## History
 
 The earlier "two gates" model produced a deadlock when the documentation

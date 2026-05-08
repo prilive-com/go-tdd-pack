@@ -201,5 +201,167 @@ if [[ -z "$(find "$ADJUDICATION" -mmin -60 -print 2>/dev/null)" ]]; then
     "Tier 1 commit blocked: .tdd/second-opinion-completed.md is older than 60 minutes. Re-run /second-opinion diff on the current staged diff."
 fi
 
+# ---- Integration guards (added 2026-05-07) --------------------------------
+#
+# Project-level static-analysis guards. Each guard is a regex pattern that,
+# if matched in a file outside allowed_globs, fails the commit. Encodes
+# project-wide invariants that aren't easily expressed as integration tests
+# (e.g., "no direct calls to API X outside wrapper Y").
+#
+# Origin: parasitoid trial-period feedback (2026-05-07). Plan-review caught
+# 9 design bugs but missed 3 integration bugs that were visible from a
+# wide-angle code read of the integrated repo. These guards encode known
+# integration assumptions so a grep can enforce them statically.
+#
+# Guards are FALLBACK protection. Write integration tests first; add a
+# guard for invariants tests can't reach. See go-integration-guards rule.
+
+# glob_to_regex: convert a shell glob (with ** for cross-directory) to an
+# anchored regex. Treats `**/` as ZERO-OR-MORE path segments (gitignore
+# convention) so a glob like "internal/intent/**/*.go" matches both
+# "internal/intent/tracker.go" (zero intermediate dirs) AND
+# "internal/intent/v2/tracker.go" (one or more).
+#
+# Examples:
+#   "internal/**/*.go"          -> ^internal/(.*/)?[^/]*\.go$
+#   "internal/intent/**/*.go"   -> ^internal/intent/(.*/)?[^/]*\.go$
+#   "**/*_test.go"              -> ^(.*/)?[^/]*_test\.go$
+#   "internal/intent/**"        -> ^internal/intent/.*$  (lone ** anywhere)
+glob_to_regex() {
+  local g="$1"
+  # Escape regex specials (except *).
+  g="${g//\\/\\\\}"
+  g="${g//./\\.}"
+  g="${g//+/\\+}"
+  g="${g//\?/\\?}"
+  g="${g//\(/\\(}"
+  g="${g//\)/\\)}"
+  g="${g//\[/\\[}"
+  g="${g//\]/\\]}"
+  # Note: do NOT escape { } — they aren't POSIX ERE specials in this
+  # context, and bash's ${var//pat/repl} grammar mishandles literal } in
+  # the replacement (the closing brace of the substitution swallows it).
+  g="${g//\^/\\^}"
+  g="${g//\$/\\\$}"
+  # Protect wildcards. Order matters: handle **/ before ** before *.
+  g="${g//\*\*\//__DSS__}"  # **/ -> placeholder for "zero+ path segments"
+  g="${g//\*\*/__DS__}"     # ** (no trailing /) -> "any chars"
+  g="${g//\*/[^/]*}"        # * (single segment) -> non-slash chars
+  # Restore.
+  g="${g//__DSS__/(.*/)?}"  # zero or more "segment/" prefixes
+  g="${g//__DS__/.*}"        # any chars including /
+  printf '^%s$\n' "$g"
+}
+
+# Read the guards array. Pass count check first to skip cleanly if empty.
+GUARD_COUNT="$(jq -r '(.integration_guards // []) | length' "$CONFIG" 2>/dev/null || echo 0)"
+
+if [[ "${GUARD_COUNT:-0}" -gt 0 ]]; then
+  GUARD_VIOLATIONS_DENY=()
+  GUARD_VIOLATIONS_WARN=()
+
+  # Iterate guards.
+  while IFS= read -r guard_json; do
+    [[ -z "$guard_json" ]] && continue
+    name="$(jq -r '.name // "unnamed"' <<<"$guard_json")"
+    pattern="$(jq -r '.pattern // empty' <<<"$guard_json")"
+    severity="$(jq -r '.severity // "deny"' <<<"$guard_json")"
+    rationale="$(jq -r '.rationale // ""' <<<"$guard_json")"
+    [[ -z "$pattern" ]] && continue
+
+    # Build regex set for allowed_globs.
+    allowed_regexes=()
+    while IFS= read -r g; do
+      [[ -z "$g" ]] && continue
+      allowed_regexes+=("$(glob_to_regex "$g")")
+    done < <(jq -r '.allowed_globs[]? // empty' <<<"$guard_json")
+
+    # Scan repo. Limit to source files; exclude vendor / .git / node_modules /
+    # tdd state. Use grep -lE for fast filename listing.
+    # Note: -- (end-of-options) goes AFTER --include / --exclude-dir flags.
+    # Placing -- before them would make GNU grep treat the flags as positional
+    # path arguments (caught during smoke testing — every "no match" case
+    # returned the .tdd/tdd-config.json path because the include filter was
+    # being ignored).
+    matches="$(grep -rlE \
+      --include='*.go' --include='*.sql' --include='*.sh' --include='*.py' \
+      --exclude-dir='.git' --exclude-dir='vendor' --exclude-dir='node_modules' \
+      --exclude-dir='.tdd' --exclude-dir='.claude' \
+      -- "$pattern" "$ROOT" 2>/dev/null || true)"
+
+    [[ -z "$matches" ]] && continue
+
+    while IFS= read -r f; do
+      [[ -z "$f" ]] && continue
+      # Strip the project root prefix for cleaner messages and glob matching.
+      rel="${f#${ROOT}/}"
+      # Check if file matches any allowed_glob.
+      is_allowed=false
+      for re in "${allowed_regexes[@]}"; do
+        if [[ "$rel" =~ $re ]]; then
+          is_allowed=true
+          break
+        fi
+      done
+      $is_allowed && continue
+      # Violation.
+      msg="$name: $rel — $rationale"
+      if [[ "$severity" == "warn" ]]; then
+        GUARD_VIOLATIONS_WARN+=("$msg")
+      else
+        GUARD_VIOLATIONS_DENY+=("$msg")
+      fi
+    done <<< "$matches"
+  done < <(jq -c '.integration_guards[]? // empty' "$CONFIG" 2>/dev/null)
+
+  # Emit warnings (always to stderr + audit).
+  if [[ ${#GUARD_VIOLATIONS_WARN[@]} -gt 0 ]]; then
+    echo "[gate-tier1-commit] integration-guard warnings (${#GUARD_VIOLATIONS_WARN[@]}):" >&2
+    for v in "${GUARD_VIOLATIONS_WARN[@]}"; do
+      echo "  WARN: $v" >&2
+      audit "warn" "guard_warn:$v"
+    done
+  fi
+
+  # Deny on any deny-severity violation.
+  if [[ ${#GUARD_VIOLATIONS_DENY[@]} -gt 0 ]]; then
+    audit "deny" "guard_violations=${#GUARD_VIOLATIONS_DENY[@]}"
+    cat <<JSON
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Tier 1 commit blocked: ${#GUARD_VIOLATIONS_DENY[@]} integration-guard violation(s). See stderr for details."}}
+JSON
+    cat >&2 <<DIRECTIVE
+[gate-tier1-commit] BLOCKED: ${#GUARD_VIOLATIONS_DENY[@]} integration-guard violation(s).
+
+<claude-directive>
+This is an AUTOMATED COMMIT GATE. The repo contains code that violates
+project-level integration guards declared in .tdd/tdd-config.json
+(integration_guards array). Integration guards encode invariants that
+should hold across the codebase — typically "no direct calls to API X
+outside wrapper Y" or "metadata key Z must be consistent."
+
+Violations:
+DIRECTIVE
+    for v in "${GUARD_VIOLATIONS_DENY[@]}"; do echo "  - $v" >&2; done
+    cat >&2 <<DIRECTIVE
+
+You MUST do one of:
+  1. Fix the violation: bring the offending file(s) into compliance with
+     the guard's invariant.
+  2. If the file is legitimately exempt from the guard (e.g., a new
+     wrapper that's allowed to call the underlying API), add its glob
+     to the guard's allowed_globs list in .tdd/tdd-config.json. Document
+     why in the commit message.
+  3. If the guard itself is wrong (the invariant has changed), remove
+     or revise it. Document why in the commit message.
+
+Guards are FALLBACK protection. If you find yourself adding a guard
+after a bug, also write the integration test that would have caught the
+bug. See .claude/rules/go-integration-guards.md for the decision tree.
+</claude-directive>
+DIRECTIVE
+    exit 2
+  fi
+fi
+
 audit "allow" "all_gates_satisfied"
 exit 0

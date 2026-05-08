@@ -50,5 +50,16 @@
     "Human approved spec: yes",
     "Red phase confirmed: yes",
     "Green phase authorized: yes"
-  ]
+  ],
+
+  "_integration_guards_doc": "Project-level static-analysis guards. Each guard is a regex pattern that, if matched in a file outside allowed_globs, fails the green commit. Use to encode invariants that aren't easily expressed as integration tests (e.g., 'no direct calls to API X outside wrapper Y'). Guards are FALLBACK protection — write integration tests first; add a guard for invariants tests can't reach. See .claude/rules/go-integration-guards.md for the decision tree.",
+  "_integration_guards_schema": {
+    "name": "short identifier shown in violation message",
+    "pattern": "POSIX extended regex (grep -E), matched against file content",
+    "severity": "deny | warn — deny blocks the commit; warn only logs",
+    "allowed_globs": "list of glob patterns; files matching any are exempt. Supports ** for cross-directory.",
+    "rationale": "one sentence explaining what invariant this guards"
+  },
+  "_integration_guards_examples_doc": "The empty array is the default. Each project should add its own guards over time — every shipped bug that a grep could have caught becomes a permanent guard.",
+  "integration_guards": []
 }
