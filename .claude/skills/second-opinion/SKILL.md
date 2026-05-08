@@ -282,21 +282,35 @@ red_full() { red_pem_multiline | red; }
 REDACT_FILE="$(load_redact_patterns .claude/redact-patterns.txt)"
 export REDACT_FILE
 
-# Tier-aware model selection.
-# Universal scope means we review every non-trivial change. To keep cost
-# and latency reasonable, use a stronger model only when it earns its
-# keep — Tier 1 paths (money, auth, migrations, etc.) get the deep model;
-# everything else gets a faster cheaper one.
+# Model selection.
+# Default to the most powerful Codex model for both tiers. The repo's
+# rationale (per user preference): never downgrade for cost or latency on
+# code review — review quality dominates. The tier-aware variable kept
+# below is for projects that want to opt-down to a cheaper model on
+# non-Tier-1 paths; in that case set second_opinion.model_default in
+# .tdd/tdd-config.json or export SECOND_OPINION_MODEL_DEFAULT.
 #
-# Override either default with env vars:
-#   SECOND_OPINION_MODEL_TIER1   (default gpt-5.5; ChatGPT auth only)
-#   SECOND_OPINION_MODEL_DEFAULT (default gpt-5.4-mini; works with both auths)
-#   SECOND_OPINION_MODEL         (legacy single-knob; if set, used for both)
-#   SECOND_OPINION_FALLBACK_MODEL (used if the primary fails; default gpt-5.4)
+# Resolution order (highest priority first):
+#   1. Env var (SECOND_OPINION_MODEL_TIER1 / _DEFAULT / _FALLBACK)
+#   2. Legacy single-knob env var SECOND_OPINION_MODEL (sets both tiers)
+#   3. Per-project config: .tdd/tdd-config.json second_opinion.{...}
+#   4. Hardcoded fallback in this file
+#
+# Note: gpt-5.5 requires ChatGPT-account auth via `codex login`. With
+# API-key auth, run_codex falls back to fallback_model automatically.
 
-tier1_model="${SECOND_OPINION_MODEL_TIER1:-${SECOND_OPINION_MODEL:-gpt-5.5}}"
-default_model="${SECOND_OPINION_MODEL_DEFAULT:-${SECOND_OPINION_MODEL:-gpt-5.4-mini}}"
-fallback_model="${SECOND_OPINION_FALLBACK_MODEL:-gpt-5.4}"
+cfg_tier1_model=""
+cfg_default_model=""
+cfg_fallback_model=""
+if [ -f .tdd/tdd-config.json ] && command -v jq >/dev/null 2>&1; then
+  cfg_tier1_model="$(jq -r '.second_opinion.model_tier1 // empty' .tdd/tdd-config.json 2>/dev/null)"
+  cfg_default_model="$(jq -r '.second_opinion.model_default // empty' .tdd/tdd-config.json 2>/dev/null)"
+  cfg_fallback_model="$(jq -r '.second_opinion.fallback_model // empty' .tdd/tdd-config.json 2>/dev/null)"
+fi
+
+tier1_model="${SECOND_OPINION_MODEL_TIER1:-${SECOND_OPINION_MODEL:-${cfg_tier1_model:-gpt-5.5}}}"
+default_model="${SECOND_OPINION_MODEL_DEFAULT:-${SECOND_OPINION_MODEL:-${cfg_default_model:-gpt-5.5}}}"
+fallback_model="${SECOND_OPINION_FALLBACK_MODEL:-${cfg_fallback_model:-gpt-5.4}}"
 
 # Decide which model to use. Look at changed paths against the project's
 # Tier 1 regexes (.tdd/tdd-config.json). If any matches, this is a Tier 1
@@ -616,12 +630,33 @@ they're sure...", that's deference. Reject and explain why.
 
 ## Override knobs
 
+Two layers: env vars (per-invocation) and project config (per-repo).
+
+### Per-invocation env vars
+
 | Env var | Effect |
 |---|---|
-| `SECOND_OPINION_MODEL` | Pin to a specific Codex model (default: `gpt-5.5`). Examples: `gpt-5.4`, `gpt-5.3-codex`. |
+| `SECOND_OPINION_MODEL` | Legacy single-knob; pins both tiers to one model. |
+| `SECOND_OPINION_MODEL_TIER1` | Pin Tier 1 model (default: `gpt-5.5`; needs ChatGPT auth). |
+| `SECOND_OPINION_MODEL_DEFAULT` | Pin non-Tier-1 model (default: `gpt-5.5`; opt down to `gpt-5.4-mini` if you want cheap reviews on trivial paths). |
+| `SECOND_OPINION_FALLBACK_MODEL` | Used if the primary returns nothing (default: `gpt-5.4`; works with API-key auth). |
 | `SECOND_OPINION_DISABLE=1` | Skill exits 0 silently. |
 
-That's the entire surface. Two env vars, no config file, no JSON
-schema, no Round 2, no eval harness. If after a few weeks of real
-use you find yourself wishing it auto-fired, see MAINTAINING.md
-"Second-opinion skill design choices" for the rationale.
+### Per-project config (`.tdd/tdd-config.json`)
+
+```json
+"second_opinion": {
+  "model_tier1": "gpt-5.5",
+  "model_default": "gpt-5.5",
+  "fallback_model": "gpt-5.4"
+}
+```
+
+Resolution order (highest priority first): env var → legacy single-knob
+env var → config field → hardcoded fallback. Edit the config when you
+want a project-wide default that survives across operator shells.
+
+The defaults pin the most powerful model for both tiers — never downgrade
+for cost or latency on code review. To opt down on trivial paths (e.g.,
+docs-heavy projects where universal-scope reviews would be pure
+overhead), set `model_default` to a cheaper model in the config.

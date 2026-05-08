@@ -61,5 +61,12 @@
     "rationale": "one sentence explaining what invariant this guards"
   },
   "_integration_guards_examples_doc": "The empty array is the default. Each project should add its own guards over time — every shipped bug that a grep could have caught becomes a permanent guard.",
-  "integration_guards": []
+  "integration_guards": [],
+
+  "_second_opinion_doc": "Default Codex model for the /second-opinion skill. Resolution order: env var (SECOND_OPINION_MODEL_TIER1 / SECOND_OPINION_MODEL_DEFAULT / SECOND_OPINION_FALLBACK_MODEL) > this config block > skill's hardcoded fallback. Defaults below pin the most powerful model for both tiers — change to the latest available when a newer Codex model ships. Note: model_tier1 (gpt-5.5) requires ChatGPT-account auth via 'codex login'; with API-key auth the skill auto-falls-back to fallback_model.",
+  "second_opinion": {
+    "model_tier1": "gpt-5.5",
+    "model_default": "gpt-5.5",
+    "fallback_model": "gpt-5.4"
+  }
 }
