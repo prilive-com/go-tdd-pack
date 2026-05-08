@@ -34,7 +34,7 @@ These fixes activate automatically when you update. They do not require config c
 | Redact-patterns hardening | Comment lines in `.claude/redact-patterns.txt` no longer crash the redactor; invalid regex is logged + skipped (not silent failure) | Trial showed silent diff-emptying causing `/second-opinion` to bill for empty reviews |
 | Pre-Codex packet validation | Skill skips with diagnostic instead of sending empty TARGET to Codex | Same root cause as above; defense in depth |
 | PARTIAL discipline check | `/second-opinion` adjudication denies any PARTIAL stance with empty `rejected:` field (anti-patterns: `nothing`/`n/a`/`none`/blank) | Closes the sycophancy-theatre slot where label drift hides |
-| YAML CI fix | `.gitlab-ci.yml` agents-md-sync job now parses correctly | Pre-existing bug surfaced by the first MR pipeline run |
+| YAML CI fix | `.gitlab-ci.yml` operating-rules-present job now parses correctly | Pre-existing bug surfaced by the first MR pipeline run |
 
 **Adoption:** nothing for you to do. These activate on update.
 
@@ -278,7 +278,7 @@ The skill auto-falls-back to `gpt-5.4` (the most powerful model API-key auth sup
 
 ### CI / pipeline failures
 
-If the GitLab pipeline fails on `agents-md-sync`, you have an old version of `.gitlab-ci.yml`. The fix is in commit `cc425d3`. Pull it in.
+If the GitLab pipeline fails on `operating-rules-present`, you have an old version of `.gitlab-ci.yml` or a missing operating-rules file. Pull in the current CI template and verify both `CLAUDE.md` and `AGENTS.md` exist.
 
 ---
 

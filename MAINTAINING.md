@@ -14,8 +14,10 @@ them.
 
 ## Layout
 
-- `CLAUDE.md` / `AGENTS.md` — consumer-facing operating rules. Carried
-  into every cloned project. Keep concise.
+- `CLAUDE.md` / `AGENTS.md` — consumer-facing operating rules. `CLAUDE.md`
+  is for Claude CLI; `AGENTS.md` is for Codex / cross-agent tooling.
+  Carried into every cloned project. Keep concise, and keep intent
+  aligned without forcing byte-identical text.
 - `REVIEW.md` — Staff+ review rubric. Used by the `go-reviewer` agent.
 - `.claude/` — what Claude CLI loads automatically:
   - `settings.json` — permissions + hook registration. Path-based

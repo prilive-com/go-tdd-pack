@@ -56,7 +56,7 @@ gopls loads automatically.
 ```
 .
 ├── CLAUDE.md            # Operating rules (auto-loaded by Claude CLI)
-├── AGENTS.md            # Mirror of CLAUDE.md for cross-tool compatibility
+├── AGENTS.md            # Codex / cross-agent operating rules
 ├── REVIEW.md            # Staff+ review rubric (used by go-reviewer agent)
 ├── Makefile             # Convenience targets: make ci / make test / ...
 ├── .mcp.json            # Project MCP servers (gopls). MUST be at repo root,

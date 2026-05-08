@@ -1,4 +1,4 @@
-# CLAUDE.md — Go Project Operating Rules
+# AGENTS.md — Codex Go Project Operating Rules
 
 You are working in a Go repository. Read carefully — these are standing
 rules.
@@ -15,6 +15,40 @@ Before editing code:
 4. Prefer modifying existing code over creating new abstractions.
 5. Do not add dependencies, exported APIs, goroutines, config fields,
    background workers, or new packages unless required by the task.
+
+## Repository profile
+
+This repository is both:
+
+- the upstream `go-claude-starter` governance pack (hooks, skills,
+  rules, CI templates, examples), and
+- a template copied into downstream Go projects.
+
+`CLAUDE.md` is for Claude CLI. Do not edit it when updating Codex or
+cross-agent instructions unless the task explicitly asks for Claude CLI
+rule changes. `AGENTS.md` may diverge from `CLAUDE.md` when Codex needs
+different operating guidance.
+
+When working on this repository itself:
+
+- Most load-bearing behavior is shell/JSON/Markdown under `.claude/`,
+  `.tdd/`, `scripts/`, and CI files. Treat hooks and scripts as
+  production code.
+- Do not assume a root `go.mod` exists. `make ci`, `go test ./...`, and
+  `go mod tidy` are for initialized downstream projects or this repo
+  after module initialization. For starter-pack hook/config changes, run
+  `bash scripts/tdd-test-hooks.sh` plus targeted shell/JSON checks; run
+  Go verification only when a real module/package is present.
+- `examples/tdd-cycle/` is illustrative fixture content with
+  `//go:build ignore`, not application code.
+- If changing TDD marker names, phase rules, or gate behavior, update
+  `.tdd/tdd-config.json`, templates, hooks, skills, docs, smoke tests,
+  and examples deliberately. Search for old and new marker strings;
+  marker drift is a governance bug.
+- If changing integration guards in `.tdd/tdd-config.json`, remember
+  defaults in this starter pack encode pack-self invariants; downstream
+  projects should replace them with their own project-specific
+  invariants.
 
 ## Two workflow modes
 
