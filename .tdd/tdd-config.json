@@ -64,9 +64,13 @@
   "integration_guards": [],
 
   "_second_opinion_doc": "Default Codex model for the /second-opinion skill. Resolution order: env var (SECOND_OPINION_MODEL_TIER1 / SECOND_OPINION_MODEL_DEFAULT / SECOND_OPINION_FALLBACK_MODEL) > this config block > skill's hardcoded fallback. Defaults below pin the most powerful model for both tiers — change to the latest available when a newer Codex model ships. Note: model_tier1 (gpt-5.5) requires ChatGPT-account auth via 'codex login'; with API-key auth the skill auto-falls-back to fallback_model.",
+  "_second_opinion_v1_6_doc": "v1.6.0 Tier-1 artifact requirements. All three default to false for safe opt-in rollout; flip to true after the eval harness shows value for your codebase (see docs/specs/second-opinion-v1.6.0-spec.md §8 validation plan). The skill writes these artifacts when their requirement flag is true OR when Pass A is enabled (env var SECOND_OPINION_PASS_A_DISABLE=1 disables Pass A independently of the require flag).",
   "second_opinion": {
     "model_tier1": "gpt-5.5",
     "model_default": "gpt-5.5",
-    "fallback_model": "gpt-5.4"
+    "fallback_model": "gpt-5.4",
+    "require_research_packet_tier1": false,
+    "require_pass_a_tier1": false,
+    "require_disposition_matrix_tier1": false
   }
 }

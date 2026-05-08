@@ -331,6 +331,76 @@ if [[ "$is_tier1" == "true" ]]; then
     deny "Tier 1 path ($TARGET) missing TDD edit-time marker in .tdd/current-plan.md: '$marker'. Complete the matching gate before editing — see docs/specs/tdd-gate-conflict-resolution-spec.md." \
          "tier1_marker_missing" "$TARGET"
   done
+
+  # v1.6.0 Tier 1 artifact checks (opt-in via config flags). All default
+  # OFF for safe rollout. Flip flags in .tdd/tdd-config.json after the
+  # eval harness shows value for the codebase. See
+  # docs/specs/second-opinion-v1.6.0-spec.md §3.1.
+  if [[ -f "$TDD_CONFIG_FILE" ]] && command -v jq >/dev/null 2>&1; then
+    require_packet="$(jq -r '.second_opinion.require_research_packet_tier1 // false' "$TDD_CONFIG_FILE" 2>/dev/null)"
+    require_pass_a="$(jq -r '.second_opinion.require_pass_a_tier1 // false' "$TDD_CONFIG_FILE" 2>/dev/null)"
+    require_matrix="$(jq -r '.second_opinion.require_disposition_matrix_tier1 // false' "$TDD_CONFIG_FILE" 2>/dev/null)"
+  else
+    require_packet=false
+    require_pass_a=false
+    require_matrix=false
+  fi
+
+  if [[ "$require_packet" == "true" ]]; then
+    packet="${ROOT}/.tdd/research-packet.md"
+    if [[ ! -f "$packet" ]]; then
+      deny "Tier 1 path ($TARGET) requires .tdd/research-packet.md per second_opinion.require_research_packet_tier1. Write the packet before editing — see docs/specs/second-opinion-v1.6.0-spec.md §2.3 and .tdd/templates/research-packet-template.md." \
+           "tier1_packet_missing" "$TARGET"
+    fi
+    # Count source entries (any list item under "## Sources" — supports
+    # numbered lists "1. " and bullets "- " or "* ").
+    source_count="$(awk '
+      /^## Sources/ { in_sources = 1; next }
+      /^## / { in_sources = 0 }
+      in_sources && /^[[:space:]]*([0-9]+\.|-|\*)[[:space:]]+/ { count++ }
+      END { print count + 0 }
+    ' "$packet" 2>/dev/null)"
+    if [[ "${source_count:-0}" -lt 3 ]]; then
+      deny "Tier 1 path ($TARGET): .tdd/research-packet.md has only ${source_count:-0} source(s); ≥3 required. The packet anchors Codex's review against the same evidence you consulted; thin sources mean weak anchoring." \
+           "tier1_packet_thin_sources" "$TARGET"
+    fi
+  fi
+
+  if [[ "$require_pass_a" == "true" ]] && [[ "${SECOND_OPINION_PASS_A_DISABLE:-0}" != "1" ]]; then
+    pass_a="${ROOT}/.tdd/codex/independent-design.md"
+    if [[ ! -f "$pass_a" ]]; then
+      deny "Tier 1 path ($TARGET) requires .tdd/codex/independent-design.md (Pass A blind independent design) per second_opinion.require_pass_a_tier1. Run /second-opinion plan to generate. Killswitch: export SECOND_OPINION_PASS_A_DISABLE=1." \
+           "tier1_pass_a_missing" "$TARGET"
+    fi
+    if [[ -z "$(find "$pass_a" -mmin -60 -print 2>/dev/null)" ]]; then
+      deny "Tier 1 path ($TARGET): .tdd/codex/independent-design.md is stale (mtime > 60min). Re-run /second-opinion plan to refresh Pass A — the plan may have changed since the last review." \
+           "tier1_pass_a_stale" "$TARGET"
+    fi
+  fi
+
+  if [[ "$require_matrix" == "true" ]]; then
+    matrix="${ROOT}/.tdd/codex/disposition-matrix.md"
+    round1="${ROOT}/.tdd/codex/round1.json"
+    if [[ ! -f "$matrix" ]]; then
+      deny "Tier 1 path ($TARGET) requires .tdd/codex/disposition-matrix.md per second_opinion.require_disposition_matrix_tier1. Write the matrix in Step 6 of /second-opinion — see .tdd/templates/disposition-matrix-template.md." \
+           "tier1_matrix_missing" "$TARGET"
+    fi
+    # Row count == findings count check (only if round1.json available).
+    if [[ -f "$round1" ]] && command -v jq >/dev/null 2>&1; then
+      findings_count="$(jq -r '(.findings // []) | length' "$round1" 2>/dev/null)"
+      matrix_rows="$(awk '
+        /^## Findings table/ { in_table = 1; next }
+        /^## / { in_table = 0 }
+        in_table && /^\|[[:space:]]+F[0-9]+[[:space:]]+\|/ { count++ }
+        END { print count + 0 }
+      ' "$matrix" 2>/dev/null)"
+      if [[ -n "$findings_count" ]] && [[ "$findings_count" != "null" ]] \
+         && [[ "${matrix_rows:-0}" != "$findings_count" ]]; then
+        deny "Tier 1 path ($TARGET): disposition-matrix.md has ${matrix_rows:-0} row(s) but round1.json has $findings_count finding(s). Add a row per Codex finding — discipline rule: every finding gets a Disposition." \
+             "tier1_matrix_count_mismatch" "$TARGET"
+      fi
+    fi
+  fi
 fi
 
 audit "allow"

@@ -117,6 +117,55 @@ cycles.
 | `APPROVED GREEN` or plain `APPROVED` | Gate 2 (red proof captured) | Set M3 = yes; proceed to green phase |
 | `APPROVED IMPLEMENTATION` or plain `APPROVED` | Gate 3 (green proof + adjudication ready) | Set M4 = yes; allow commit |
 
+## v1.6.0 — anchoring-resistant review (Tier 1, opt-in)
+
+v1.6.0 adds three Tier-1-only artifacts that close the **anchoring**
+failure mode in `/second-opinion`. All three default OFF for safe
+rollout; flip the corresponding flag in `.tdd/tdd-config.json` after
+your eval-harness shows value for your codebase.
+
+### Artifacts
+
+- **`.tdd/research-packet.md`** (Tier 1 plans only — flag
+  `second_opinion.require_research_packet_tier1`).
+  Required ≥3 authoritative sources. Anchors Codex's review against the
+  same evidence the implementer consulted. Template at
+  `.tdd/templates/research-packet-template.md`.
+
+- **`.tdd/codex/independent-design.md`** (Tier 1 only — flag
+  `second_opinion.require_pass_a_tier1`).
+  Codex's OWN design generated BEFORE seeing Claude's plan ("Pass A").
+  Anchors Codex's later review on its own thinking, not on Claude's
+  framing. The skill writes this automatically when Pass A runs;
+  killswitch via `SECOND_OPINION_PASS_A_DISABLE=1`.
+
+- **`.tdd/codex/disposition-matrix.md`** (Tier 1 only — flag
+  `second_opinion.require_disposition_matrix_tier1`).
+  Per-finding disposition table. Replaces the v1.5.x free-form
+  rebuttal area. Mandatory disposition for EVERY Codex finding;
+  hook validates row count == finding count. Template at
+  `.tdd/templates/disposition-matrix-template.md`.
+
+### Why three flags, not one
+
+Each artifact is independently motivated:
+- The research packet improves spec-phase research discipline (no
+  Codex required).
+- Pass A is the only one whose value is hypothesis-until-measured (the
+  literature direction is favorable; codebase-specific value is
+  unproven). Treat as the conditionally-shipped piece.
+- The matrix sharpens the existing rebuttal artifact (mechanical
+  improvement, no LLM behaviour change).
+
+Flip them in any order based on what your trial cycles show. Most
+projects will flip the matrix flag first (lowest cost, immediate
+discipline gain), then the packet (one-time spec-phase habit), then
+Pass A last (highest-value if the eval shows it works).
+
+### Full design rationale
+
+See [`docs/specs/second-opinion-v1.6.0-spec.md`](../../docs/specs/second-opinion-v1.6.0-spec.md).
+
 ## Bypass procedure
 
 For an emergency hotfix where the operator vouches for the change:

@@ -965,6 +965,253 @@ fi
 rm -rf "$TMPROOT_GRD"
 
 echo
+echo "Testing v1.6.0 Tier 1 artifact checks (require-second-opinion.sh)..."
+
+# Set up a Tier 1 environment with all gates met EXCEPT the new artifact
+# requirements, then probe the new flag-gated checks.
+TMPROOT_V16=$(mktemp -d)
+mkdir -p "$TMPROOT_V16/.tdd/codex" "$TMPROOT_V16/.claude"
+cp .tdd/tdd-config.json "$TMPROOT_V16/.tdd/"
+cat > "$TMPROOT_V16/.tdd/current-plan.md" <<'EOF'
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: yes
+Implementation reviewed: no
+EOF
+touch "$TMPROOT_V16/.tdd/second-opinion-completed.md"
+
+# Helper: flip a flag in the test root's tdd-config.json.
+v16_set_flag() {
+  local key="$1" val="$2"
+  jq ".second_opinion.${key} = ${val}" \
+    "$TMPROOT_V16/.tdd/tdd-config.json" \
+    > "$TMPROOT_V16/.tdd/tdd-config.json.tmp"
+  mv "$TMPROOT_V16/.tdd/tdd-config.json.tmp" "$TMPROOT_V16/.tdd/tdd-config.json"
+}
+
+# Test: defaults off → Tier 1 edit allowed without v1.6.0 artifacts.
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V16" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "v1.6.0 flags default off: Tier 1 edit allowed without new artifacts"
+else
+  fail "default-off should allow (got: '$out')"
+fi
+
+# Test: require_research_packet_tier1 on, packet missing → deny.
+v16_set_flag require_research_packet_tier1 true
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V16" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "require_research_packet_tier1=true + missing packet → deny"
+else
+  fail "missing packet should deny (got: $out)"
+fi
+
+# Test: packet exists but only 2 sources → deny (need ≥3).
+cat > "$TMPROOT_V16/.tdd/research-packet.md" <<'EOF'
+# Research packet
+
+## Sources
+1. https://example.com/source-one
+2. https://example.com/source-two
+
+## Findings
+
+## Impact
+
+## Uncertainty
+EOF
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V16" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "research-packet with 2 sources (<3) → deny"
+else
+  fail "thin-sources packet should deny (got: $out)"
+fi
+
+# Test: 3 sources → allow.
+cat > "$TMPROOT_V16/.tdd/research-packet.md" <<'EOF'
+# Research packet
+
+## Sources
+1. https://example.com/source-one
+2. https://example.com/source-two
+3. https://example.com/source-three
+
+## Findings
+
+## Impact
+
+## Uncertainty
+EOF
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V16" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "research-packet with 3 sources → allow"
+else
+  fail "3-source packet should allow (got: '$out')"
+fi
+
+# Test: require_pass_a_tier1 on, independent-design missing → deny.
+v16_set_flag require_pass_a_tier1 true
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V16" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "require_pass_a_tier1=true + missing independent-design → deny"
+else
+  fail "missing Pass A artifact should deny (got: $out)"
+fi
+
+# Test: independent-design exists + fresh → allow.
+touch "$TMPROOT_V16/.tdd/codex/independent-design.md"
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V16" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "fresh independent-design → allow"
+else
+  fail "fresh Pass A artifact should allow (got: '$out')"
+fi
+
+# Test: SECOND_OPINION_PASS_A_DISABLE=1 killswitch bypasses Pass A check.
+rm -f "$TMPROOT_V16/.tdd/codex/independent-design.md"
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V16" SECOND_OPINION_PASS_A_DISABLE=1 \
+    timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "SECOND_OPINION_PASS_A_DISABLE=1 bypasses Pass A check"
+else
+  fail "killswitch should bypass Pass A check (got: '$out')"
+fi
+
+# Test: require_disposition_matrix_tier1 on, matrix missing → deny.
+touch "$TMPROOT_V16/.tdd/codex/independent-design.md"
+v16_set_flag require_disposition_matrix_tier1 true
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V16" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "require_disposition_matrix_tier1=true + missing matrix → deny"
+else
+  fail "missing matrix should deny (got: $out)"
+fi
+
+# Test: matrix row count mismatch with round1.json → deny.
+cat > "$TMPROOT_V16/.tdd/codex/round1.json" <<'EOF'
+{"summary":"x","findings":[{"id":"F1"},{"id":"F2"},{"id":"F3"}]}
+EOF
+cat > "$TMPROOT_V16/.tdd/codex/disposition-matrix.md" <<'EOF'
+# Concern Disposition Matrix
+
+## Findings table
+
+| ID | Source | Severity | Concern | Disposition | Reason | Spec change |
+|----|--------|----------|---------|-------------|--------|-------------|
+| F1 | Codex  | P0       | x       | ACCEPT      | y      | yes         |
+| F2 | Codex  | P1       | x       | REJECT      | y      | no          |
+EOF
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V16" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "matrix rows (2) ≠ round1.json findings (3) → deny"
+else
+  fail "row-count mismatch should deny (got: $out)"
+fi
+
+# Test: matrix row count matches → allow.
+cat > "$TMPROOT_V16/.tdd/codex/disposition-matrix.md" <<'EOF'
+# Concern Disposition Matrix
+
+## Findings table
+
+| ID | Source | Severity | Concern | Disposition | Reason | Spec change |
+|----|--------|----------|---------|-------------|--------|-------------|
+| F1 | Codex  | P0       | x       | ACCEPT      | y      | yes         |
+| F2 | Codex  | P1       | x       | REJECT      | y      | no          |
+| F3 | Codex  | P2       | x       | ACCEPT      | y      | yes         |
+EOF
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V16" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "matrix rows == round1.json findings count → allow"
+else
+  fail "matching row count should allow (got: '$out')"
+fi
+
+# Test: non-Tier-1 path unaffected by all v1.6.0 flags.
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/utils/helper.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V16" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "non-Tier-1 edit unaffected by v1.6.0 flags"
+else
+  fail "non-Tier-1 should pass regardless of flags (got: '$out')"
+fi
+
+rm -rf "$TMPROOT_V16"
+
+echo
+echo "Testing migrate-rebuttal-to-matrix.sh..."
+
+TMPROOT_M2M=$(mktemp -d)
+mkdir -p "$TMPROOT_M2M/.tdd"
+cat > "$TMPROOT_M2M/.tdd/second-opinion-completed.md" <<'EOF'
+# Second opinion adjudication
+date: 2026-05-01T12:00:00Z
+scope: Tier 1
+model: gpt-5.5
+findings_total: 2
+findings:
+  - id: F1
+    severity: P0
+    stance: ACCEPT
+    why_correct: This is a real defect because the input is unbounded. The fix adds a length check. Without it, a malicious caller can OOM the server.
+  - id: F2
+    severity: P1
+    stance: PARTIAL
+    accepted: I will add the missing nil check.
+    rejected: The reviewer suggests a full rewrite — that is over-scope.
+    why_split: The defect is local; rewrite is unrelated work.
+adjudicated_by: claude
+EOF
+bash scripts/migrate-rebuttal-to-matrix.sh "$TMPROOT_M2M/.tdd/second-opinion-completed.md" >/dev/null 2>&1
+if [[ -f "$TMPROOT_M2M/.tdd/codex/disposition-matrix.md" ]] \
+   && grep -qF "| F1 | Codex |" "$TMPROOT_M2M/.tdd/codex/disposition-matrix.md" \
+   && grep -qF "| F2 | Codex |" "$TMPROOT_M2M/.tdd/codex/disposition-matrix.md" \
+   && grep -qF "Why this is correct:" "$TMPROOT_M2M/.tdd/codex/disposition-matrix.md" \
+   && grep -qF "What I am accepting:" "$TMPROOT_M2M/.tdd/codex/disposition-matrix.md"; then
+  pass "migrate-rebuttal-to-matrix.sh produces matrix with both findings + discipline markers"
+else
+  fail "migration did not produce expected matrix"
+fi
+
+# Idempotent: second run is a no-op.
+before="$(cat "$TMPROOT_M2M/.tdd/codex/disposition-matrix.md")"
+bash scripts/migrate-rebuttal-to-matrix.sh "$TMPROOT_M2M/.tdd/second-opinion-completed.md" >/dev/null 2>&1
+after="$(cat "$TMPROOT_M2M/.tdd/codex/disposition-matrix.md")"
+if [ "$before" = "$after" ]; then
+  pass "migrate-rebuttal-to-matrix.sh is idempotent"
+else
+  fail "second run mutated matrix"
+fi
+
+rm -rf "$TMPROOT_M2M"
+
+echo
 echo "Testing migrate-tdd-markers.sh..."
 
 TMPROOT_MIG=$(mktemp -d)
