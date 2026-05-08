@@ -2,6 +2,11 @@
 # Smoke-test the TDD hooks. Run with `make tdd-test`.
 set -euo pipefail
 
+# Capture the project root once. Tests that cd into temp dirs need this
+# to invoke hooks that live in the project. Avoids hardcoded /home/X
+# paths that break for other developers.
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
 if ! command -v jq >/dev/null 2>&1; then
   echo "ERROR: jq is required to run the hook smoke tests." >&2
   echo "  Install: sudo apt-get install jq / brew install jq / apk add jq" >&2
@@ -123,6 +128,8 @@ if [[ "$out" == *"exit:0"* ]]; then
 else
   fail "MultiEdit with non-Tier-1 paths should pass (got: '$out')"
 fi
+
+rm -rf "$TMPROOT_EARLY"
 
 echo
 
@@ -849,6 +856,449 @@ fi
 rm -rf "$TMPROOT_GTC"
 
 echo
+echo "Testing integration_guards (gate-tier1-commit.sh)..."
+
+# Set up a project with a guard and a green-ready cycle, then probe.
+TMPROOT_GRD=$(mktemp -d)
+git init -q "$TMPROOT_GRD"
+( cd "$TMPROOT_GRD" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMPROOT_GRD/.tdd" "$TMPROOT_GRD/.claude" \
+         "$TMPROOT_GRD/internal/auth" "$TMPROOT_GRD/internal/intent" \
+         "$TMPROOT_GRD/internal/orchestrator"
+
+# Base config + plan in green-commit-ready state (M4 yes, fresh artifacts).
+cp .tdd/tdd-config.json "$TMPROOT_GRD/.tdd/"
+cat > "$TMPROOT_GRD/.tdd/current-plan.md" <<'EOF'
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: yes
+Implementation reviewed: yes
+EOF
+echo "green output" > "$TMPROOT_GRD/.tdd/green-proof.md"
+touch "$TMPROOT_GRD/.tdd/second-opinion-completed.md"
+
+# Production files. orchestrator.go calls PlaceOrder directly (the bug);
+# intent/tracker.go does too but is allowlisted.
+cat > "$TMPROOT_GRD/internal/orchestrator/orchestrator.go" <<'EOF'
+package orchestrator
+func sell() { ExchangeService.PlaceOrder() }
+EOF
+cat > "$TMPROOT_GRD/internal/intent/tracker.go" <<'EOF'
+package intent
+func place() { ExchangeService.PlaceOrder() }
+EOF
+echo "package auth" > "$TMPROOT_GRD/internal/auth/handler.go"
+( cd "$TMPROOT_GRD" && git add . && git commit -q -m "initial" )
+
+# Stage a Tier 1 production change so the commit gate kicks in.
+echo "// modified" >> "$TMPROOT_GRD/internal/auth/handler.go"
+( cd "$TMPROOT_GRD" && git add internal/auth/handler.go )
+
+# Helper: install a guards array into the config.
+set_guards() {
+  local guards_json="$1"
+  jq ".integration_guards = $guards_json" \
+    "$TMPROOT_GRD/.tdd/tdd-config.json" \
+    > "$TMPROOT_GRD/.tdd/tdd-config.json.tmp"
+  mv "$TMPROOT_GRD/.tdd/tdd-config.json.tmp" "$TMPROOT_GRD/.tdd/tdd-config.json"
+}
+
+# Test: guard finds a violation outside allowed_globs → deny.
+set_guards '[{
+  "name": "no_direct_PlaceOrder",
+  "pattern": "ExchangeService\\.PlaceOrder",
+  "severity": "deny",
+  "allowed_globs": ["internal/intent/**/*.go"],
+  "rationale": "Order placement must route through IntentTracker"
+}]'
+out=$(echo '{"tool_input":{"command":"git commit -m \"green(test): impl\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GRD" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "Guard violation outside allowed_globs denies commit"
+else
+  fail "Guard outside allowed should deny (got: $out)"
+fi
+
+# Test: same guard, but EVERY violator is allowlisted → allow.
+set_guards '[{
+  "name": "no_direct_PlaceOrder",
+  "pattern": "ExchangeService\\.PlaceOrder",
+  "severity": "deny",
+  "allowed_globs": ["internal/intent/**/*.go", "internal/orchestrator/**/*.go"],
+  "rationale": "Allowlisted for this test"
+}]'
+out=$(echo '{"tool_input":{"command":"git commit -m \"green(test): impl\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GRD" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "Guard with all violators in allowed_globs allows commit"
+else
+  fail "All-allowed should pass (got: '$out')"
+fi
+
+# Test: warn-severity violation does NOT deny but is logged.
+set_guards '[{
+  "name": "stringly_typed_warn",
+  "pattern": "ExchangeService\\.PlaceOrder",
+  "severity": "warn",
+  "allowed_globs": [],
+  "rationale": "Prefer typed wrapper"
+}]'
+stderr_out=$(echo '{"tool_input":{"command":"git commit -m \"green(test): impl\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GRD" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>&1 >/dev/null; echo "exit:$?")
+if [[ "$stderr_out" == *"exit:0"* ]] && [[ "$stderr_out" == *"WARN: stringly_typed_warn"* ]]; then
+  pass "warn-severity guard logs warning but allows commit"
+else
+  fail "warn should pass+log (got: '$stderr_out')"
+fi
+
+# Test: empty guards array → allow (and existing checks still work).
+set_guards '[]'
+out=$(echo '{"tool_input":{"command":"git commit -m \"green(test): impl\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GRD" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "empty integration_guards array allows commit (no-op)"
+else
+  fail "empty guards should pass (got: '$out')"
+fi
+
+# Test: no matches → allow (pattern matches nothing in repo).
+set_guards '[{
+  "name": "nonexistent_pattern",
+  "pattern": "ThisPatternMatchesNothingInRepo123",
+  "severity": "deny",
+  "allowed_globs": [],
+  "rationale": "no matches expected"
+}]'
+out=$(echo '{"tool_input":{"command":"git commit -m \"green(test): impl\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GRD" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "guard with no matches allows commit"
+else
+  fail "no-match guard should pass (got: '$out')"
+fi
+
+# Test: ** glob crosses directories.
+mkdir -p "$TMPROOT_GRD/internal/intent/v2"
+cat > "$TMPROOT_GRD/internal/intent/v2/tracker.go" <<'EOF'
+package v2
+func place() { ExchangeService.PlaceOrder() }
+EOF
+( cd "$TMPROOT_GRD" && git add internal/intent/v2/ && git commit -q -m "init v2" )
+set_guards '[{
+  "name": "no_direct_PlaceOrder",
+  "pattern": "ExchangeService\\.PlaceOrder",
+  "severity": "deny",
+  "allowed_globs": ["internal/intent/**/*.go"],
+  "rationale": "Allowlist covers nested dirs via **"
+}]'
+# Re-stage the auth change after the v2 commit consumed staging.
+echo "// modified again" >> "$TMPROOT_GRD/internal/auth/handler.go"
+( cd "$TMPROOT_GRD" && git add internal/auth/handler.go )
+out=$(echo '{"tool_input":{"command":"git commit -m \"green(test): impl\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GRD" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+# orchestrator/orchestrator.go is still in repo and NOT in allowed_globs → deny
+# Even though v2/tracker.go is allowlisted via **
+if [ "$out" = "deny" ]; then
+  pass "** glob respects nested matches but still flags non-allowlisted files"
+else
+  fail "Mixed allowlist + violator should deny (got: $out)"
+fi
+
+# Test: multiple guards (one denies, one warns, both fire).
+set_guards '[
+  {
+    "name": "deny_one",
+    "pattern": "ExchangeService\\.PlaceOrder",
+    "severity": "deny",
+    "allowed_globs": ["internal/intent/**/*.go"],
+    "rationale": "primary deny rule"
+  },
+  {
+    "name": "warn_two",
+    "pattern": "func place\\b",
+    "severity": "warn",
+    "allowed_globs": [],
+    "rationale": "naming convention warning"
+  }
+]'
+stderr_out=$(echo '{"tool_input":{"command":"git commit -m \"green(test): impl\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GRD" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>&1 >/dev/null; echo "exit:$?")
+if [[ "$stderr_out" == *"exit:2"* ]] && [[ "$stderr_out" == *"deny_one"* ]] && [[ "$stderr_out" == *"warn_two"* ]]; then
+  pass "Multiple guards: deny + warn both reported, deny wins"
+else
+  fail "Multiple guards combo (got: '$stderr_out')"
+fi
+
+rm -rf "$TMPROOT_GRD"
+
+echo
+echo "Testing v1.6.0 Tier 1 artifact checks (require-second-opinion.sh)..."
+
+# Set up a Tier 1 environment with all gates met EXCEPT the new artifact
+# requirements, then probe the new flag-gated checks.
+TMPROOT_V16=$(mktemp -d)
+mkdir -p "$TMPROOT_V16/.tdd/codex" "$TMPROOT_V16/.claude"
+cp .tdd/tdd-config.json "$TMPROOT_V16/.tdd/"
+# Force v1.6.0 flag defaults regardless of current project state. Without
+# this, the fixture inherits whatever flags the project's tdd-config.json
+# has flipped on (e.g., during the pack-self bootstrap cycle), and the
+# "default-off" tests fail because flags are no longer off in the fixture.
+# Bootstrap-cycle finding 2026-05-08.
+jq '.second_opinion.require_research_packet_tier1 = false |
+    .second_opinion.require_pass_a_tier1 = false |
+    .second_opinion.require_disposition_matrix_tier1 = false' \
+  "$TMPROOT_V16/.tdd/tdd-config.json" \
+  > "$TMPROOT_V16/.tdd/tdd-config.json.tmp"
+mv "$TMPROOT_V16/.tdd/tdd-config.json.tmp" "$TMPROOT_V16/.tdd/tdd-config.json"
+cat > "$TMPROOT_V16/.tdd/current-plan.md" <<'EOF'
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: yes
+Implementation reviewed: no
+EOF
+touch "$TMPROOT_V16/.tdd/second-opinion-completed.md"
+
+# Helper: flip a flag in the test root's tdd-config.json.
+v16_set_flag() {
+  local key="$1" val="$2"
+  jq ".second_opinion.${key} = ${val}" \
+    "$TMPROOT_V16/.tdd/tdd-config.json" \
+    > "$TMPROOT_V16/.tdd/tdd-config.json.tmp"
+  mv "$TMPROOT_V16/.tdd/tdd-config.json.tmp" "$TMPROOT_V16/.tdd/tdd-config.json"
+}
+
+# Test: defaults off → Tier 1 edit allowed without v1.6.0 artifacts.
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V16" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "v1.6.0 flags default off: Tier 1 edit allowed without new artifacts"
+else
+  fail "default-off should allow (got: '$out')"
+fi
+
+# Test: require_research_packet_tier1 on, packet missing → deny.
+v16_set_flag require_research_packet_tier1 true
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V16" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "require_research_packet_tier1=true + missing packet → deny"
+else
+  fail "missing packet should deny (got: $out)"
+fi
+
+# Test: packet exists but only 2 sources → deny (need ≥3).
+cat > "$TMPROOT_V16/.tdd/research-packet.md" <<'EOF'
+# Research packet
+
+## Sources
+1. https://example.com/source-one
+2. https://example.com/source-two
+
+## Findings
+
+## Impact
+
+## Uncertainty
+EOF
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V16" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "research-packet with 2 sources (<3) → deny"
+else
+  fail "thin-sources packet should deny (got: $out)"
+fi
+
+# Test: 3 sources → allow.
+cat > "$TMPROOT_V16/.tdd/research-packet.md" <<'EOF'
+# Research packet
+
+## Sources
+1. https://example.com/source-one
+2. https://example.com/source-two
+3. https://example.com/source-three
+
+## Findings
+
+## Impact
+
+## Uncertainty
+EOF
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V16" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "research-packet with 3 sources → allow"
+else
+  fail "3-source packet should allow (got: '$out')"
+fi
+
+# Test: require_pass_a_tier1 on, independent-design missing → deny.
+v16_set_flag require_pass_a_tier1 true
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V16" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "require_pass_a_tier1=true + missing independent-design → deny"
+else
+  fail "missing Pass A artifact should deny (got: $out)"
+fi
+
+# Test: independent-design exists + fresh → allow.
+touch "$TMPROOT_V16/.tdd/codex/independent-design.md"
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V16" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "fresh independent-design → allow"
+else
+  fail "fresh Pass A artifact should allow (got: '$out')"
+fi
+
+# Test: SECOND_OPINION_PASS_A_DISABLE=1 killswitch bypasses Pass A check.
+rm -f "$TMPROOT_V16/.tdd/codex/independent-design.md"
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V16" SECOND_OPINION_PASS_A_DISABLE=1 \
+    timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "SECOND_OPINION_PASS_A_DISABLE=1 bypasses Pass A check"
+else
+  fail "killswitch should bypass Pass A check (got: '$out')"
+fi
+
+# Test: require_disposition_matrix_tier1 on, matrix missing → deny.
+touch "$TMPROOT_V16/.tdd/codex/independent-design.md"
+v16_set_flag require_disposition_matrix_tier1 true
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V16" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "require_disposition_matrix_tier1=true + missing matrix → deny"
+else
+  fail "missing matrix should deny (got: $out)"
+fi
+
+# Test: matrix row count mismatch with round1.json → deny.
+cat > "$TMPROOT_V16/.tdd/codex/round1.json" <<'EOF'
+{"summary":"x","findings":[{"id":"F1"},{"id":"F2"},{"id":"F3"}]}
+EOF
+cat > "$TMPROOT_V16/.tdd/codex/disposition-matrix.md" <<'EOF'
+# Concern Disposition Matrix
+
+## Findings table
+
+| ID | Source | Severity | Concern | Disposition | Reason | Spec change |
+|----|--------|----------|---------|-------------|--------|-------------|
+| F1 | Codex  | P0       | x       | ACCEPT      | y      | yes         |
+| F2 | Codex  | P1       | x       | REJECT      | y      | no          |
+EOF
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V16" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "matrix rows (2) ≠ round1.json findings (3) → deny"
+else
+  fail "row-count mismatch should deny (got: $out)"
+fi
+
+# Test: matrix row count matches → allow.
+cat > "$TMPROOT_V16/.tdd/codex/disposition-matrix.md" <<'EOF'
+# Concern Disposition Matrix
+
+## Findings table
+
+| ID | Source | Severity | Concern | Disposition | Reason | Spec change |
+|----|--------|----------|---------|-------------|--------|-------------|
+| F1 | Codex  | P0       | x       | ACCEPT      | y      | yes         |
+| F2 | Codex  | P1       | x       | REJECT      | y      | no          |
+| F3 | Codex  | P2       | x       | ACCEPT      | y      | yes         |
+EOF
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V16" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "matrix rows == round1.json findings count → allow"
+else
+  fail "matching row count should allow (got: '$out')"
+fi
+
+# Test: non-Tier-1 path unaffected by all v1.6.0 flags.
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/utils/helper.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V16" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "non-Tier-1 edit unaffected by v1.6.0 flags"
+else
+  fail "non-Tier-1 should pass regardless of flags (got: '$out')"
+fi
+
+rm -rf "$TMPROOT_V16"
+
+echo
+echo "Testing migrate-rebuttal-to-matrix.sh..."
+
+TMPROOT_M2M=$(mktemp -d)
+mkdir -p "$TMPROOT_M2M/.tdd"
+cat > "$TMPROOT_M2M/.tdd/second-opinion-completed.md" <<'EOF'
+# Second opinion adjudication
+date: 2026-05-01T12:00:00Z
+scope: Tier 1
+model: gpt-5.5
+findings_total: 2
+findings:
+  - id: F1
+    severity: P0
+    stance: ACCEPT
+    why_correct: This is a real defect because the input is unbounded. The fix adds a length check. Without it, a malicious caller can OOM the server.
+  - id: F2
+    severity: P1
+    stance: PARTIAL
+    accepted: I will add the missing nil check.
+    rejected: The reviewer suggests a full rewrite — that is over-scope.
+    why_split: The defect is local; rewrite is unrelated work.
+adjudicated_by: claude
+EOF
+bash scripts/migrate-rebuttal-to-matrix.sh "$TMPROOT_M2M/.tdd/second-opinion-completed.md" >/dev/null 2>&1
+if [[ -f "$TMPROOT_M2M/.tdd/codex/disposition-matrix.md" ]] \
+   && grep -qF "| F1 | Codex |" "$TMPROOT_M2M/.tdd/codex/disposition-matrix.md" \
+   && grep -qF "| F2 | Codex |" "$TMPROOT_M2M/.tdd/codex/disposition-matrix.md" \
+   && grep -qF "Why this is correct:" "$TMPROOT_M2M/.tdd/codex/disposition-matrix.md" \
+   && grep -qF "What I am accepting:" "$TMPROOT_M2M/.tdd/codex/disposition-matrix.md"; then
+  pass "migrate-rebuttal-to-matrix.sh produces matrix with both findings + discipline markers"
+else
+  fail "migration did not produce expected matrix"
+fi
+
+# Idempotent: second run is a no-op.
+before="$(cat "$TMPROOT_M2M/.tdd/codex/disposition-matrix.md")"
+bash scripts/migrate-rebuttal-to-matrix.sh "$TMPROOT_M2M/.tdd/second-opinion-completed.md" >/dev/null 2>&1
+after="$(cat "$TMPROOT_M2M/.tdd/codex/disposition-matrix.md")"
+if [ "$before" = "$after" ]; then
+  pass "migrate-rebuttal-to-matrix.sh is idempotent"
+else
+  fail "second run mutated matrix"
+fi
+
+rm -rf "$TMPROOT_M2M"
+
+echo
 echo "Testing migrate-tdd-markers.sh..."
 
 TMPROOT_MIG=$(mktemp -d)
@@ -880,6 +1330,257 @@ else
 fi
 
 rm -rf "$TMPROOT_MIG"
+
+echo
+echo "Testing pack-self Tier 1 calibration (cycle pack-self-tier1-bootstrap)..."
+
+# Pack-self ceremony bootstrap (cycle ID: pack-self-tier1-bootstrap).
+# These tests verify that the pack governs its own load-bearing files
+# while leaving advisory files unaffected.
+
+TMPROOT_PSB=$(mktemp -d)
+mkdir -p "$TMPROOT_PSB/.tdd" "$TMPROOT_PSB/.claude/hooks"
+cp .tdd/tdd-config.json "$TMPROOT_PSB/.tdd/"
+
+# Test (positive, table-driven): every load-bearing governance file
+# must trigger Tier 1 ceremony enforcement. Without a plan + markers,
+# the edit-time hook (require-tdd-state.sh) must DENY for each.
+# Pinned to acceptance criteria 1, 2, 3, 7.
+PACK_SELF_T1_PATHS=(
+  ".claude/hooks/gate-tier1-commit.sh"
+  ".claude/hooks/guard-dangerous-bash.sh"
+  ".claude/hooks/guard-protected-files.sh"
+  ".claude/hooks/scan-for-secrets.sh"
+  ".claude/hooks/require-tdd-state.sh"
+  ".claude/hooks/require-second-opinion.sh"
+  ".tdd/tdd-config.json"
+  ".claude/skills/second-opinion/SKILL.md"  # restored 2026-05-08 (cycle f4-narrow-md-always-allow)
+)
+for p in "${PACK_SELF_T1_PATHS[@]}"; do
+  out=$(printf '{"tool_input":{"file_path":"%s"}}' "$p" \
+    | CLAUDE_PROJECT_DIR="$TMPROOT_PSB" timeout "${HOOK_TIMEOUT:-5}" \
+      bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+  if [[ "$out" == *"exit:2"* ]] && [[ "$out" == *"BLOCKED"* ]]; then
+    pass "pack_self_T1[$p]: edit denied without plan"
+  else
+    fail "pack-self T1 path ($p) should be classified Tier 1 (got: '$out')"
+  fi
+done
+
+# Test (negative): edit on an advisory hook must NOT trigger ceremony.
+# Verifies the calibration ("load-bearing only") — advisory hooks are
+# expected to remain non-Tier-1 even after the bootstrap. Pinned to
+# acceptance criterion 8.
+out=$(echo '{"tool_input":{"file_path":".claude/hooks/gofmt-after-edit.sh"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_PSB" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "pack_self_advisory_hook_unaffected: gofmt-after-edit.sh edit allowed (advisory hook, not Tier 1)"
+else
+  fail "advisory hook (gofmt-after-edit.sh) should NOT trigger ceremony (got: '$out')"
+fi
+
+rm -rf "$TMPROOT_PSB"
+
+echo
+echo "Testing F4 fix — narrow always-allow *.md (cycle f4-narrow-md-always-allow)..."
+
+# Pack-self bootstrap surfaced F4 (deferred): require-tdd-state.sh's
+# always-allow list contains a broad `*.md` pattern that exempts ALL
+# markdown from Tier 1 regex evaluation. Pack-internal markdown like
+# .claude/skills/second-opinion/SKILL.md cannot be governed even
+# though it's in the Tier 1 regex. This cycle narrows `*.md` to
+# specific patterns (CHANGELOG/README/LICENSE/CLAUDE/AGENTS) so
+# pack-internal markdown becomes governable, while the
+# always-allowed canonical files stay always-allowed.
+
+TMPROOT_F4=$(mktemp -d)
+mkdir -p "$TMPROOT_F4/.tdd"
+cp .tdd/tdd-config.json "$TMPROOT_F4/.tdd/"
+# No current-plan.md — tests verify "no plan = deny" for governable paths.
+
+# Pinned to acceptance criterion 3: SKILL.md is now ceremony-governable.
+out=$(echo '{"tool_input":{"file_path":".claude/skills/second-opinion/SKILL.md"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F4" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+if [[ "$out" == *"exit:2"* ]] && [[ "$out" == *"BLOCKED"* ]]; then
+  pass "F4: skill_md_now_governable — SKILL.md edit denied without plan"
+else
+  fail "F4: SKILL.md should be Tier 1 after *.md narrowing (got: '$out')"
+fi
+
+# Pinned to acceptance criteria 4-7: canonical always-allowed markdown
+# stays always-allowed.
+for md in CHANGELOG.md README.md CLAUDE.md AGENTS.md LICENSE.md; do
+  out=$(printf '{"tool_input":{"file_path":"%s"}}' "$md" \
+    | CLAUDE_PROJECT_DIR="$TMPROOT_F4" timeout "${HOOK_TIMEOUT:-5}" \
+      bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+  if [[ "$out" == *"exit:0"* ]]; then
+    pass "F4: $md still always-allowed"
+  else
+    fail "F4: $md should be allowed (got: '$out')"
+  fi
+done
+
+# Pinned to acceptance criterion 8: random non-pack markdown that
+# doesn't match any Tier 1 regex is still allowed (falls through).
+out=$(echo '{"tool_input":{"file_path":"internal/foo/notes.md"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F4" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "F4: random non-pack .md still allowed (no Tier 1 regex matches)"
+else
+  fail "F4: random .md should pass (got: '$out')"
+fi
+
+rm -rf "$TMPROOT_F4"
+
+echo
+echo "Testing layer-1 vs layer-2 split (guards fire independent of TDD cycle)..."
+
+# Pack-self dogfooding finding (2026-05-08): guards were dormant on commits
+# without active TDD cycles or staged Tier 1 files. After the layer split,
+# integration_guards fire on EVERY commit when defined; TDD ceremony checks
+# only fire when a cycle is active and Tier 1 is staged.
+
+TMPROOT_LAYERS=$(mktemp -d)
+git init -q "$TMPROOT_LAYERS"
+( cd "$TMPROOT_LAYERS" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMPROOT_LAYERS/.tdd" "$TMPROOT_LAYERS/.claude" "$TMPROOT_LAYERS/internal/utils"
+# Config with a guard but no Tier 1 paths and no plan.
+cat > "$TMPROOT_LAYERS/.tdd/tdd-config.json" <<'EOF'
+{
+  "tier1_path_regexes": [],
+  "integration_guards_exclude_dirs": [".git"],
+  "integration_guards": [
+    {"name":"no_chmod_777","pattern":"chmod[[:space:]]+777","severity":"deny","allowed_globs":[],"rationale":"security"}
+  ]
+}
+EOF
+echo "package u" > "$TMPROOT_LAYERS/internal/utils/helper.go"
+( cd "$TMPROOT_LAYERS" && git add . && git commit -q -m initial )
+
+# Test: guards fire even with NO Tier 1 paths, NO active plan, NO Tier 1 staged.
+echo "#!/bin/bash
+chmod 777 /tmp/x" > "$TMPROOT_LAYERS/scripts.sh"
+( cd "$TMPROOT_LAYERS" && git add scripts.sh )
+out=$(echo '{"tool_input":{"command":"git commit -m \"chore: x\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_LAYERS" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "Layer 1: guards fire on commit with no Tier 1 / no active plan"
+else
+  fail "Layer 1: guards should fire regardless of cycle state (got: $out)"
+fi
+
+# Test: pack-self exclude_dirs ('.tdd' excluded) avoids self-reference of
+# guard patterns stored in tdd-config.json. Set up a fresh tdd-config WITH
+# patterns; assert the violation report doesn't include tdd-config.json
+# itself (which would be the meta-bug — guard pattern matches itself).
+TMPROOT_SELFREF=$(mktemp -d)
+mkdir -p "$TMPROOT_SELFREF/.tdd"
+cat > "$TMPROOT_SELFREF/.tdd/tdd-config.json" <<'EOF'
+{
+  "tier1_path_regexes": [],
+  "integration_guards_exclude_dirs": [".git", ".tdd"],
+  "integration_guards": [
+    {"name":"no_chmod_777","pattern":"chmod[[:space:]]+777","severity":"deny","allowed_globs":[],"rationale":"security"}
+  ]
+}
+EOF
+git init -q "$TMPROOT_SELFREF"
+( cd "$TMPROOT_SELFREF" && git config user.email t@t && git config user.name t && git add . && git commit -q -m initial )
+out=$(echo '{"tool_input":{"command":"git commit -m \"chore: clean\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SELFREF" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>&1)
+if [[ "$out" != *"tdd-config.json"* ]]; then
+  pass "exclude_dirs '.tdd' avoids self-referential pattern match in tdd-config.json"
+else
+  fail "guard fired on its own pattern stored in tdd-config.json (got: '$out')"
+fi
+rm -rf "$TMPROOT_SELFREF"
+
+rm -rf "$TMPROOT_LAYERS"
+
+echo
+echo "Testing parasitoid trial-feedback fixes..."
+
+# Mutating-Bash detector false-positive fix: cat foo 2>/dev/null is
+# read-only (numbered fd redirect to /dev/null), not file-writing.
+# Should NOT be flagged as mutating.
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"cat /etc/hosts 2>/dev/null"}}' \
+  | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "pass" ] || [ -z "$out" ]; then
+  pass "cat ... 2>/dev/null no longer false-positive as mutating Bash"
+else
+  fail "cat 2>/dev/null should pass through (got: '$out')"
+fi
+
+# Same check with explicit fd 1: cat foo 1>/dev/null is also read-only.
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"cat foo 1>/dev/null"}}' \
+  | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "pass" ] || [ -z "$out" ]; then
+  pass "cat foo 1>/dev/null no longer false-positive"
+else
+  fail "cat 1>/dev/null should pass through (got: '$out')"
+fi
+
+# Genuine cat > file (mutating) — must still be denied as before.
+TMPROOT_PG=$(mktemp -d)
+mkdir -p "$TMPROOT_PG/.tdd" "$TMPROOT_PG/.claude"
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"cat > internal/x.go <<EOF\npackage x\nEOF"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_PG" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "cat > file (genuine mutating) still denied without adjudication"
+else
+  fail "cat > file should still be detected as mutating (got: $out)"
+fi
+rm -rf "$TMPROOT_PG"
+
+# AI-bloat hook: must NOT fire on .md-only edits with TODO text. The
+# old version scanned ALL files; markdown spec/red-proof commits with
+# legitimate TODO discussion were tripping the advisory.
+TMPROOT_AB=$(mktemp -d)
+git init -q "$TMPROOT_AB"
+( cd "$TMPROOT_AB" && git config user.email t@t && git config user.name t )
+echo "initial" > "$TMPROOT_AB/README.md"
+( cd "$TMPROOT_AB" && git add . && git commit -q -m initial )
+# Edit a markdown file to add a TODO line — would have tripped the
+# old hook; new hook restricts TODO scan to *.go only.
+cat >> "$TMPROOT_AB/README.md" <<'EOF'
+- TODO: write the auth section
+EOF
+out=$(cd "$TMPROOT_AB" && echo '{}' | bash "$PROJECT_ROOT/.claude/hooks/detect-ai-bloat.sh" 2>&1)
+if [ -z "$out" ]; then
+  pass "AI-bloat hook silent on markdown-only TODO edit (no advisory)"
+else
+  fail "AI-bloat should be silent on .md TODO (got: '$out')"
+fi
+# But on .go file with TODO it should still fire. Note: hook reads
+# `git diff` (working tree, NOT --cached), so we commit a base file
+# then leave the TODO change unstaged.
+echo "package m
+
+func Foo() {}" > "$TMPROOT_AB/main.go"
+( cd "$TMPROOT_AB" && git add main.go && git commit -q -m base )
+# Now add TODO + new exported symbol as an unstaged edit.
+echo "package m
+
+// TODO: implement
+func Foo() {}
+func NewExportedSymbol() {}" > "$TMPROOT_AB/main.go"
+out=$(cd "$TMPROOT_AB" && echo '{}' | bash "$PROJECT_ROOT/.claude/hooks/detect-ai-bloat.sh" 2>&1)
+if [[ "$out" == *"AI-bloat advisory"* ]]; then
+  pass "AI-bloat hook still fires on .go TODO + new exported symbol"
+else
+  fail "AI-bloat should fire on .go TODO (got: '$out')"
+fi
+rm -rf "$TMPROOT_AB"
 
 echo
 echo "Self-test: timeout wrapper kills a hanging hook within budget..."

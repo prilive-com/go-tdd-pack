@@ -38,10 +38,10 @@ fmt-vet:
     - go vet ./...
     - go mod tidy && git diff --exit-code go.mod go.sum
 
-agents-md-sync:
+operating-rules-present:
   stage: verify
   script:
-    - 'diff CLAUDE.md AGENTS.md > /dev/null || { echo "AGENTS.md must be byte-identical to CLAUDE.md. Run: cp CLAUDE.md AGENTS.md"; exit 1; }'
+    - 'test -s CLAUDE.md && test -s AGENTS.md || { echo "CLAUDE.md and AGENTS.md must both exist and be non-empty."; exit 1; }'
 
 test:
   stage: verify

@@ -1,0 +1,115 @@
+# GitLab CI pipeline for go-claude-starter projects.
+# Self-hosted GitLab. Customize Go version and runner tags as needed.
+#
+# This is the deterministic floor: all gates here must pass before merge.
+# In-session Claude Code hooks are advisory; CI is enforcement.
+
+stages:
+  - verify
+  - security
+  - tdd
+
+variables:
+  GO_VERSION: "1.26"
+  GOFLAGS: "-mod=readonly"
+  # Uncomment if you have a self-hosted Athens proxy:
+  # GOPROXY: "https://athens.your-domain.com,https://proxy.golang.org,direct"
+  # Replace with your GitLab host:
+  # GOPRIVATE: "gitlab.your-domain.com/*"
+
+default:
+  image: golang:${GO_VERSION}-alpine
+  before_script:
+    - apk add --no-cache git make bash jq
+    - go version
+  cache:
+    key:
+      files:
+        - go.sum
+    paths:
+      - .go-cache/
+      - .go-mod-cache/
+    policy: pull-push
+
+fmt-vet:
+  stage: verify
+  script:
+    - test -z "$(gofmt -l .)" || { gofmt -d .; exit 1; }
+    - go vet ./...
+    - go mod tidy && git diff --exit-code go.mod go.sum
+
+agents-md-sync:
+  stage: verify
+  script:
+    - 'diff CLAUDE.md AGENTS.md > /dev/null || { echo "AGENTS.md must be byte-identical to CLAUDE.md. Run: cp CLAUDE.md AGENTS.md"; exit 1; }'
+
+test:
+  stage: verify
+  script:
+    - go test ./...
+    - go test -race -count=1 ./...
+  coverage: '/coverage: \d+\.\d+%/'
+
+staticcheck:
+  stage: verify
+  script:
+    # Routed through make tools so STATICCHECK_VERSION env var (set in CI
+    # variables) actually pins the version. Defaults to @latest.
+    - make tools
+    - staticcheck ./...
+
+deadcode:
+  stage: verify
+  script:
+    - make tools
+    - bash scripts/check-deadcode.sh
+  # Advisory by default. deadcode is famously noisy on libraries
+  # (intentionally-unused public APIs), generated code, reflective code.
+  # Service projects with low false-positive rate can set
+  # DEADCODE_ALLOW_FAILURE=false in CI variables AND flip allow_failure
+  # below to false.
+  allow_failure: true
+
+allowed-modules:
+  stage: security
+  script:
+    # CHECK_TRANSITIVE_MODULES=true (strict; default for this starter)
+    # is appropriate for high-stakes projects (financial, security,
+    # regulated). For lower-stakes services, set false in CI variables.
+    - CHECK_TRANSITIVE_MODULES="${CHECK_TRANSITIVE_MODULES:-true}" bash scripts/check-allowed-modules.sh
+
+govulncheck:
+  stage: security
+  script:
+    - go install golang.org/x/vuln/cmd/govulncheck@latest
+    - govulncheck ./...
+  allow_failure: false
+
+golangci-lint:
+  stage: verify
+  image: golangci/golangci-lint:latest-alpine
+  before_script:
+    - apk add --no-cache git bash jq
+  script:
+    - golangci-lint config verify
+    - golangci-lint run --timeout=5m
+
+# TDD ceremony enforcement: if any commit on this branch touches a Tier 1
+# path AND there's no corresponding red(...) commit before the green(...)
+# commit, fail.
+tdd-ceremony-check:
+  stage: tdd
+  script:
+    - bash scripts/check-tdd-ceremony.sh
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# Refuse to merge an MR if .tdd/current-plan.md is mid-cycle. Prevents
+# accidentally pushing a developer's WIP plan to main (the audit trail
+# is committed by design; this is the safety on top of that design).
+tdd-state-clean:
+  stage: tdd
+  script:
+    - bash scripts/check-tdd-state-clean.sh
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"

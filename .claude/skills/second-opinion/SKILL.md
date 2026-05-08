@@ -282,21 +282,35 @@ red_full() { red_pem_multiline | red; }
 REDACT_FILE="$(load_redact_patterns .claude/redact-patterns.txt)"
 export REDACT_FILE
 
-# Tier-aware model selection.
-# Universal scope means we review every non-trivial change. To keep cost
-# and latency reasonable, use a stronger model only when it earns its
-# keep — Tier 1 paths (money, auth, migrations, etc.) get the deep model;
-# everything else gets a faster cheaper one.
+# Model selection.
+# Default to the most powerful Codex model for both tiers. The repo's
+# rationale (per user preference): never downgrade for cost or latency on
+# code review — review quality dominates. The tier-aware variable kept
+# below is for projects that want to opt-down to a cheaper model on
+# non-Tier-1 paths; in that case set second_opinion.model_default in
+# .tdd/tdd-config.json or export SECOND_OPINION_MODEL_DEFAULT.
 #
-# Override either default with env vars:
-#   SECOND_OPINION_MODEL_TIER1   (default gpt-5.5; ChatGPT auth only)
-#   SECOND_OPINION_MODEL_DEFAULT (default gpt-5.4-mini; works with both auths)
-#   SECOND_OPINION_MODEL         (legacy single-knob; if set, used for both)
-#   SECOND_OPINION_FALLBACK_MODEL (used if the primary fails; default gpt-5.4)
+# Resolution order (highest priority first):
+#   1. Env var (SECOND_OPINION_MODEL_TIER1 / _DEFAULT / _FALLBACK)
+#   2. Legacy single-knob env var SECOND_OPINION_MODEL (sets both tiers)
+#   3. Per-project config: .tdd/tdd-config.json second_opinion.{...}
+#   4. Hardcoded fallback in this file
+#
+# Note: gpt-5.5 requires ChatGPT-account auth via `codex login`. With
+# API-key auth, run_codex falls back to fallback_model automatically.
 
-tier1_model="${SECOND_OPINION_MODEL_TIER1:-${SECOND_OPINION_MODEL:-gpt-5.5}}"
-default_model="${SECOND_OPINION_MODEL_DEFAULT:-${SECOND_OPINION_MODEL:-gpt-5.4-mini}}"
-fallback_model="${SECOND_OPINION_FALLBACK_MODEL:-gpt-5.4}"
+cfg_tier1_model=""
+cfg_default_model=""
+cfg_fallback_model=""
+if [ -f .tdd/tdd-config.json ] && command -v jq >/dev/null 2>&1; then
+  cfg_tier1_model="$(jq -r '.second_opinion.model_tier1 // empty' .tdd/tdd-config.json 2>/dev/null)"
+  cfg_default_model="$(jq -r '.second_opinion.model_default // empty' .tdd/tdd-config.json 2>/dev/null)"
+  cfg_fallback_model="$(jq -r '.second_opinion.fallback_model // empty' .tdd/tdd-config.json 2>/dev/null)"
+fi
+
+tier1_model="${SECOND_OPINION_MODEL_TIER1:-${SECOND_OPINION_MODEL:-${cfg_tier1_model:-gpt-5.5}}}"
+default_model="${SECOND_OPINION_MODEL_DEFAULT:-${SECOND_OPINION_MODEL:-${cfg_default_model:-gpt-5.5}}}"
+fallback_model="${SECOND_OPINION_FALLBACK_MODEL:-${cfg_fallback_model:-gpt-5.4}}"
 
 # Decide which model to use. Look at changed paths against the project's
 # Tier 1 regexes (.tdd/tdd-config.json). If any matches, this is a Tier 1
@@ -350,6 +364,139 @@ if [ "$target_len" -gt 100 ]; then
   fi
 fi
 
+# v1.6.0 Pass A — blind independent design (Tier 1 only).
+# Codex generates its OWN design before seeing Claude's plan. The
+# resulting artifact (.tdd/codex/independent-design.md) is fed back as
+# context for Pass B (the comparison review), so Codex's critique is
+# anchored on its own thinking, not on Claude's framing.
+#
+# Skipped when: not Tier 1, killswitch SECOND_OPINION_PASS_A_DISABLE=1
+# is set, target_kind != "plan" (only plans have the high-level problem
+# statement Pass A needs), or .tdd/research-packet.md is missing (Pass A
+# anchors against the same evidence the implementer consulted).
+#
+# Failure mode: Pass A is best-effort. If Codex returns nothing, the
+# skill still proceeds with Pass B as a v1.5.x-style direct review.
+mkdir -p .tdd/codex 2>/dev/null
+pass_a_anchor=""
+if [ "${tier_label#Tier 1}" != "$tier_label" ] \
+   && [ "${SECOND_OPINION_PASS_A_DISABLE:-0}" != "1" ] \
+   && [ "$target_kind" = "plan" ] \
+   && [ -f .tdd/research-packet.md ]; then
+
+  # Build a problem statement from the plan's high-level sections only —
+  # NOT the implementation/approach/test-plan sections (those contain
+  # Claude's solution; Pass A must not see them). Awk extracts named
+  # sections; if extraction is too thin (<200 chars), we fall back to the
+  # full plan with an explicit "ignore implementation sections" prefix.
+  problem_extracted="$(printf '%s\n' "$redacted_target" | awk '
+    BEGIN { in_target = 0 }
+    /^## (Feature goal|Problem statement|Reproduction|Expected behavior|Actual behavior|Business\/domain invariants|Acceptance criteria|Non-goals|Risk register)/ {
+      in_target = 1; print; next
+    }
+    /^## / { in_target = 0 }
+    in_target { print }
+  ')"
+  if [ "${#problem_extracted}" -lt 200 ]; then
+    problem_extracted="$(printf 'NOTE: section extraction was too thin; the full plan follows. IGNORE any sections labeled "Implementation", "Approach", "Design", "Minimum implementation", or "Test plan" — they contain the implementer'\''s solution. Generate YOUR design independently.\n\n%s\n' "$redacted_target")"
+  fi
+
+  redacted_packet="$(red_full < .tdd/research-packet.md)"
+
+  pass_a_prompt="$(cat <<PASSAEOF
+You are an external technical reviewer for a Go codebase.
+
+TASK: generate your OWN independent design for the problem below. You
+have NOT seen any proposed solution; there is none in this prompt. Your
+output is a reference document — a later step will compare your design
+to what the implementer actually proposed.
+
+Be specific. Make decisions. Do not write "it depends" — pick what you
+would actually ship.
+
+PROBLEM (extracted from the plan's high-level sections):
+$problem_extracted
+
+RESEARCH PACKET (the evidence the implementer consulted):
+$redacted_packet
+
+OUTPUT — Markdown only, no JSON:
+
+## Goals
+<3 sentences>
+
+## Approach
+<3-5 sentences>
+
+## Key decisions
+<bullets, with reasoning per decision>
+
+## Trade-offs
+### Accepted
+<bullets>
+### Rejected
+<bullets>
+
+## Test strategy
+<bullets, aligned with Go testing idioms>
+PASSAEOF
+  )"
+
+  pass_a_response="$(timeout 120 codex exec \
+    -m "$model" \
+    -s read-only \
+    -c approval_policy="never" \
+    -c model_reasoning_effort="high" \
+    --ephemeral \
+    --cd "$PWD" \
+    - <<<"$pass_a_prompt" 2>>"$DEBUG_LOG" || true)"
+
+  if [ -n "$pass_a_response" ]; then
+    {
+      printf '# Independent design — Codex Pass A\n'
+      printf 'date: %s\n' "$(date -u +%FT%TZ)"
+      printf 'codex_model: %s\n\n' "$model"
+      printf '%s\n' "$pass_a_response"
+    } > .tdd/codex/independent-design.md
+    pass_a_anchor="$(cat <<PASSBANCHOR
+
+PRIOR INDEPENDENT DESIGN (your own — generated before seeing the implementer's plan):
+$pass_a_response
+
+Compare your independent design to the implementer's plan below. Where
+do they diverge? Which divergences matter? Which divergences are
+stylistic and don't matter? Findings should call out divergences that
+matter; ignore stylistic ones.
+PASSBANCHOR
+    )"
+  else
+    echo "[second-opinion] Pass A returned no output; proceeding with single-pass review." >&2
+  fi
+fi
+
+# v1.6.0 closure check (diff-review only): if a prior plan-review matrix
+# exists, include it so Codex can verify each ACCEPTED finding from the
+# plan was actually addressed in this diff. Catches the "accepted at
+# plan, dropped during implementation" failure mode.
+closure_check_block=""
+if [ "$target_kind" = "diff" ] && [ -f .tdd/codex/disposition-matrix.md ]; then
+  closure_check_block="$(cat <<CLOSUREEOF
+
+PRIOR PLAN REVIEW DISPOSITION:
+$(cat .tdd/codex/disposition-matrix.md)
+
+CLOSURE CHECK: verify that each ACCEPTED finding in the prior matrix has
+been addressed in this diff. For each row with Disposition = ACCEPT or
+PARTIAL:
+  - Was the spec change actually implemented?
+  - If yes, locate the implementation in this diff (file:line).
+  - If no, raise a P1 finding: "Plan-review finding F<N> was accepted
+    but not implemented." Include the original concern text from the
+    matrix.
+CLOSUREEOF
+  )"
+fi
+
 prompt="$(cat <<EOF
 You are an external technical reviewer for a Go codebase. You are NOT the
 implementer. Your value is honest disagreement, not agreement.
@@ -396,6 +543,22 @@ ANTI-SYCOPHANCY:
 - If you disagree with a stated assumption, say so explicitly with
   evidence (file path, line, observed behavior).
 
+CODEBASE GREP (added v1.6.0): you have read-only access to the rest of
+the codebase via standard Unix tools (grep, find, cat). Before writing
+your final review:
+  1. Identify the public surface this plan/diff newly depends on
+     (interfaces newly implemented, public functions newly called from
+     outside the change's files, new map keys / metadata fields).
+  2. For each, grep the codebase for cross-file consistency:
+     - Are all writers and readers of any new map key / metadata field
+       using the same string literal? (Catches camelCase vs snake_case
+       mismatches.)
+     - Does the new code's API match what existing call sites expect?
+     - Are there sanctioned-wrapper invariants the new code assumes
+       ("only X may call Y")? If so, grep for direct Y calls outside X.
+  3. Findings from this audit get severity P0 or P1 if they would
+     silently fail in production. Tag location: file:line.
+
 OUTPUT — JSON only, no prose around it:
 {
   "summary": "one sentence, max 280 chars",
@@ -418,6 +581,8 @@ $(head -n 200 CLAUDE.md 2>/dev/null | red_full)
 CHANGE SCOPE: $tier_label
 TARGET UNDER REVIEW (kind: $target_kind):
 $redacted_target
+$pass_a_anchor
+$closure_check_block
 EOF
 )"
 
@@ -462,6 +627,14 @@ fi
 
 printf '## Second opinion (scope: %s, model: %s)\n\n' "$tier_label" "$used_model"
 printf '%s\n' "$response"
+
+# v1.6.0: persist the parsed JSON to .tdd/codex/round1.json so the
+# require-second-opinion.sh hook can validate row count against
+# disposition-matrix.md (when require_disposition_matrix_tier1 is true).
+# Best-effort: if response is not valid JSON, skip silently.
+if printf '%s' "$response" | jq -e . >/dev/null 2>&1; then
+  printf '%s\n' "$response" > .tdd/codex/round1.json
+fi
 ```
 
 ### Step 4 — Read the response and decide
@@ -533,15 +706,15 @@ Then continue based on Tier:
 This skill **adds zero new manual steps**. The only operator inputs
 are the same TDD `APPROVED` gates you already had for Tier 1.
 
-### Step 6 — Write the adjudication artifact (REQUIRED)
+### Step 6 — Write the adjudication artifacts (REQUIRED)
 
-After Step 5, write a small artifact file. The
-`require-second-opinion.sh` PreToolUse hook checks this file before
-allowing any subsequent Edit / Write / MultiEdit / mutating-Bash call.
-Without this file, the next code-changing tool call will be **denied
-with exit 2**.
+After Step 5, write TWO artifact files for v1.6.0 (Tier 1) or one for
+non-Tier-1. The `require-second-opinion.sh` PreToolUse hook checks
+these before allowing any subsequent Edit / Write / MultiEdit /
+mutating-Bash call. Without them, the next code-changing tool call
+will be **denied with exit 2**.
 
-Run this from the project root after you have decided on every finding:
+#### 6a. Adjudication artifact (always required)
 
 ```bash
 mkdir -p .tdd
@@ -572,6 +745,63 @@ findings:
 adjudicated_by: claude
 EOF
 ```
+
+#### 6b. Disposition matrix (Tier 1 only — v1.6.0)
+
+For Tier 1 cycles, ALSO write `.tdd/codex/disposition-matrix.md` with
+one row per Codex finding. The hook checks row count == findings_total.
+
+```bash
+mkdir -p .tdd/codex
+cat > .tdd/codex/disposition-matrix.md <<EOF
+# Concern Disposition Matrix
+date: $(date -u +%FT%TZ)
+cycle_id: <slug>
+findings_total: <N — must equal row count below>
+codex_model: <model name>
+review_phase: <plan|diff>
+
+## Cross-cutting observations
+
+<0-3 sentences. Empty if no cross-cutting pattern across findings.
+Examples:
+- "Three findings (F2, F5, F7) point at error handling. Single style
+  change in cycle scope addresses all three."
+- "No cross-cutting patterns."
+This is the v1.6.0 patterns pre-pass — surface global observations
+BEFORE the per-finding loop.>
+
+## Findings table
+
+| ID | Source | Severity | Concern (1 line) | Disposition | Reason | Spec change |
+|----|--------|----------|------------------|-------------|--------|-------------|
+| F1 | Codex  | <P0..P3> | <one line>       | <ACCEPT|PARTIAL|REJECT|PUSHBACK> | <discipline-compliant reason — see template> | <yes|partial|no> |
+<one row per Codex finding from round1.json>
+
+## Pass A divergences
+
+<Tier 1 with Pass A only. List major divergences between Codex's
+independent design (.tdd/codex/independent-design.md) and Claude's
+plan, with Claude's stance on each. Mark addressed-by F-ID or
+"stylistic, overridden".>
+EOF
+```
+
+Discipline rules for the matrix:
+- **P0 ACCEPT**: "Reason" column must include `Why this is correct:`
+  followed by ≥3 sentences.
+- **PARTIAL (any severity)**: "Reason" column must include all three
+  sub-sections inline:
+  ```
+  What I am accepting: <concrete change>
+  What I am rejecting: <concrete claim — NOT nothing/n/a/none/blank>
+  Why this split is correct: <≥2 sentences>
+  ```
+- **REJECT, PUSHBACK, P1+ ACCEPT**: ≥1 sentence concrete reason
+  grounded in the underlying technical claim.
+
+The hook validates row count == findings_total and applies the existing
+PARTIAL discipline check to the matrix's "Reason" column.
 
 The hook treats this file as valid for **60 minutes** from its mtime.
 After that window the hook treats it as stale and re-blocks. This is
@@ -634,12 +864,33 @@ they're sure...", that's deference. Reject and explain why.
 
 ## Override knobs
 
+Two layers: env vars (per-invocation) and project config (per-repo).
+
+### Per-invocation env vars
+
 | Env var | Effect |
 |---|---|
-| `SECOND_OPINION_MODEL` | Pin to a specific Codex model (default: `gpt-5.5`). Examples: `gpt-5.4`, `gpt-5.3-codex`. |
+| `SECOND_OPINION_MODEL` | Legacy single-knob; pins both tiers to one model. |
+| `SECOND_OPINION_MODEL_TIER1` | Pin Tier 1 model (default: `gpt-5.5`; needs ChatGPT auth). |
+| `SECOND_OPINION_MODEL_DEFAULT` | Pin non-Tier-1 model (default: `gpt-5.5`; opt down to `gpt-5.4-mini` if you want cheap reviews on trivial paths). |
+| `SECOND_OPINION_FALLBACK_MODEL` | Used if the primary returns nothing (default: `gpt-5.4`; works with API-key auth). |
 | `SECOND_OPINION_DISABLE=1` | Skill exits 0 silently. |
 
-That's the entire surface. Two env vars, no config file, no JSON
-schema, no Round 2, no eval harness. If after a few weeks of real
-use you find yourself wishing it auto-fired, see MAINTAINING.md
-"Second-opinion skill design choices" for the rationale.
+### Per-project config (`.tdd/tdd-config.json`)
+
+```json
+"second_opinion": {
+  "model_tier1": "gpt-5.5",
+  "model_default": "gpt-5.5",
+  "fallback_model": "gpt-5.4"
+}
+```
+
+Resolution order (highest priority first): env var → legacy single-knob
+env var → config field → hardcoded fallback. Edit the config when you
+want a project-wide default that survives across operator shells.
+
+The defaults pin the most powerful model for both tiers — never downgrade
+for cost or latency on code review. To opt down on trivial paths (e.g.,
+docs-heavy projects where universal-scope reviews would be pure
+overhead), set `model_default` to a cheaper model in the config.

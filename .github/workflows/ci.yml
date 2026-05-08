@@ -18,11 +18,10 @@ jobs:
           go-version: '1.26'
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
-      - name: AGENTS.md mirrors CLAUDE.md
+      - name: Operating rules present
         run: |
-          if ! diff CLAUDE.md AGENTS.md > /dev/null; then
-            echo "AGENTS.md must be byte-identical to CLAUDE.md."
-            echo "Fix with: cp CLAUDE.md AGENTS.md"
+          if [ ! -s CLAUDE.md ] || [ ! -s AGENTS.md ]; then
+            echo "CLAUDE.md and AGENTS.md must both exist and be non-empty."
             exit 1
           fi
       - name: gofmt

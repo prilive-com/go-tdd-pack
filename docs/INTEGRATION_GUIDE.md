@@ -226,12 +226,9 @@ rules. Merge by section:
 - payment-reviewer (yours)
 ```
 
-After merge, copy `CLAUDE.md` to `AGENTS.md` (or set up the CI sync
-check from `.gitlab-ci.yml`):
-
-```bash
-cp CLAUDE.md AGENTS.md
-```
+After merging `CLAUDE.md`, merge `AGENTS.md` separately for Codex /
+cross-agent guidance. Do not copy `CLAUDE.md` over `AGENTS.md` unless
+your project intentionally wants identical instructions for both tools.
 
 #### `.claude/settings.json`
 
@@ -310,7 +307,7 @@ support.
 Take ours as the base. Then add your project-specific CI jobs (build,
 deploy, integration tests, etc.) as additional jobs. Make sure these
 new jobs are not blocking our safety jobs — keep `tdd-state-clean`,
-`tdd-ceremony-check`, `allowed-modules`, `agents-md-sync` as
+`tdd-ceremony-check`, `allowed-modules`, `operating-rules-present` as
 required.
 
 ---
@@ -380,8 +377,8 @@ cp $REF/.tdd/current-plan.md .tdd/current-plan.md
 # 6. Set version and check.
 cp $REF/.claude/VERSION .claude/VERSION
 
-# 7. Make sure AGENTS.md is byte-identical to CLAUDE.md.
-cp CLAUDE.md AGENTS.md
+# 7. Review AGENTS.md separately for Codex / cross-agent guidance.
+test -s AGENTS.md
 ```
 
 ---
@@ -398,8 +395,8 @@ for f in .claude/hooks/*.sh scripts/*.sh; do bash -n "$f"; done
 # 3. YAML files all parse.
 python3 -c "import yaml; [yaml.safe_load(open(f)) for f in ['.gitlab-ci.yml','.github/workflows/ci.yml','.golangci.yml']]"
 
-# 4. AGENTS.md mirrors CLAUDE.md.
-diff CLAUDE.md AGENTS.md > /dev/null && echo OK
+# 4. Operating-rule files are present.
+test -s CLAUDE.md && test -s AGENTS.md && echo OK
 
 # 5. Required tools are installed.
 make doctor
@@ -436,7 +433,7 @@ git push -u origin chore/integrate-go-claude-starter
 Open the merge request / pull request. CI should run:
 
 - `fmt-vet`
-- `agents-md-sync`
+- `operating-rules-present`
 - `test`
 - `staticcheck`
 - `deadcode` (advisory)
@@ -452,7 +449,7 @@ Fix anything red. Most common first-time issues:
 |---|---|---|
 | `allowed-modules` fails | Your existing `go.mod` requires modules not on our default allowlist | Add the module prefixes to `.claude/allowed-modules.txt` after verifying each on `pkg.go.dev` |
 | `golangci-lint` fails on settings | Your old v1 config keys clashed with our v2 keys | Re-read Step 4 → `.golangci.yml` section |
-| `agents-md-sync` fails | You edited `CLAUDE.md` after the integration commit | `cp CLAUDE.md AGENTS.md && git commit --amend` |
+| `operating-rules-present` fails | `CLAUDE.md` or `AGENTS.md` is missing/empty after the merge | Restore the missing file from the starter or merge your project-specific version |
 | `tdd-ceremony-check` fails | You touched a Tier 1 path without the `red(<id>):` → `green(<id>):` pattern | Either redo the work as a proper TDD cycle, or document the bypass in the MR description (see `docs/process/tdd_workflow.md` "Bypass procedure") |
 | Hook says "jq missing" | jq is not in CI image | Add `apk add --no-cache jq` (Alpine) or `apt-get install -y jq` (Debian) to your CI before the hook step |
 

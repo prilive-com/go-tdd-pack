@@ -1,0 +1,42 @@
+# Go build artifacts
+/bin/
+/dist/
+/coverage.out
+/coverage.html
+*.test
+*.prof
+*.coverprofile
+
+# Local env/secrets
+.env
+.env.*
+secrets/
+private/
+credentials/
+*.pem
+*.key
+
+# Claude local/private
+.claude/settings.local.json
+CLAUDE.local.md
+
+# /second-opinion skill: per-clone redaction patterns (not the .example template)
+.claude/redact-patterns.txt
+# /second-opinion skill: codex stderr / debug capture (gitignored — may contain
+# code fragments and prompt content that should not enter git history)
+.tdd/second-opinion-debug.log
+# /second-opinion skill: per-cycle adjudication artifact (regenerated each cycle)
+.tdd/second-opinion-completed.md
+# require-second-opinion.sh enforcement audit log (local; contains paths only)
+.tdd/second-opinion-enforcement.log
+
+# TDD state (committed deliberately by default — uncomment to ignore in-flight)
+# .tdd/current-plan.md
+# .tdd/red-proof.md
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
