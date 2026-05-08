@@ -104,6 +104,29 @@ The `<id>` is a short slug shared across all commits in the cycle
   you skip the diff review, the commit hook denies and tells you to
   re-run.
 
+- **Modifying hook scripts mid-cycle to unblock yourself.** If a gate
+  creates a logical deadlock you cannot resolve through the documented
+  flows (return-to-red, killswitch env vars, config flag overrides),
+  STOP and surface it to the operator. Do NOT patch
+  `.claude/hooks/*.sh` to make a deny go away. Hook scripts are
+  governance infrastructure; patching them mid-cycle is unauthorized
+  modification of the project's safety controls.
+
+  The escape hatch is operator authorization, not Claude's edit. The
+  operator can:
+  - flip a config flag in `.tdd/tdd-config.json` (e.g.,
+    `test_file_policy.allow_after_red_confirmed: true` for return-to-
+    red emergencies) with the reason in the commit message,
+  - set a killswitch env var (`SECOND_OPINION_DISABLE=1`,
+    `TDD_COMMIT_GATE_DISABLE=1`, `SECOND_OPINION_PASS_A_DISABLE=1`)
+    for a one-off,
+  - or update the gate design upstream when the deadlock is real and
+    repeatable.
+
+  If you see a deny that you believe represents a true deadlock (no
+  documented path forward), report it. The hook's design is wrong, not
+  your workflow.
+
 ## What APPROVED means at each gate
 
 Operators may use either the explicit gate-specific command or plain

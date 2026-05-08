@@ -9,7 +9,11 @@ if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then exit 0; fi
 
 EXPORTED="$(git diff -- '*.go' 2>/dev/null | grep -E '^\+func [A-Z]|^\+type [A-Z]|^\+var [A-Z]|^\+const [A-Z]' || true)"
 GOMOD="$(git diff -- go.mod go.sum 2>/dev/null || true)"
-TODOS="$(git diff 2>/dev/null | grep -E '^\+.*(TODO|FIXME|HACK)' || true)"
+# TODO/FIXME check restricted to Go source files. The previous version
+# scanned ALL changed files and fired on markdown spec/red-proof/
+# adjudication files that legitimately discuss TODOs as text. Reported
+# by the parasitoid trial.
+TODOS="$(git diff -- '*.go' 2>/dev/null | grep -E '^\+.*(TODO|FIXME|HACK)' || true)"
 
 [[ -z "$EXPORTED$GOMOD$TODOS" ]] && exit 0
 

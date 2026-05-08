@@ -157,7 +157,12 @@ is_bash_mutating() {
   echo "$cmd" | grep -Eq '(^|[;&|])[[:space:]]*goimports[[:space:]]+-w\b'                         && return 0
   echo "$cmd" | grep -Eq '(^|[;&|])[[:space:]]*go[[:space:]]+mod[[:space:]]+(tidy|edit|init)\b'    && return 0
   echo "$cmd" | grep -Eq '(^|[;&|])[[:space:]]*go[[:space:]]+get\b'                               && return 0
-  echo "$cmd" | grep -Eq '(^|[;&|])[[:space:]]*cat[[:space:]]+[^|<]*>+[[:space:]]*[^&[:space:]]'  && return 0
+  # cat > file or cat foo > bar — but NOT cat foo 2>/dev/null (numbered
+  # fd redirect, read-only). Char immediately before `>` must NOT be a
+  # digit; that excludes 1>, 2>, etc. while still catching cat > file
+  # (space before >) and cat foo > bar (space before >). Reported by the
+  # parasitoid trial.
+  echo "$cmd" | grep -Eq '(^|[;&|])[[:space:]]*cat[[:space:]]+([^|<]*[^|<0-9])?>+[[:space:]]*[^&[:space:]]'  && return 0
   echo "$cmd" | grep -Eq '(^|[;&|])[[:space:]]*tee[[:space:]]+[^|]'                               && return 0
   echo "$cmd" | grep -Eq '(^|[;&|])[[:space:]]*truncate\b'                                        && return 0
   echo "$cmd" | grep -Eq '>>?[[:space:]]*[^&[:space:]]+\.(go|sh|py|ts|js|json|yml|yaml|toml)([[:space:]]|$)' && return 0

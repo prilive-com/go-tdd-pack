@@ -1245,6 +1245,85 @@ fi
 rm -rf "$TMPROOT_MIG"
 
 echo
+echo "Testing parasitoid trial-feedback fixes..."
+
+# Mutating-Bash detector false-positive fix: cat foo 2>/dev/null is
+# read-only (numbered fd redirect to /dev/null), not file-writing.
+# Should NOT be flagged as mutating.
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"cat /etc/hosts 2>/dev/null"}}' \
+  | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "pass" ] || [ -z "$out" ]; then
+  pass "cat ... 2>/dev/null no longer false-positive as mutating Bash"
+else
+  fail "cat 2>/dev/null should pass through (got: '$out')"
+fi
+
+# Same check with explicit fd 1: cat foo 1>/dev/null is also read-only.
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"cat foo 1>/dev/null"}}' \
+  | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "pass" ] || [ -z "$out" ]; then
+  pass "cat foo 1>/dev/null no longer false-positive"
+else
+  fail "cat 1>/dev/null should pass through (got: '$out')"
+fi
+
+# Genuine cat > file (mutating) — must still be denied as before.
+TMPROOT_PG=$(mktemp -d)
+mkdir -p "$TMPROOT_PG/.tdd" "$TMPROOT_PG/.claude"
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"cat > internal/x.go <<EOF\npackage x\nEOF"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_PG" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "cat > file (genuine mutating) still denied without adjudication"
+else
+  fail "cat > file should still be detected as mutating (got: $out)"
+fi
+rm -rf "$TMPROOT_PG"
+
+# AI-bloat hook: must NOT fire on .md-only edits with TODO text. The
+# old version scanned ALL files; markdown spec/red-proof commits with
+# legitimate TODO discussion were tripping the advisory.
+TMPROOT_AB=$(mktemp -d)
+git init -q "$TMPROOT_AB"
+( cd "$TMPROOT_AB" && git config user.email t@t && git config user.name t )
+echo "initial" > "$TMPROOT_AB/README.md"
+( cd "$TMPROOT_AB" && git add . && git commit -q -m initial )
+# Edit a markdown file to add a TODO line — would have tripped the
+# old hook; new hook restricts TODO scan to *.go only.
+cat >> "$TMPROOT_AB/README.md" <<'EOF'
+- TODO: write the auth section
+EOF
+out=$(cd "$TMPROOT_AB" && echo '{}' | bash /home/toha/go-projects-claude-starter/.claude/hooks/detect-ai-bloat.sh 2>&1)
+if [ -z "$out" ]; then
+  pass "AI-bloat hook silent on markdown-only TODO edit (no advisory)"
+else
+  fail "AI-bloat should be silent on .md TODO (got: '$out')"
+fi
+# But on .go file with TODO it should still fire. Note: hook reads
+# `git diff` (working tree, NOT --cached), so we commit a base file
+# then leave the TODO change unstaged.
+echo "package m
+
+func Foo() {}" > "$TMPROOT_AB/main.go"
+( cd "$TMPROOT_AB" && git add main.go && git commit -q -m base )
+# Now add TODO + new exported symbol as an unstaged edit.
+echo "package m
+
+// TODO: implement
+func Foo() {}
+func NewExportedSymbol() {}" > "$TMPROOT_AB/main.go"
+out=$(cd "$TMPROOT_AB" && echo '{}' | bash /home/toha/go-projects-claude-starter/.claude/hooks/detect-ai-bloat.sh 2>&1)
+if [[ "$out" == *"AI-bloat advisory"* ]]; then
+  pass "AI-bloat hook still fires on .go TODO + new exported symbol"
+else
+  fail "AI-bloat should fire on .go TODO (got: '$out')"
+fi
+rm -rf "$TMPROOT_AB"
+
+echo
 echo "Self-test: timeout wrapper kills a hanging hook within budget..."
 TMPHOOK="$(mktemp)"
 cat > "$TMPHOOK" <<'HANG'
