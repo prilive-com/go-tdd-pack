@@ -1,0 +1,13 @@
+1225836 docs: adoption guide for fresh-project developers
+977c867 fix: parasitoid trial-feedback (3 real bugs + 1 doc gap + 1 missing template)
+5f11270 docs: developer update notes for feature/second-opinion
+abeff54 feature/second-opinion: v1.6.0 anchoring-resistant review (Pass A + matrix + research packet)
+111e64a feature/second-opinion: pin /second-opinion to most-powerful Codex model by default
+dc9835e feature/second-opinion: integration guards (parasitoid trial feedback)
+cc425d3 fix(ci): quote agents-md-sync script line so YAML parses it as a string
+50e081a feature/second-opinion: TDD gate redesign — 4-marker model + commit hook + phase-aware tests
+60fc4b1 feature/second-opinion: trial-feedback hardening (3 fixes from D2 trial run)
+c20fd43 feature/second-opinion: mandatory enforcement via 2 PreToolUse hooks (synthesis of 3 reviews)
+2e4b9f5 feature/second-opinion: broaden scope to any non-trivial change (v1.2.0 of skill)
+9ee5a20 feature/second-opinion: harden redaction + stderr capture + model fallback + rationale discipline
+5968f53 feature: /second-opinion skill — manual cross-model review via Codex CLI (Path B+, experimental)

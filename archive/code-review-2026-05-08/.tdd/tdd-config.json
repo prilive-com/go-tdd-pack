@@ -1,0 +1,76 @@
+{
+  "project_name": "CHANGE_ME",
+  "tier1_description": "High-stakes files requiring full TDD ceremony before production edits. (Service preset; copy from .tdd/presets/library.json or .tdd/presets/cli.json for other project types.)",
+  "tier1_path_regexes": [
+    "(^|/)migrations/.*\\.sql$",
+    "(^|/)internal/(.+/)?(auth|authorization|rbac|policy|security|crypto|secret|session|token)[^/]*/.*\\.go$",
+    "(^|/)internal/(.+/)?(payment|billing|invoice|ledger|accounting|balance|capital|risk|trade|order|fill|exchange)[^/]*/.*\\.go$",
+    "(^|/)internal/(.+/)?(migration|database|storage|repository|transaction)[^/]*/.*\\.go$",
+    "(^|/)internal/(.+/)?(notification|email|sms|webhook)[^/]*/.*\\.go$",
+    "(^|/)internal/app/.*(engine|orchestrator|reconciliation|initializer).*\\.go$",
+    "(^|/)cmd/(.+/)?(destructive|admin|migrate)/.*\\.go$"
+  ],
+  "tier1_prompt_keywords": [
+    "auth", "authorization", "rbac", "policy", "security", "crypto", "secret", "token", "session",
+    "payment", "billing", "invoice", "ledger", "accounting", "balance", "money",
+    "capital", "risk", "trade", "order", "fill", "exchange",
+    "migration", "database", "storage",
+    "notification", "email", "sms", "webhook",
+    "idempotency", "reconciliation", "queue", "worker", "rollback"
+  ],
+  "allow_docs_and_claude_edits_without_gate": true,
+
+  "_test_file_policy_doc": "Phase-aware test-file policy. Replaces the older allow_test_file_edits_without_gate flag. Test edits are allowed during spec/red phases (writing failing tests), denied after red is confirmed (the documented 'don't edit tests in green phase' rule). Set allow_after_red_confirmed: true only when the operator explicitly authorizes return to red — document reason in commit message.",
+  "test_file_policy": {
+    "allow_before_spec_approved": true,
+    "allow_in_red_phase": true,
+    "allow_after_red_confirmed": false
+  },
+
+  "_markers_doc": "Four-marker TDD ceremony. Edit-time hooks (require-tdd-state, require-second-opinion Tier-1 leg) require the first three; commit-time hook (gate-tier1-commit) additionally requires the fourth. Setting any marker without the matching operator APPROVED reply is self-approval and is forbidden.",
+  "required_markers_edit_time": [
+    "Human approved spec: yes",
+    "Red phase confirmed: yes",
+    "Green phase authorized: yes"
+  ],
+  "required_markers_commit_time": [
+    "Human approved spec: yes",
+    "Red phase confirmed: yes",
+    "Green phase authorized: yes",
+    "Implementation reviewed: yes"
+  ],
+
+  "_marker_aliases_doc": "Backwards-compat aliases. The hook accepts the old name but emits a stderr deprecation warning. Drop in next major version (2026-Q3 target).",
+  "marker_aliases": {
+    "Green phase authorized: yes": "Human approved implementation: yes"
+  },
+
+  "_legacy_required_markers_doc": "Used by the existing require-tdd-state.sh path for backwards-compat. Reads the new edit-time markers; old name is honored via alias.",
+  "required_markers": [
+    "Human approved spec: yes",
+    "Red phase confirmed: yes",
+    "Green phase authorized: yes"
+  ],
+
+  "_integration_guards_doc": "Project-level static-analysis guards. Each guard is a regex pattern that, if matched in a file outside allowed_globs, fails the green commit. Use to encode invariants that aren't easily expressed as integration tests (e.g., 'no direct calls to API X outside wrapper Y'). Guards are FALLBACK protection — write integration tests first; add a guard for invariants tests can't reach. See .claude/rules/go-integration-guards.md for the decision tree.",
+  "_integration_guards_schema": {
+    "name": "short identifier shown in violation message",
+    "pattern": "POSIX extended regex (grep -E), matched against file content",
+    "severity": "deny | warn — deny blocks the commit; warn only logs",
+    "allowed_globs": "list of glob patterns; files matching any are exempt. Supports ** for cross-directory.",
+    "rationale": "one sentence explaining what invariant this guards"
+  },
+  "_integration_guards_examples_doc": "The empty array is the default. Each project should add its own guards over time — every shipped bug that a grep could have caught becomes a permanent guard.",
+  "integration_guards": [],
+
+  "_second_opinion_doc": "Default Codex model for the /second-opinion skill. Resolution order: env var (SECOND_OPINION_MODEL_TIER1 / SECOND_OPINION_MODEL_DEFAULT / SECOND_OPINION_FALLBACK_MODEL) > this config block > skill's hardcoded fallback. Defaults below pin the most powerful model for both tiers — change to the latest available when a newer Codex model ships. Note: model_tier1 (gpt-5.5) requires ChatGPT-account auth via 'codex login'; with API-key auth the skill auto-falls-back to fallback_model.",
+  "_second_opinion_v1_6_doc": "v1.6.0 Tier-1 artifact requirements. All three default to false for safe opt-in rollout; flip to true after the eval harness shows value for your codebase (see docs/specs/second-opinion-v1.6.0-spec.md §8 validation plan). The skill writes these artifacts when their requirement flag is true OR when Pass A is enabled (env var SECOND_OPINION_PASS_A_DISABLE=1 disables Pass A independently of the require flag).",
+  "second_opinion": {
+    "model_tier1": "gpt-5.5",
+    "model_default": "gpt-5.5",
+    "fallback_model": "gpt-5.4",
+    "require_research_packet_tier1": false,
+    "require_pass_a_tier1": false,
+    "require_disposition_matrix_tier1": false
+  }
+}

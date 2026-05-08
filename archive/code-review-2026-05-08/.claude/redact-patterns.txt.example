@@ -1,0 +1,45 @@
+# Project-specific redaction patterns for the /second-opinion skill.
+#
+# This file is OPTIONAL. The skill already redacts universal credential
+# shapes (cloud keys, DB DSNs, PEM, JWT, vendor-agnostic *_SECRET=... env
+# vars, Telegram bot tokens, bearer tokens). Add patterns here only for
+# strings that no general regex can safely catch in your project:
+#
+#   - internal hostnames
+#   - internal service IDs
+#   - schema / table names you do not want sent to OpenAI
+#   - custom token formats
+#   - any project-private string class
+#
+# How to use:
+#   cp .claude/redact-patterns.txt.example .claude/redact-patterns.txt
+#   $EDITOR .claude/redact-patterns.txt
+#
+# Format:
+#   - One regex per line.
+#   - Anything matching the regex is replaced with [REDACTED].
+#   - Lines starting with # are comments and are ignored.
+#   - Empty lines are ignored.
+#   - Regex syntax is awk POSIX extended. Test patterns with:
+#       echo 'sample text' | awk '{ gsub(/your-regex/, "[REDACTED]"); print }'
+#
+# Safety notes:
+#   - Prefer narrow patterns over broad ones to keep findings useful.
+#     A pattern matching `[a-z]+` would redact everything.
+#   - Patterns are applied per-line, so multi-line secrets need multi-line
+#     handling (the skill does that for PEM blocks already).
+#
+# Examples (uncomment and adapt to your project):
+
+# Internal hostnames:
+# \b[a-z0-9.-]+\.internal\.example\.com\b
+# \bgt\.devopspoint\.io\b
+
+# Internal service IDs:
+# \bsvc-[a-z0-9]{8,}\b
+
+# Custom token formats (replace MYCO with your prefix):
+# \bMYCO_[A-Z0-9]{16,}\b
+
+# Schema / table names you do not want sent:
+# \b(orders_private|customer_pii|fraud_signals)\b
