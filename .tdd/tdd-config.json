@@ -8,7 +8,11 @@
     "(^|/)internal/(.+/)?(migration|database|storage|repository|transaction)[^/]*/.*\\.go$",
     "(^|/)internal/(.+/)?(notification|email|sms|webhook)[^/]*/.*\\.go$",
     "(^|/)internal/app/.*(engine|orchestrator|reconciliation|initializer).*\\.go$",
-    "(^|/)cmd/(.+/)?(destructive|admin|migrate)/.*\\.go$"
+    "(^|/)cmd/(.+/)?(destructive|admin|migrate)/.*\\.go$",
+
+    "(^|/)\\.claude/hooks/(gate-tier1-commit|guard-dangerous-bash|guard-protected-files|scan-for-secrets|require-tdd-state|require-second-opinion)\\.sh$",
+    "(^|/)\\.claude/skills/second-opinion/SKILL\\.md$",
+    "(^|/)\\.tdd/tdd-config\\.json$"
   ],
   "tier1_prompt_keywords": [
     "auth", "authorization", "rbac", "policy", "security", "crypto", "secret", "token", "session",

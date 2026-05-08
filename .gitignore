@@ -30,9 +30,17 @@ CLAUDE.local.md
 # require-second-opinion.sh enforcement audit log (local; contains paths only)
 .tdd/second-opinion-enforcement.log
 
-# TDD state (committed deliberately by default — uncomment to ignore in-flight)
-# .tdd/current-plan.md
-# .tdd/red-proof.md
+# TDD per-cycle artifacts: gitignored. The active plan and red/green
+# proofs reflect a specific in-flight cycle and would ship as stale
+# active state to downstream consumers if committed. Templates at
+# .tdd/templates/ are the authoritative shipped content; per-cycle
+# files are local. (Pack-self bootstrap cycle 2026-05-08 finding.)
+.tdd/current-plan.md
+.tdd/red-proof.md
+.tdd/green-proof.md
+.tdd/codex/independent-design.md
+.tdd/codex/disposition-matrix.md
+.tdd/codex/round1.json
 
 # OS / editor
 .DS_Store

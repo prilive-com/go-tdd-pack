@@ -45,28 +45,38 @@ fi
 echo
 echo "Testing require-tdd-state.sh..."
 
-out=$(echo '{"tool_input": {"file_path": "CHANGELOG.md"}}' | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+# Fresh project root for the un-scoped Tier 1 tests below. Without this
+# isolation, the hook reads the actual project's .tdd/current-plan.md —
+# which during an active TDD cycle (e.g., the bootstrap cycle that
+# added the pack-self regexes) has markers set, so the hook ALLOWS
+# Tier 1 edits and these tests fail. Bootstrap-cycle finding 2026-05-08.
+TMPROOT_T1=$(mktemp -d)
+mkdir -p "$TMPROOT_T1/.tdd"
+cp .tdd/tdd-config.json "$TMPROOT_T1/.tdd/"
+# Intentionally NO current-plan.md — tests verify "no plan = deny".
+
+out=$(echo '{"tool_input": {"file_path": "CHANGELOG.md"}}' | CLAUDE_PROJECT_DIR="$TMPROOT_T1" timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
 if [[ "$out" == *"exit:0"* ]]; then
   pass "CHANGELOG.md allowed"
 else
   fail "CHANGELOG.md should be allowed (got: '$out')"
 fi
 
-out=$(echo '{"tool_input": {"file_path": "internal/foo/bar_test.go"}}' | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+out=$(echo '{"tool_input": {"file_path": "internal/foo/bar_test.go"}}' | CLAUDE_PROJECT_DIR="$TMPROOT_T1" timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
 if [[ "$out" == *"exit:0"* ]]; then
   pass "_test.go allowed"
 else
   fail "_test.go should be allowed (got: '$out')"
 fi
 
-out=$(echo '{"tool_input": {"file_path": "internal/utils/helper.go"}}' | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+out=$(echo '{"tool_input": {"file_path": "internal/utils/helper.go"}}' | CLAUDE_PROJECT_DIR="$TMPROOT_T1" timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
 if [[ "$out" == *"exit:0"* ]]; then
   pass "non-Tier 1 Go file allowed"
 else
   fail "non-Tier 1 should be allowed (got: '$out')"
 fi
 
-out=$(echo '{"tool_input": {"file_path": "internal/payments/charge.go"}}' | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+out=$(echo '{"tool_input": {"file_path": "internal/payments/charge.go"}}' | CLAUDE_PROJECT_DIR="$TMPROOT_T1" timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
 if [[ "$out" == *"exit:2"* ]] && [[ "$out" == *"BLOCKED"* ]]; then
   pass "Tier 1 file with no plan blocked"
 else
@@ -74,7 +84,7 @@ else
 fi
 
 # Two-segment layout: internal/<feature>/file.go
-out=$(echo '{"tool_input": {"file_path": "internal/auth/handler.go"}}' | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+out=$(echo '{"tool_input": {"file_path": "internal/auth/handler.go"}}' | CLAUDE_PROJECT_DIR="$TMPROOT_T1" timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
 if [[ "$out" == *"exit:2"* ]] && [[ "$out" == *"BLOCKED"* ]]; then
   pass "Tier 1 two-segment layout blocked"
 else
@@ -82,7 +92,7 @@ else
 fi
 
 # Three-segment layout: internal/<group>/<feature>/file.go
-out=$(echo '{"tool_input": {"file_path": "internal/modules/payments/charge.go"}}' | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+out=$(echo '{"tool_input": {"file_path": "internal/modules/payments/charge.go"}}' | CLAUDE_PROJECT_DIR="$TMPROOT_T1" timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
 if [[ "$out" == *"exit:2"* ]] && [[ "$out" == *"BLOCKED"* ]]; then
   pass "Tier 1 three-segment layout blocked"
 else
@@ -90,7 +100,7 @@ else
 fi
 
 # v1.2.0: defensive multi-path extraction. files[] shape.
-out=$(echo '{"tool_input":{"files":[{"file_path":"internal/utils/helper.go"},{"file_path":"internal/payments/charge.go"}]}}' | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+out=$(echo '{"tool_input":{"files":[{"file_path":"internal/utils/helper.go"},{"file_path":"internal/payments/charge.go"}]}}' | CLAUDE_PROJECT_DIR="$TMPROOT_T1" timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
 if [[ "$out" == *"exit:2"* ]] && [[ "$out" == *"internal/payments/charge.go"* ]]; then
   pass "MultiEdit files[] blocks if any Tier 1 path"
 else
@@ -98,7 +108,7 @@ else
 fi
 
 # v1.2.0: defensive multi-path extraction. edits[].file_path shape.
-out=$(echo '{"tool_input":{"edits":[{"file_path":"internal/auth/jwt.go","old_string":"x","new_string":"y"}]}}' | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+out=$(echo '{"tool_input":{"edits":[{"file_path":"internal/auth/jwt.go","old_string":"x","new_string":"y"}]}}' | CLAUDE_PROJECT_DIR="$TMPROOT_T1" timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
 if [[ "$out" == *"exit:2"* ]] && [[ "$out" == *"internal/auth/jwt.go"* ]]; then
   pass "MultiEdit edits[].file_path blocks if Tier 1"
 else
@@ -106,12 +116,14 @@ else
 fi
 
 # v1.2.0: all non-Tier-1 paths in a multi-path edit must pass.
-out=$(echo '{"tool_input":{"files":[{"file_path":"internal/utils/helper.go"},{"file_path":"docs/foo.md"}]}}' | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+out=$(echo '{"tool_input":{"files":[{"file_path":"internal/utils/helper.go"},{"file_path":"docs/foo.md"}]}}' | CLAUDE_PROJECT_DIR="$TMPROOT_T1" timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
 if [[ "$out" == *"exit:0"* ]]; then
   pass "MultiEdit with all non-Tier-1 paths passes"
 else
   fail "MultiEdit with non-Tier-1 paths should pass (got: '$out')"
 fi
+
+rm -rf "$TMPROOT_T1"
 
 echo
 echo "Testing guard-dangerous-bash.sh..."
@@ -977,6 +989,17 @@ echo "Testing v1.6.0 Tier 1 artifact checks (require-second-opinion.sh)..."
 TMPROOT_V16=$(mktemp -d)
 mkdir -p "$TMPROOT_V16/.tdd/codex" "$TMPROOT_V16/.claude"
 cp .tdd/tdd-config.json "$TMPROOT_V16/.tdd/"
+# Force v1.6.0 flag defaults regardless of current project state. Without
+# this, the fixture inherits whatever flags the project's tdd-config.json
+# has flipped on (e.g., during the pack-self bootstrap cycle), and the
+# "default-off" tests fail because flags are no longer off in the fixture.
+# Bootstrap-cycle finding 2026-05-08.
+jq '.second_opinion.require_research_packet_tier1 = false |
+    .second_opinion.require_pass_a_tier1 = false |
+    .second_opinion.require_disposition_matrix_tier1 = false' \
+  "$TMPROOT_V16/.tdd/tdd-config.json" \
+  > "$TMPROOT_V16/.tdd/tdd-config.json.tmp"
+mv "$TMPROOT_V16/.tdd/tdd-config.json.tmp" "$TMPROOT_V16/.tdd/tdd-config.json"
 cat > "$TMPROOT_V16/.tdd/current-plan.md" <<'EOF'
 Human approved spec: yes
 Red phase confirmed: yes
@@ -1248,6 +1271,65 @@ else
 fi
 
 rm -rf "$TMPROOT_MIG"
+
+echo
+echo "Testing pack-self Tier 1 calibration (cycle pack-self-tier1-bootstrap)..."
+
+# Pack-self ceremony bootstrap (cycle ID: pack-self-tier1-bootstrap).
+# These tests verify that the pack governs its own load-bearing files
+# while leaving advisory files unaffected.
+
+TMPROOT_PSB=$(mktemp -d)
+mkdir -p "$TMPROOT_PSB/.tdd" "$TMPROOT_PSB/.claude/hooks"
+cp .tdd/tdd-config.json "$TMPROOT_PSB/.tdd/"
+
+# Test (positive, table-driven): every load-bearing governance file
+# must trigger Tier 1 ceremony enforcement. Without a plan + markers,
+# the edit-time hook (require-tdd-state.sh) must DENY for each.
+# Pinned to acceptance criteria 1, 2, 3, 7.
+PACK_SELF_T1_PATHS=(
+  ".claude/hooks/gate-tier1-commit.sh"
+  ".claude/hooks/guard-dangerous-bash.sh"
+  ".claude/hooks/guard-protected-files.sh"
+  ".claude/hooks/scan-for-secrets.sh"
+  ".claude/hooks/require-tdd-state.sh"
+  ".claude/hooks/require-second-opinion.sh"
+  ".tdd/tdd-config.json"
+  # NOTE: .claude/skills/second-opinion/SKILL.md is in the regex but
+  # NOT testable here because require-tdd-state.sh's always-allow list
+  # has a broad `*.md` pattern that exempts ALL markdown files before
+  # tier1 regex evaluation. The regex coverage is harmless (it would
+  # work if always-allow were tightened) but the smoke can't verify
+  # it. Follow-up cycle should narrow `*.md` → specific patterns
+  # (CHANGELOG/README/LICENSE/AGENTS/CLAUDE) so pack-self markdown
+  # like SKILL.md becomes governable. Pack-self bootstrap finding F4
+  # (uncovered during /second-opinion adjudication 2026-05-08).
+)
+for p in "${PACK_SELF_T1_PATHS[@]}"; do
+  out=$(printf '{"tool_input":{"file_path":"%s"}}' "$p" \
+    | CLAUDE_PROJECT_DIR="$TMPROOT_PSB" timeout "${HOOK_TIMEOUT:-5}" \
+      bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+  if [[ "$out" == *"exit:2"* ]] && [[ "$out" == *"BLOCKED"* ]]; then
+    pass "pack_self_T1[$p]: edit denied without plan"
+  else
+    fail "pack-self T1 path ($p) should be classified Tier 1 (got: '$out')"
+  fi
+done
+
+# Test (negative): edit on an advisory hook must NOT trigger ceremony.
+# Verifies the calibration ("load-bearing only") — advisory hooks are
+# expected to remain non-Tier-1 even after the bootstrap. Pinned to
+# acceptance criterion 8.
+out=$(echo '{"tool_input":{"file_path":".claude/hooks/gofmt-after-edit.sh"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_PSB" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "pack_self_advisory_hook_unaffected: gofmt-after-edit.sh edit allowed (advisory hook, not Tier 1)"
+else
+  fail "advisory hook (gofmt-after-edit.sh) should NOT trigger ceremony (got: '$out')"
+fi
+
+rm -rf "$TMPROOT_PSB"
 
 echo
 echo "Testing layer-1 vs layer-2 split (guards fire independent of TDD cycle)..."
