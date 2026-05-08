@@ -84,8 +84,26 @@ TIER1_REGEXES="$(jq -r '.tier1_path_regexes[]? // empty' "$CONFIG")"
 TIER1_MATCHED=()
 while IFS= read -r FILE; do
   [[ -z "$FILE" ]] && continue
+  # Always-allow patterns. Files matching these are exempted from Tier 1
+  # regex evaluation entirely. Each pattern justified:
+  #   */.tdd/*  */.claude/*       — pack state / config (downstream-installed
+  #                                  pack code in their .claude/.tdd/ dirs)
+  #   */docs/*  */specs/*  */archive/* — documentation / history dirs
+  #   CHANGELOG* */CHANGELOG* etc.  — community files (any depth)
+  #   *CLAUDE.md *AGENTS.md         — operating-rule files (any depth)
+  #
+  # The bare `*.md` pattern was removed in cycle f4-narrow-md-always-
+  # allow (2026-05-08). It exempted ALL markdown from Tier 1 regex
+  # evaluation, which made pack-internal markdown like
+  # .claude/skills/second-opinion/SKILL.md ungovernable even though
+  # the regex listed it as Tier 1. The replacement covers the
+  # canonical always-allowed filenames; non-canonical .md files fall
+  # through to regex evaluation and are allowed by default if no
+  # Tier 1 regex matches.
   case "$FILE" in
-    */.tdd/*|*/.claude/*|*.md|*/docs/*|*/specs/*|*/archive/*|*/CHANGELOG.md) continue ;;
+    */.tdd/*|*/.claude/*|*/docs/*|*/specs/*|*/archive/*) continue ;;
+    CHANGELOG*|*/CHANGELOG*|README*|*/README*|LICENSE*|*/LICENSE*) continue ;;
+    *CLAUDE.md|*AGENTS.md) continue ;;
   esac
   while IFS= read -r pattern; do
     [[ -z "$pattern" ]] && continue

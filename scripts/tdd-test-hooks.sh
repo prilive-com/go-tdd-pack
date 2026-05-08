@@ -1295,15 +1295,7 @@ PACK_SELF_T1_PATHS=(
   ".claude/hooks/require-tdd-state.sh"
   ".claude/hooks/require-second-opinion.sh"
   ".tdd/tdd-config.json"
-  # NOTE: .claude/skills/second-opinion/SKILL.md is in the regex but
-  # NOT testable here because require-tdd-state.sh's always-allow list
-  # has a broad `*.md` pattern that exempts ALL markdown files before
-  # tier1 regex evaluation. The regex coverage is harmless (it would
-  # work if always-allow were tightened) but the smoke can't verify
-  # it. Follow-up cycle should narrow `*.md` → specific patterns
-  # (CHANGELOG/README/LICENSE/AGENTS/CLAUDE) so pack-self markdown
-  # like SKILL.md becomes governable. Pack-self bootstrap finding F4
-  # (uncovered during /second-opinion adjudication 2026-05-08).
+  ".claude/skills/second-opinion/SKILL.md"  # restored 2026-05-08 (cycle f4-narrow-md-always-allow)
 )
 for p in "${PACK_SELF_T1_PATHS[@]}"; do
   out=$(printf '{"tool_input":{"file_path":"%s"}}' "$p" \
@@ -1330,6 +1322,59 @@ else
 fi
 
 rm -rf "$TMPROOT_PSB"
+
+echo
+echo "Testing F4 fix — narrow always-allow *.md (cycle f4-narrow-md-always-allow)..."
+
+# Pack-self bootstrap surfaced F4 (deferred): require-tdd-state.sh's
+# always-allow list contains a broad `*.md` pattern that exempts ALL
+# markdown from Tier 1 regex evaluation. Pack-internal markdown like
+# .claude/skills/second-opinion/SKILL.md cannot be governed even
+# though it's in the Tier 1 regex. This cycle narrows `*.md` to
+# specific patterns (CHANGELOG/README/LICENSE/CLAUDE/AGENTS) so
+# pack-internal markdown becomes governable, while the
+# always-allowed canonical files stay always-allowed.
+
+TMPROOT_F4=$(mktemp -d)
+mkdir -p "$TMPROOT_F4/.tdd"
+cp .tdd/tdd-config.json "$TMPROOT_F4/.tdd/"
+# No current-plan.md — tests verify "no plan = deny" for governable paths.
+
+# Pinned to acceptance criterion 3: SKILL.md is now ceremony-governable.
+out=$(echo '{"tool_input":{"file_path":".claude/skills/second-opinion/SKILL.md"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F4" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+if [[ "$out" == *"exit:2"* ]] && [[ "$out" == *"BLOCKED"* ]]; then
+  pass "F4: skill_md_now_governable — SKILL.md edit denied without plan"
+else
+  fail "F4: SKILL.md should be Tier 1 after *.md narrowing (got: '$out')"
+fi
+
+# Pinned to acceptance criteria 4-7: canonical always-allowed markdown
+# stays always-allowed.
+for md in CHANGELOG.md README.md CLAUDE.md AGENTS.md LICENSE.md; do
+  out=$(printf '{"tool_input":{"file_path":"%s"}}' "$md" \
+    | CLAUDE_PROJECT_DIR="$TMPROOT_F4" timeout "${HOOK_TIMEOUT:-5}" \
+      bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+  if [[ "$out" == *"exit:0"* ]]; then
+    pass "F4: $md still always-allowed"
+  else
+    fail "F4: $md should be allowed (got: '$out')"
+  fi
+done
+
+# Pinned to acceptance criterion 8: random non-pack markdown that
+# doesn't match any Tier 1 regex is still allowed (falls through).
+out=$(echo '{"tool_input":{"file_path":"internal/foo/notes.md"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F4" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "F4: random non-pack .md still allowed (no Tier 1 regex matches)"
+else
+  fail "F4: random .md should pass (got: '$out')"
+fi
+
+rm -rf "$TMPROOT_F4"
 
 echo
 echo "Testing layer-1 vs layer-2 split (guards fire independent of TDD cycle)..."
