@@ -3268,6 +3268,87 @@ rm -rf "$TMPROOT_AB"
 echo
 echo "Testing F3 (smoke tests in CI) — CI configs invoke this runner..."
 
+# F10 cycle (f10-agents-md-update): AGENTS.md + CLAUDE.md missed
+# operator-facing knobs added in v1.6.x cycles (enforcement_mode,
+# hash binding, killswitches, canonical templates) and incorrectly
+# described second-opinion as "advisory only".
+echo "Testing F10 (AGENTS.md + CLAUDE.md operator-config docs)..."
+AGENTS_FILE="$PROJECT_ROOT/AGENTS.md"
+CLAUDE_FILE="$PROJECT_ROOT/CLAUDE.md"
+
+# AC 1: AGENTS.md no longer says second-opinion is "advisory only".
+if ! grep -qE 'second-opinion.*advisory only|advisory only.*second-opinion' "$AGENTS_FILE"; then
+  pass "F10: AGENTS.md no longer mislabels second-opinion as 'advisory only'"
+else
+  fail "F10: AGENTS.md still says second-opinion is 'advisory only' (stale; hook now enforces)"
+fi
+
+# AC 2: AGENTS.md describes second-opinion enforcement.
+if grep -q 'require-second-opinion' "$AGENTS_FILE"; then
+  pass "F10: AGENTS.md references require-second-opinion.sh enforcement"
+else
+  fail "F10: AGENTS.md should mention require-second-opinion.sh as the enforcement mechanism"
+fi
+
+# AC 3: AGENTS.md mentions all 3 killswitches.
+ksw_missing=()
+for ksw in TDD_COMMIT_GATE_DISABLE SECOND_OPINION_DISABLE SECOND_OPINION_HASH_DISABLE; do
+  grep -q "$ksw" "$AGENTS_FILE" || ksw_missing+=("$ksw")
+done
+if [ ${#ksw_missing[@]} -eq 0 ]; then
+  pass "F10: AGENTS.md mentions all 3 killswitches"
+else
+  fail "F10: AGENTS.md missing killswitches: ${ksw_missing[*]}"
+fi
+
+# AC 4: AGENTS.md mentions enforcement_mode + the 3 valid values.
+if grep -q 'enforcement_mode' "$AGENTS_FILE" \
+   && grep -qE 'strict.*warn.*off|strict, warn|warn.*strict|off.*strict' "$AGENTS_FILE"; then
+  pass "F10: AGENTS.md mentions enforcement_mode + the 3 valid values"
+else
+  fail "F10: AGENTS.md should describe enforcement_mode strict/warn/off"
+fi
+
+# AC 5: AGENTS.md mentions require_hash_binding_tier1 (F5).
+if grep -q 'require_hash_binding_tier1\|hash binding\|diff_sha256' "$AGENTS_FILE"; then
+  pass "F10: AGENTS.md mentions hash binding (F5)"
+else
+  fail "F10: AGENTS.md should mention require_hash_binding_tier1 / hash binding"
+fi
+
+# AC 6: AGENTS.md references .tdd/templates/ canonical templates.
+if grep -q '\.tdd/templates/' "$AGENTS_FILE"; then
+  pass "F10: AGENTS.md references .tdd/templates/ as canonical"
+else
+  fail "F10: AGENTS.md should reference .tdd/templates/ for canonical artifacts"
+fi
+
+# AC 7: CLAUDE.md gets the same updates (parity).
+if ! grep -qE 'second-opinion.*advisory only|advisory only.*second-opinion' "$CLAUDE_FILE"; then
+  pass "F10: CLAUDE.md no longer mislabels second-opinion as 'advisory only'"
+else
+  fail "F10: CLAUDE.md still says second-opinion is 'advisory only'"
+fi
+
+ksw_missing_c=()
+for ksw in TDD_COMMIT_GATE_DISABLE SECOND_OPINION_DISABLE SECOND_OPINION_HASH_DISABLE; do
+  grep -q "$ksw" "$CLAUDE_FILE" || ksw_missing_c+=("$ksw")
+done
+if [ ${#ksw_missing_c[@]} -eq 0 ]; then
+  pass "F10: CLAUDE.md mentions all 3 killswitches (parity)"
+else
+  fail "F10: CLAUDE.md missing killswitches: ${ksw_missing_c[*]}"
+fi
+
+if grep -q 'enforcement_mode' "$CLAUDE_FILE" \
+   && grep -qE 'strict.*warn.*off|strict, warn|warn.*strict|off.*strict' "$CLAUDE_FILE"; then
+  pass "F10: CLAUDE.md mentions enforcement_mode + valid values (parity)"
+else
+  fail "F10: CLAUDE.md should describe enforcement_mode strict/warn/off"
+fi
+
+echo
+
 # F9 cycle (f9-skill-md-template-extraction): SKILL.md inlined two
 # templates that already exist (or should exist) in .tdd/templates/.
 # The inlined matrix template silently re-opened F8 (used literal `F1`

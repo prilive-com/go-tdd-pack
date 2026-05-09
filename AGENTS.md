@@ -219,7 +219,7 @@ Never interpret other replies as gate responses. Never self-approve.
 - `migration-review` — DB migration safety review
 - `new-module-scaffold` — scaffold a new package/binary
 - `postmortem-fix` — incident → prevention plan
-- `second-opinion` — optional cross-model review via OpenAI Codex CLI before non-trivial Tier 1 implementation; advisory only, requires `codex` installed + logged in
+- `second-opinion` — cross-model review via OpenAI Codex CLI before non-trivial code changes. Required by the `require-second-opinion.sh` PreToolUse hook when `codex` is available (the hook denies Edit/Write/MultiEdit/mutating-Bash without a fresh adjudication file at `.tdd/second-opinion-completed.md`). See "Operator config & killswitches" below for opt-out paths.
 
 ## Reviewer agents available
 
@@ -229,6 +229,43 @@ Never interpret other replies as gate responses. Never self-approve.
 - `go-security-reviewer` — secrets, taint, supply chain, crypto
 - `go-test-engineer` — test quality + TDD ceremony check
 - `go-bloat-reviewer` — necessity gates, deletion candidates
+
+## Operator config & killswitches
+
+`.tdd/tdd-config.json` carries operator-facing knobs that change how
+the deny gates behave. AGENTS.md and CLAUDE.md mirror this section.
+
+- `enforcement_mode` (`strict` | `warn` | `off`; default `strict`).
+  Applies to `gate-tier1-commit`, `require-second-opinion`,
+  `require-tdd-state`, `guard-bash-pipefail`. `warn` emits stderr
+  advisory + allows the tool call. `off` is silent passthrough.
+  Per-hook override via `enforcement_mode_overrides: {hook-name: mode}`.
+  Security gates (`guard-dangerous-bash`, `guard-protected-files`,
+  `scan-for-secrets`) ignore this — strict-only by design. Invalid
+  values fall back to `strict` with a stderr warning.
+
+- `second_opinion.require_hash_binding_tier1` (default `false`).
+  When `true` AND target path is Tier 1, `require-second-opinion.sh`
+  denies if the recorded `diff_sha256` (sha of `git diff HEAD --cached`)
+  or `plan_sha256` (sha of `.tdd/current-plan.md`) doesn't match
+  current. Closes the bypass where a fresh adjudication for one
+  diff silently covers later unrelated work. Both fields must be
+  present and 64-hex; missing or malformed → deny.
+
+Emergency env-var killswitches (document in commit message if used):
+
+- `TDD_COMMIT_GATE_DISABLE=1` — bypass `gate-tier1-commit.sh`
+- `SECOND_OPINION_DISABLE=1` — bypass `require-second-opinion.sh`
+- `SECOND_OPINION_HASH_DISABLE=1` — bypass F5 hash binding only
+
+Canonical templates (used by /second-opinion Step 6):
+
+- `.tdd/templates/second-opinion-adjudication-template.md`
+- `.tdd/templates/disposition-matrix-template.md`
+
+The matrix template uses `F-EXAMPLE-N` placeholder rows; real rows
+must use `F1`/`F2`/... — those are counted by the row-count gate
+(F8 invariant). Do not copy the example IDs into a real adjudication.
 
 ## Reference
 
