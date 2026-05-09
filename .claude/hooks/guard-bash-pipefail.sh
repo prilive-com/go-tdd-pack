@@ -23,6 +23,38 @@ fi
 stdin="$(cat)"
 cmd="$(jq -r '.tool_input.command // empty' <<<"$stdin" 2>/dev/null || echo '')"
 
+# F6: enforcement_mode resolver. Returns "strict"|"warn"|"off". Per-hook
+# override (.enforcement_mode_overrides[hook]) wins over global; invalid
+# values fall back to "strict" (defense-in-depth — typo can't soften).
+resolve_enforcement_mode() {
+  local hook_name="$1" cfg="$2"
+  if [[ ! -f "$cfg" ]] || ! command -v jq >/dev/null 2>&1; then
+    echo "strict"; return
+  fi
+  # Codex round 1 P1: `|| true` so jq failure on partial/malformed
+  # config doesn't abort; falls through to strict via case.
+  local override
+  override="$(jq -r --arg n "$hook_name" \
+    '.enforcement_mode_overrides[$n] // empty' "$cfg" 2>/dev/null || true)"
+  if [[ -n "$override" && "$override" != "null" ]]; then
+    case "$override" in
+      strict|warn|off) echo "$override"; return ;;
+      # Codex round 1 P1: invalid override MUST short-circuit to strict.
+      *)
+        echo "[guard-bash-pipefail] WARN: invalid enforcement_mode_overrides[$hook_name]='$override'; using strict" >&2
+        echo "strict"; return
+        ;;
+    esac
+  fi
+  local global
+  global="$(jq -r '.enforcement_mode // "strict"' "$cfg" 2>/dev/null || true)"
+  case "$global" in
+    strict|warn|off) echo "$global" ;;
+    *) echo "[guard-bash-pipefail] WARN: invalid enforcement_mode='$global'; using strict" >&2; echo "strict" ;;
+  esac
+}
+ENFORCEMENT_MODE="$(resolve_enforcement_mode "guard-bash-pipefail" "${CLAUDE_PROJECT_DIR:-$(pwd)}/.tdd/tdd-config.json")"
+
 # Only inspect commands that involve a Go verification tool.
 if echo "$cmd" | grep -qE '(^|[[:space:]]|;|&|\|)(go|gofmt|goimports|golangci-lint|staticcheck|govulncheck|deadcode|unparam)[[:space:]]+(build|test|vet|run|mod|tidy|install|version|env)'; then
   # Inspect: is there a pipe AND no pipefail set?
@@ -59,6 +91,20 @@ if echo "$cmd" | grep -qE '(^|[[:space:]]|;|&|\|)(go|gofmt|goimports|golangci-li
   # bypass; Claude doesn't typically craft such echo strings.
   if echo "$cmd" | grep -q '|' \
      && ! echo "$cmd" | grep -qE '(^|[[:space:];&|()"'"'"'])(set|bash)([[:space:]]+-[a-zA-Z]+)*[[:space:]]+-[a-zA-Z]*o[a-zA-Z]*[[:space:]]+pipefail([[:space:]]|;|&|$)'; then
+    # F6: enforcement_mode dispatch. warn → stderr advisory + exit 0;
+    # off → silent passthrough; strict → original deny logic below.
+    case "${ENFORCEMENT_MODE:-strict}" in
+      off) exit 0 ;;
+      warn)
+        cat >&2 <<'EOF'
+[guard-bash-pipefail] WARNING (enforcement_mode=warn): piped go command without pipefail.
+This would be DENIED in strict mode. Set enforcement_mode: "strict" in
+.tdd/tdd-config.json (or remove the override) to enforce.
+EOF
+        echo '{}'
+        exit 0
+        ;;
+    esac
     cat <<'JSON'
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Verification command pipes Go output through another command without 'set -o pipefail'. The exit code of the Go tool is masked by the downstream command (e.g. 'head' returns 0 even when 'go build' failed). Real build failures look like successes. Wrap in: bash -c 'set -o pipefail; <command> 2>&1 | head -20'"}}
 JSON

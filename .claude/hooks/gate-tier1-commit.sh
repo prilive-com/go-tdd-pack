@@ -51,10 +51,43 @@ if ! command -v jq >/dev/null 2>&1; then
           # has been told.
 fi
 
-# Killswitch.
+# Killswitch (env var; emergency-only — document in commit message).
 if [[ "${TDD_COMMIT_GATE_DISABLE:-0}" == "1" ]]; then
   exit 0
 fi
+
+# F6: enforcement_mode resolver. Returns "strict"|"warn"|"off". Per-hook
+# override (.enforcement_mode_overrides[hook]) wins over global; invalid
+# values fall back to "strict" (defense-in-depth — typo can't soften).
+resolve_enforcement_mode() {
+  local hook_name="$1" cfg="$2"
+  if [[ ! -f "$cfg" ]] || ! command -v jq >/dev/null 2>&1; then
+    echo "strict"; return
+  fi
+  # Codex round 1 P1: append `|| true` so jq failure on partial/malformed
+  # config doesn't abort under set -e; falls through to strict via case.
+  local override
+  override="$(jq -r --arg n "$hook_name" \
+    '.enforcement_mode_overrides[$n] // empty' "$cfg" 2>/dev/null || true)"
+  if [[ -n "$override" && "$override" != "null" ]]; then
+    case "$override" in
+      strict|warn|off) echo "$override"; return ;;
+      # Codex round 1 P1: invalid override MUST fall back to strict
+      # immediately. Falling through to global lets a typo soften
+      # enforcement when global is warn/off — violates the invariant.
+      *)
+        echo "[gate-tier1-commit] WARN: invalid enforcement_mode_overrides[$hook_name]='$override'; using strict" >&2
+        echo "strict"; return
+        ;;
+    esac
+  fi
+  local global
+  global="$(jq -r '.enforcement_mode // "strict"' "$cfg" 2>/dev/null || true)"
+  case "$global" in
+    strict|warn|off) echo "$global" ;;
+    *) echo "[gate-tier1-commit] WARN: invalid enforcement_mode='$global'; using strict" >&2; echo "strict" ;;
+  esac
+}
 
 ROOT="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 PLAN="$ROOT/.tdd/current-plan.md"
@@ -67,6 +100,36 @@ mkdir -p "$ROOT/.tdd" 2>/dev/null
 # No config means TDD ceremony not configured AND no project-wide guards
 # defined — allow.
 [[ ! -f "$CONFIG" ]] && exit 0
+
+# Codex round 3 P1: validate config parses BEFORE downstream jq queries.
+# Without this, a malformed config produces empty tier1_path_regexes /
+# integration_guards / etc. — silently softening every gate this hook
+# implements (fail-open). Malformed config is an environment fault;
+# fail closed via deny-with-strict, bypassing enforcement_mode by design.
+if ! jq -e . "$CONFIG" >/dev/null 2>&1; then
+  cat <<'JSON'
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":".tdd/tdd-config.json failed to parse. The Tier 1 commit gate cannot enforce discipline without a parseable config and refuses to silently soften. Fix the JSON and verify with: jq . .tdd/tdd-config.json"}}
+JSON
+  cat >&2 <<'DIRECTIVE'
+[gate-tier1-commit] BLOCKED: .tdd/tdd-config.json failed to parse.
+
+<claude-directive>
+This is an AUTOMATED ENVIRONMENT CHECK. The hook reads tier1 path
+regexes, integration guards, and enforcement_mode from the config;
+without parseable JSON it would silently fail open (no Tier 1
+detection, no guards). Fail closed instead.
+
+You MUST:
+  1. Fix the JSON syntax in .tdd/tdd-config.json.
+  2. Verify with: jq . .tdd/tdd-config.json
+  3. Then retry the commit.
+</claude-directive>
+DIRECTIVE
+  exit 2
+fi
+
+# F6: resolve enforcement mode now that we have $CONFIG.
+ENFORCEMENT_MODE="$(resolve_enforcement_mode "gate-tier1-commit" "$CONFIG")"
 
 CMD="$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.command // empty' 2>/dev/null)"
 [[ -z "$CMD" ]] && exit 0
@@ -334,6 +397,25 @@ audit() {
 
 deny() {
   local reason="$1" detail="$2"
+  # F6: enforcement_mode dispatch. warn → stderr advisory + exit 0;
+  # off → silent passthrough; strict → original deny logic below.
+  local mode="${ENFORCEMENT_MODE:-strict}"
+  case "$mode" in
+    off)
+      audit "off_mode_passthrough" "$reason"
+      exit 0
+      ;;
+    warn)
+      audit "warn_mode" "$reason"
+      cat >&2 <<EOF
+[gate-tier1-commit] WARNING (enforcement_mode=warn): $reason
+This would be DENIED in strict mode. Set enforcement_mode: "strict" in
+.tdd/tdd-config.json (or remove the override) to enforce.
+EOF
+      jq -n '{}' 2>/dev/null || echo '{}'
+      exit 0
+      ;;
+  esac
   audit "deny" "$reason"
   cat <<JSON
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"$detail"}}

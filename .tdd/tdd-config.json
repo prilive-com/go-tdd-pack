@@ -143,5 +143,9 @@
 
     "_require_hash_binding_tier1_doc": "F5: bind /second-opinion adjudication to specific diff/plan content. When true AND path is Tier 1, require-second-opinion.sh denies if recorded diff_sha256 (sha of `git diff HEAD --cached`) or plan_sha256 (sha of .tdd/current-plan.md) doesn't match current. Closes the bypass where a fresh adjudication for one diff silently covers later unrelated work. Killswitch env var: SECOND_OPINION_HASH_DISABLE=1.",
     "require_hash_binding_tier1": false
-  }
+  },
+
+  "_enforcement_mode_doc": "F6: graduated enforcement for the 4 process-discipline gates (gate-tier1-commit, require-second-opinion, require-tdd-state, guard-bash-pipefail). Values: 'strict' (default; deny + exit 2), 'warn' (stderr advisory + allow exit 0), 'off' (silent passthrough). Per-hook override in enforcement_mode_overrides wins over global. Invalid values fall back to 'strict' with a stderr warning (typo can't soften). Security gates (guard-dangerous-bash, guard-protected-files, scan-for-secrets) ignore this — strict-only by design.",
+  "enforcement_mode": "strict",
+  "enforcement_mode_overrides": {}
 }

@@ -75,6 +75,90 @@ PLAN="$PROJECT_DIR/.tdd/current-plan.md"
 # No config means TDD ceremony not configured for this project — allow.
 [[ ! -f "$CONFIG" ]] && exit 0
 
+# Codex round 2 P1: validate the config parses BEFORE running any
+# subsequent jq queries. Without this guard, a malformed/partial
+# tdd-config.json would cause one of the many jq calls below to
+# fail under `set -e`, aborting the hook and leaving the operator
+# with NO gate — silent fail-open. Fail closed instead with a clear
+# message so the operator can fix the config. This bypasses the
+# enforcement_mode dispatch by design: malformed config is an
+# environment fault, not a TDD discipline violation.
+if ! jq -e . "$CONFIG" >/dev/null 2>&1; then
+  cat >&2 <<HOOK_MSG
+[require-tdd-state] BLOCKED: .tdd/tdd-config.json failed to parse.
+
+<claude-directive>
+This is an AUTOMATED ENVIRONMENT CHECK. The TDD config file at
+$CONFIG contains invalid JSON. The hook cannot enforce TDD discipline
+without a parseable config and refuses to silently fail open.
+
+You MUST:
+  1. Fix the JSON syntax in .tdd/tdd-config.json.
+  2. Verify with: jq . .tdd/tdd-config.json
+  3. Then retry the edit.
+
+Do NOT proceed with the edit until the config is valid.
+</claude-directive>
+HOOK_MSG
+  exit 2
+fi
+
+# F6: enforcement_mode resolver. Returns "strict"|"warn"|"off". Per-hook
+# override (.enforcement_mode_overrides[hook]) wins over global; invalid
+# values fall back to "strict" (defense-in-depth — typo can't soften).
+resolve_enforcement_mode() {
+  local hook_name="$1" cfg="$2"
+  if [[ ! -f "$cfg" ]] || ! command -v jq >/dev/null 2>&1; then
+    echo "strict"; return
+  fi
+  # Codex round 1 P1: `|| true` so jq failure on partial/malformed
+  # config doesn't abort under set -e; falls through to strict.
+  local override
+  override="$(jq -r --arg n "$hook_name" \
+    '.enforcement_mode_overrides[$n] // empty' "$cfg" 2>/dev/null || true)"
+  if [[ -n "$override" && "$override" != "null" ]]; then
+    case "$override" in
+      strict|warn|off) echo "$override"; return ;;
+      # Codex round 1 P1: invalid override MUST short-circuit to strict.
+      *)
+        echo "[require-tdd-state] WARN: invalid enforcement_mode_overrides[$hook_name]='$override'; using strict" >&2
+        echo "strict"; return
+        ;;
+    esac
+  fi
+  local global
+  global="$(jq -r '.enforcement_mode // "strict"' "$cfg" 2>/dev/null || true)"
+  case "$global" in
+    strict|warn|off) echo "$global" ;;
+    *) echo "[require-tdd-state] WARN: invalid enforcement_mode='$global'; using strict" >&2; echo "strict" ;;
+  esac
+}
+ENFORCEMENT_MODE="$(resolve_enforcement_mode "require-tdd-state" "$CONFIG")"
+
+# F6: short-circuit BEFORE printing the long deny stderr if mode is soft.
+# warn → emit one-line stderr advisory + exit 0; off → silent passthrough.
+# strict → return (caller falls through to original deny + exit 2).
+f6_warn_and_exit_if_softened() {
+  local reason="$1"
+  case "${ENFORCEMENT_MODE:-strict}" in
+    off)
+      # Codex round 1 P2: emit `{}` so callers conformant with
+      # the PreToolUse contract get an explicit pass payload.
+      jq -n '{}' 2>/dev/null || echo '{}'
+      exit 0
+      ;;
+    warn)
+      cat >&2 <<EOF
+[require-tdd-state] WARNING (enforcement_mode=warn): $reason
+This would be DENIED in strict mode. Set enforcement_mode: "strict" in
+.tdd/tdd-config.json (or remove the override) to enforce.
+EOF
+      jq -n '{}' 2>/dev/null || echo '{}'
+      exit 0
+      ;;
+  esac
+}
+
 # Read tier1 regexes once (avoid re-reading per-file in the loop).
 TIER1_REGEXES="$(jq -r '.tier1_path_regexes[]? // empty' "$CONFIG")"
 
@@ -154,6 +238,7 @@ if [[ ${#TIER1_TESTS[@]} -gt 0 ]]; then
   fi
 
   if [[ "$M2_SET" == "true" && "$ALLOW_AFTER_RED" != "true" ]]; then
+    f6_warn_and_exit_if_softened "edit to Tier 1 test file(s) after red phase confirmed"
     test_list="$(fmt_paths "${TIER1_TESTS[@]}")"
     cat >&2 <<HOOK_MSG
 [require-tdd-state] BLOCKED edit to Tier 1 test file(s) after red phase confirmed:
@@ -186,6 +271,7 @@ HOOK_MSG
   fi
 
   if [[ "$M1_SET" == "false" && "$ALLOW_BEFORE_SPEC" != "true" ]]; then
+    f6_warn_and_exit_if_softened "edit to Tier 1 test file(s) before spec approved"
     test_list="$(fmt_paths "${TIER1_TESTS[@]}")"
     cat >&2 <<HOOK_MSG
 [require-tdd-state] BLOCKED edit to Tier 1 test file(s) before spec approved:
@@ -209,6 +295,7 @@ fi
 PROD_LIST="$(fmt_paths "${TIER1_PROD[@]}")"
 
 if [[ ! -f "$PLAN" ]]; then
+  f6_warn_and_exit_if_softened "edit to Tier 1 high-stakes path(s) without .tdd/current-plan.md"
   cat >&2 <<HOOK_MSG
 [require-tdd-state] BLOCKED edit to Tier 1 high-stakes path(s):
 $PROD_LIST
@@ -275,6 +362,7 @@ if [[ ${#ALIAS_USED[@]} -gt 0 ]]; then
 fi
 
 if [[ ${#MISSING[@]} -gt 0 ]]; then
+  f6_warn_and_exit_if_softened "edit to Tier 1 high-stakes path(s) with missing TDD markers"
   cat >&2 <<HOOK_MSG
 [require-tdd-state] BLOCKED edit to Tier 1 high-stakes path(s):
 $PROD_LIST

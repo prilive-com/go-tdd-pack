@@ -657,6 +657,238 @@ fi
 
 rm -rf "$TMPROOT_F5"
 
+# F6 cycle (f6-enforcement-mode-config): graduated strict/warn/off
+# enforcement for the 4 process-discipline gates. Default strict
+# preserved; warn emits stderr advisory + exit 0; off is silent
+# passthrough. Security gates ignore the config (strict-only).
+echo "Testing F6 (enforcement_mode config)..."
+TMPROOT_F6=$(mktemp -d)
+git init -q "$TMPROOT_F6"
+( cd "$TMPROOT_F6" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMPROOT_F6/.tdd" "$TMPROOT_F6/internal/auth"
+cp .tdd/tdd-config.json "$TMPROOT_F6/.tdd/"
+echo "package auth" > "$TMPROOT_F6/internal/auth/handler.go"
+( cd "$TMPROOT_F6" && git add . && git commit -q -m initial )
+echo "// edit" >> "$TMPROOT_F6/internal/auth/handler.go"
+( cd "$TMPROOT_F6" && git add internal/auth/handler.go )
+
+# Helper: set enforcement_mode (global) in fixture config.
+f6_set_global_mode() {
+  jq ".enforcement_mode = \"$1\"" "$TMPROOT_F6/.tdd/tdd-config.json" \
+    > /tmp/f6-cfg.json && mv /tmp/f6-cfg.json "$TMPROOT_F6/.tdd/tdd-config.json"
+}
+# Helper: set per-hook override.
+f6_set_override() {
+  local hook="$1" mode="$2"
+  jq ".enforcement_mode_overrides.\"$hook\" = \"$mode\"" \
+    "$TMPROOT_F6/.tdd/tdd-config.json" > /tmp/f6-cfg.json \
+    && mv /tmp/f6-cfg.json "$TMPROOT_F6/.tdd/tdd-config.json"
+}
+# Helper: clear all enforcement keys (back to defaults).
+f6_clear_mode() {
+  jq 'del(.enforcement_mode) | del(.enforcement_mode_overrides)' \
+    "$TMPROOT_F6/.tdd/tdd-config.json" > /tmp/f6-cfg.json \
+    && mv /tmp/f6-cfg.json "$TMPROOT_F6/.tdd/tdd-config.json"
+}
+
+# AC 1: default mode (no config keys) is strict. Trigger a deny on
+# require-second-opinion (Tier 1 path edit, no fresh adjudication) →
+# expect deny.
+f6_clear_mode
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F6" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "F6: default mode (no config) is strict → deny preserved"
+else
+  fail "F6: default should be strict (got: '$out')"
+fi
+
+# AC 4 (warn): enforcement_mode=warn globally → require-second-opinion
+# emits stderr warning and ALLOWS the tool call (exit 0).
+f6_set_global_mode "warn"
+warn_out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F6" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>&1 >/dev/null; echo "exit:$?")
+if [[ "$warn_out" == *"WARNING"* ]] && [[ "$warn_out" == *"exit:0"* ]]; then
+  pass "F6: global warn → stderr warning + exit 0 (require-second-opinion)"
+else
+  fail "F6: warn mode should emit stderr + allow (got: '$warn_out')"
+fi
+
+# AC 4 (off): enforcement_mode=off globally → silent passthrough exit 0.
+f6_set_global_mode "off"
+off_out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F6" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>&1 >/dev/null; echo "exit:$?")
+if [[ "$off_out" == *"exit:0"* ]] && [[ "$off_out" != *"WARNING"* ]] && [[ "$off_out" != *"BLOCKED"* ]]; then
+  pass "F6: global off → silent passthrough (require-second-opinion)"
+else
+  fail "F6: off mode should be silent passthrough (got: '$off_out')"
+fi
+
+# AC 3: per-hook override takes precedence. Global=strict + override
+# require-second-opinion=warn → warn for that hook only.
+f6_set_global_mode "strict"
+f6_set_override "require-second-opinion" "warn"
+ovr_out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F6" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>&1 >/dev/null; echo "exit:$?")
+if [[ "$ovr_out" == *"WARNING"* ]] && [[ "$ovr_out" == *"exit:0"* ]]; then
+  pass "F6: per-hook override (warn) takes precedence over global (strict)"
+else
+  fail "F6: override should win over global (got: '$ovr_out')"
+fi
+
+# AC 5: existing env-var killswitch (SECOND_OPINION_DISABLE=1) still
+# works regardless of mode. Set global=strict, no override, killswitch
+# on → silent passthrough.
+f6_clear_mode
+f6_set_global_mode "strict"
+ksw_out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F6" SECOND_OPINION_DISABLE=1 \
+    timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-second-opinion.sh 2>&1 >/dev/null; echo "exit:$?")
+if [[ "$ksw_out" == *"exit:0"* ]] && [[ "$ksw_out" != *"BLOCKED"* ]]; then
+  pass "F6: SECOND_OPINION_DISABLE=1 killswitch still works (strict + env=1 → pass)"
+else
+  fail "F6: existing killswitch must continue to work (got: '$ksw_out')"
+fi
+
+# AC 6: security gate (guard-dangerous-bash) IGNORES the config.
+# Even with global=warn, dangerous bash like `git commit --no-verify`
+# still denies (strict-only by design).
+f6_set_global_mode "warn"
+sec_out=$(echo '{"tool_name":"Bash","tool_input":{"command":"git commit --no-verify -m bypass"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F6" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/guard-dangerous-bash.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$sec_out" = "deny" ]; then
+  pass "F6: guard-dangerous-bash ignores warn config (strict-only by design)"
+else
+  fail "F6: security gates must remain strict (got: '$sec_out')"
+fi
+
+# AC 7: invalid mode value falls back to strict (with stderr warning).
+f6_set_global_mode "blahblah"
+inv_out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F6" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$inv_out" = "deny" ]; then
+  pass "F6: invalid mode value falls back to strict (denies)"
+else
+  fail "F6: typo in mode should not soften enforcement (got: '$inv_out')"
+fi
+
+# AC 4 (warn) for gate-tier1-commit: warn mode → commit allowed.
+# Setup: stage Tier 1 file, no plan exists → strict would deny via
+# Layer 2; warn should warn + allow.
+f6_clear_mode
+f6_set_global_mode "warn"
+gate_out=$(echo '{"tool_input":{"command":"git commit -m foo"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F6" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>&1 >/dev/null; echo "exit:$?")
+if [[ "$gate_out" == *"WARNING"* ]] && [[ "$gate_out" == *"exit:0"* ]]; then
+  pass "F6: gate-tier1-commit warn mode → stderr + allow (no commit block)"
+else
+  fail "F6: gate-tier1-commit should warn-not-deny (got: '$gate_out')"
+fi
+
+# AC 4 (warn) for require-tdd-state: warn mode → Tier 1 prod edit
+# without plan markers should warn + allow.
+# Plan with M3=no should normally deny.
+cat > "$TMPROOT_F6/.tdd/current-plan.md" <<'EOF'
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: no
+EOF
+tdd_out=$(echo '{"tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F6" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-tdd-state.sh 2>&1 >/dev/null; echo "exit:$?")
+if [[ "$tdd_out" == *"WARNING"* ]] && [[ "$tdd_out" == *"exit:0"* ]]; then
+  pass "F6: require-tdd-state warn mode → stderr + allow"
+else
+  fail "F6: require-tdd-state should warn-not-deny (got: '$tdd_out')"
+fi
+
+# AC 4 (warn) for guard-bash-pipefail: warn mode → piped go cmd
+# without pipefail warns + allows.
+pipe_out=$(echo '{"tool_input":{"command":"go build ./... | head -10"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F6" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/guard-bash-pipefail.sh 2>&1 >/dev/null; echo "exit:$?")
+if [[ "$pipe_out" == *"WARNING"* ]] && [[ "$pipe_out" == *"exit:0"* ]]; then
+  pass "F6: guard-bash-pipefail warn mode → stderr + allow"
+else
+  fail "F6: guard-bash-pipefail should warn-not-deny (got: '$pipe_out')"
+fi
+
+# Codex round 1 P1: invalid per-hook override must short-circuit to
+# strict, NOT fall through to global. Set global=warn + invalid override
+# → expect strict deny (NOT warn).
+f6_clear_mode
+f6_set_global_mode "warn"
+f6_set_override "require-second-opinion" "blahblah"
+inv_ovr_out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F6" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$inv_ovr_out" = "deny" ]; then
+  pass "F6-codex: invalid per-hook override → strict (R1 P1 closed; doesn't fall through to warn global)"
+else
+  fail "F6-codex: typo'd override should short-circuit to strict (got: '$inv_ovr_out')"
+fi
+
+# Codex round 1 P1 + round 3 P1: malformed config must DENY (fail
+# closed), not silently abort or pass through. The original R1 test
+# accepted pass-or-deny but R3 caught that allowing pass bakes in
+# fail-open. The right behavior is fail-closed deny with a parse-
+# error message (environment fault, bypasses enforcement_mode).
+f6_clear_mode
+echo '{"second_opinion": {"model_default": "gpt-5.5"' > "$TMPROOT_F6/.tdd/tdd-config.json"
+malformed_out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F6" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$malformed_out" = "deny" ]; then
+  pass "F6-codex: require-second-opinion DENIES on malformed config (fail-closed; R3 P1 closed)"
+else
+  fail "F6-codex: malformed config should fail closed (got: '$malformed_out')"
+fi
+
+# Codex round 2 P1: require-tdd-state is under `set -euo pipefail`, so
+# any unprotected jq call on malformed config would silently abort
+# without firing the gate — fail-open. The new top-of-hook config
+# validation must DENY with a clear message instead.
+malformed_tdd_out=$(echo '{"tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F6" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-tdd-state.sh 2>&1; echo "exit:$?")
+if [[ "$malformed_tdd_out" == *"failed to parse"* ]] && [[ "$malformed_tdd_out" == *"exit:2"* ]]; then
+  pass "F6-codex: require-tdd-state denies on malformed config (R2 P1 closed; no fail-open under set -e)"
+else
+  fail "F6-codex: malformed config should deny with parse-error message (got: '$malformed_tdd_out')"
+fi
+
+# Codex round 3 P1: gate-tier1-commit also depends on tdd-config for
+# Tier 1 detection / integration guards. Malformed config must DENY
+# the same way require-tdd-state does (consistency across all 4
+# config-dependent process gates).
+( cd "$TMPROOT_F6" && git add internal/auth/handler.go )
+malformed_gate_out=$(echo '{"tool_input":{"command":"git commit -m foo"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F6" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>&1 \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$malformed_gate_out" = "deny" ]; then
+  pass "F6-codex: gate-tier1-commit denies on malformed config (R3 P1 closed)"
+else
+  fail "F6-codex: gate-tier1-commit should fail closed on malformed config (got: '$malformed_gate_out')"
+fi
+
+# Restore the fixture config so subsequent cleanup is clean.
+cp .tdd/tdd-config.json "$TMPROOT_F6/.tdd/"
+
+rm -rf "$TMPROOT_F6"
+
 # redact-patterns loader (trial-feedback hardening): extract load_redact_patterns from SKILL.md
 # and run it against fixture files. Catches regression of the comment-
 # filter + regex-validator that protects against silent diff emptying.

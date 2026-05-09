@@ -38,6 +38,26 @@ allow() { exit 0; }
 deny() {
   local reason="$1" key="$2" target="${3:-}"
 
+  # F6: enforcement_mode dispatch. warn → stderr advisory + exit 0;
+  # off → silent passthrough; strict → original deny logic below.
+  local mode="${ENFORCEMENT_MODE:-strict}"
+  case "$mode" in
+    off)
+      audit "off_mode_passthrough_$key" "{\"target\":\"${target}\"}"
+      exit 0
+      ;;
+    warn)
+      audit "warn_mode_$key" "{\"target\":\"${target}\"}"
+      cat >&2 <<EOF
+[require-second-opinion] WARNING (enforcement_mode=warn): $reason
+This would be DENIED in strict mode. Set enforcement_mode: "strict" in
+.tdd/tdd-config.json (or remove the override) to enforce.
+EOF
+      jq -n '{}' 2>/dev/null || echo '{}'
+      exit 0
+      ;;
+  esac
+
   # Defense-in-depth #1: chmod 444 the target if it exists and is writable.
   # Works around #37210 (Edit deny silently ignored on macOS).
   # Restore happens after 8s so legitimate retry (after artifacts created)
@@ -101,6 +121,74 @@ if [[ "${SECOND_OPINION_DISABLE:-0}" == "1" ]]; then
   audit "killswitch"
   allow
 fi
+
+# Codex round 3 P1: validate config parses BEFORE downstream jq queries
+# read tier1_path_regexes, second_opinion.* flags, marker_aliases, etc.
+# Malformed config would silently soften every Tier-1-scoped check
+# (empty regexes → no Tier 1 detection → fewer enforcements). Fail
+# closed via deny-with-strict, bypassing enforcement_mode by design
+# (environment fault, not TDD discipline). The config-not-found case
+# (file missing) still passes through silently for greenfield setup.
+if [[ -f "$TDD_CONFIG" ]] && command -v jq >/dev/null 2>&1; then
+  if ! jq -e . "$TDD_CONFIG" >/dev/null 2>&1; then
+    audit "config_parse_error" "{\"file\":\"$TDD_CONFIG\"}"
+    if command -v jq >/dev/null 2>&1; then
+      jq -nc '{
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: ".tdd/tdd-config.json failed to parse. The require-second-opinion hook cannot enforce Tier 1 discipline without a parseable config and refuses to silently soften. Fix the JSON and verify with: jq . .tdd/tdd-config.json"
+        }
+      }'
+    else
+      cat <<'JSON'
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":".tdd/tdd-config.json failed to parse. Fix the JSON and verify with: jq . .tdd/tdd-config.json"}}
+JSON
+    fi
+    cat >&2 <<'DIRECTIVE'
+[require-second-opinion] BLOCKED: .tdd/tdd-config.json failed to parse.
+
+<claude-directive>
+This is an AUTOMATED ENVIRONMENT CHECK. Fix the JSON syntax and verify
+with `jq . .tdd/tdd-config.json` before retrying.
+</claude-directive>
+DIRECTIVE
+    exit 2
+  fi
+fi
+
+# F6: enforcement_mode resolver. Returns "strict"|"warn"|"off". Per-hook
+# override (.enforcement_mode_overrides[hook]) wins over global; invalid
+# values fall back to "strict" (defense-in-depth — typo can't soften).
+resolve_enforcement_mode() {
+  local hook_name="$1" cfg="$2"
+  if [[ ! -f "$cfg" ]] || ! command -v jq >/dev/null 2>&1; then
+    echo "strict"; return
+  fi
+  # Codex round 1 P1: `|| true` so jq failure on partial/malformed
+  # config doesn't abort; falls through to strict via case statement.
+  local override
+  override="$(jq -r --arg n "$hook_name" \
+    '.enforcement_mode_overrides[$n] // empty' "$cfg" 2>/dev/null || true)"
+  if [[ -n "$override" && "$override" != "null" ]]; then
+    case "$override" in
+      strict|warn|off) echo "$override"; return ;;
+      # Codex round 1 P1: invalid override MUST short-circuit to strict.
+      # Falling through to global softens enforcement on typo'd override.
+      *)
+        echo "[require-second-opinion] WARN: invalid enforcement_mode_overrides[$hook_name]='$override'; using strict" >&2
+        echo "strict"; return
+        ;;
+    esac
+  fi
+  local global
+  global="$(jq -r '.enforcement_mode // "strict"' "$cfg" 2>/dev/null || true)"
+  case "$global" in
+    strict|warn|off) echo "$global" ;;
+    *) echo "[require-second-opinion] WARN: invalid enforcement_mode='$global'; using strict" >&2; echo "strict" ;;
+  esac
+}
+ENFORCEMENT_MODE="$(resolve_enforcement_mode "require-second-opinion" "$TDD_CONFIG")"
 
 # If codex is missing, we cannot enforce the flow. Pass through with audit.
 # (`make doctor` warns the operator separately.)
