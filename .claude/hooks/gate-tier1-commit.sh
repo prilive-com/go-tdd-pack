@@ -214,24 +214,192 @@ else
 fi
 
 if [[ "${SIZE_THRESHOLD:-0}" -gt 0 ]]; then
-  # Compute churn. Use the same staged-or-fallback logic as CHANGED_FILES
-  # above (F1, /second-opinion finding): `git commit -a` and pathspec
-  # commit forms (`git commit path/to/file`) update the index AT commit
-  # time, so PreToolUse sees an empty cached diff. Without the fallback,
-  # large unstaged-but-tracked changes bypass the layer entirely.
+  # Compute churn from the actual commit candidate set, not from
+  # arbitrary working-tree state.
   #
-  # Binary files (F2): numstat shows `-\t-` for binary changes. awk's
+  # F2-cycle /second-opinion finding: an earlier version of this code
+  # ALWAYS combined cached + working-tree diffs. False-positive'd plain
+  # `git commit -m` because unstaged tracked changes (not in the commit)
+  # inflated CHURN.
+  #
+  # Layer-0-rescue /second-opinion finding (P1): cached-emptiness alone
+  # is the wrong proxy for commit mode. `git commit -am ...` with a
+  # small pre-staged change leaves cached non-empty, so the size gate
+  # would count only the small staged file and miss the large tracked
+  # WIP that `-a` will sweep into the commit. Bypass.
+  #
+  # Correct mapping by commit mode:
+  #   plain `git commit`      → cached numstat (commits index only)
+  #   `git commit -a` / -am   → diff HEAD numstat (commits index + tracked WIP)
+  #   `git commit pathspec`   → working-tree numstat (overcount; safe)
+  #
+  # Pathspec parsing is shell-aware and brittle; for the pathspec case
+  # we fall back to working-tree numstat, which OVERCOUNTS but is safe
+  # (more reviews, never fewer).
+  #
+  # Binary files: numstat shows `-\t-` for binary changes. awk's
   # `$1 + $2` would treat `-` as 0, making binary changes invisible.
   # Treat any `-` entry as a large change (set churn to threshold+1)
   # so binary diffs always trigger review. Pure renames (numstat shows
   # `0\t0`) are NOT detected by line count — documented limitation;
   # follow-up cycle should add a separate file-count threshold.
-  CHURN="$( {
-    git diff --cached --numstat 2>/dev/null
-    # Fallback for `git commit -a` / pathspec forms — include working-tree
-    # changes so unstaged-at-PreToolUse diffs are still seen.
-    git diff --numstat 2>/dev/null
-  } | awk -v thresh="$SIZE_THRESHOLD" '
+
+  # Architecture (after Codex rounds 1-6):
+  #
+  # Layer 0 needs to know which diff source to count for the size
+  # threshold. Git has many content-selection modes (-a, -p, pathspec,
+  # --pathspec-from-file, --interactive, abbreviated long options, etc.);
+  # rounds 1-6 of /second-opinion review on a full git-CLI parser kept
+  # finding narrower edge cases. The architectural fix is to add a
+  # cross-check backstop: classify into ALL / PATHSPEC / PLAIN / UNCERTAIN,
+  # and treat UNCERTAIN as "use diff HEAD" (conservative ceiling).
+  #
+  # The parser only needs to be perfect at *avoiding false positives*
+  # (correctly identifying plain `git commit -m` so unrelated unstaged
+  # WIP doesn't deny — the F2-cycle false positive). For false negatives
+  # (parser missed a flag that adds working-tree content), the UNCERTAIN
+  # branch is the backstop: any --long-opt we don't explicitly recognize
+  # flips us to diff HEAD. Costs: occasional false positive on a benign
+  # newly-introduced git flag we haven't whitelisted; operator can
+  # /second-opinion to bypass. Benefit: no future Codex round can find
+  # a new bypass — unknown flags fail closed by construction.
+  COMMIT_MODE_ALL=false
+  COMMIT_MODE_PATHSPEC=false
+  COMMIT_MODE_UNCERTAIN=false
+
+  # Shell-expansion fail-closed (Codex rounds 7 P1, 8 P0). Commands like
+  # `mode=a; git commit -$mode -m msg`, `git commit $(cat flags)`, or
+  # `touch -- -a && git commit -* -m msg` (where the glob expands to -a
+  # post-shell) hide content-selecting flags from a literal-text parser.
+  # We can't predict what the shell will do without eval'ing (unsafe);
+  # any unescaped $, backtick, or shell glob char (* ? [) flips to
+  # UNCERTAIN. Costs: legitimate commits with literal $ or * in the
+  # message become UNCERTAIN; operator can /second-opinion to bypass.
+  # Benefit: the entire metaprogramming/glob bypass class fails closed.
+  #
+  # KNOWN OUT-OF-SCOPE bypasses (Codex round 8 — gate-level, not parser):
+  #   - `sh -c 'git commit -a -m msg'`: outer command is `sh -c '...'`,
+  #     so the hook's COMMITS_RE doesn't match `git commit` and the gate
+  #     never fires. Same for `bash -c`, `eval`, etc.
+  #   - `git -c alias.ci='commit -a' ci -m msg` and pre-configured git
+  #     aliases (`git ci`): outer argv is `git -c` or `git ci`, not
+  #     `git commit`; COMMITS_RE doesn't match.
+  # Both bypass Layer 0 entirely. Closing them requires broadening
+  # COMMITS_RE or moving the gate to a git pre-commit hook. Tracked as
+  # follow-up; not in scope for the Layer 0 rescue cycle.
+  if printf '%s' "$CMD" | grep -qE '\$|`|\*|\?|\['; then
+    COMMIT_MODE_UNCERTAIN=true
+  fi
+  _CMD_TOKENS=()
+  if command -v xargs >/dev/null 2>&1; then
+    while IFS= read -r _line; do
+      _CMD_TOKENS+=("$_line")
+    done < <(printf '%s' "$CMD" | xargs -n1 printf '%s\n' 2>/dev/null)
+  fi
+  if [[ ${#_CMD_TOKENS[@]} -eq 0 ]]; then
+    read -ra _CMD_TOKENS <<< "$CMD"
+  fi
+  # Walk tokens with state for option-with-arg flags (-m, --message, etc.)
+  # and `--` end-of-options. Long options containing 'a' (--amend,
+  # --author) hit the --* branch and are skipped; only -a / --all and
+  # short clusters containing 'a' set COMMIT_MODE_ALL.
+  #
+  # Skip past the leading `git commit` (or whatever shell prelude) by
+  # only starting to scan AFTER seeing the literal token `commit`.
+  _expect_arg=false
+  _end_of_opts=false
+  _scanning=false
+  for _tok in "${_CMD_TOKENS[@]}"; do
+    if [[ "$_scanning" != "true" ]]; then
+      [[ "$_tok" == "commit" ]] && _scanning=true
+      continue
+    fi
+    if [[ "$_end_of_opts" == "true" ]]; then
+      continue
+    fi
+    if [[ "$_expect_arg" == "true" ]]; then
+      _expect_arg=false
+      continue
+    fi
+    case "$_tok" in
+      --) _end_of_opts=true; COMMIT_MODE_PATHSPEC=true ;;
+      -a|--all|--all=*) COMMIT_MODE_ALL=true; break ;;
+      # Pathspec-selecting modes (Codex round 4 P1):
+      # --interactive / --patch / -p open a UI that adds working-tree
+      # content; --pathspec-from-file reads pathspecs from a file.
+      # All three should classify as working-tree candidate set.
+      --include|-i|--only|-o|--interactive|--patch|-p) COMMIT_MODE_PATHSPEC=true ;;
+      --pathspec-from-file=*) COMMIT_MODE_PATHSPEC=true ;;
+      --pathspec-from-file) COMMIT_MODE_PATHSPEC=true; _expect_arg=true ;;
+      # Options that REQUIRE a value as the next token.
+      # NOTE: -S / --gpg-sign take an OPTIONAL key id. Per git docs the
+      # key must be attached (-S<key> / --gpg-sign=<key>); a bare -S
+      # signs with the default key and does NOT consume the next token
+      # (Codex round 4 P1 — bare -S would otherwise eat a pathspec arg).
+      --message|--file|--author|--date|--cleanup|--template|--squash|--fixup|--trailer|--reedit-message|--reuse-message|-m|-F|-c|-C)
+        _expect_arg=true
+        ;;
+      # Short options with attached argument: -mTEXT, -FTEXT, -cREF,
+      # -CREF, -STEXT. The arg starts immediately after the flag letter,
+      # so any 'a' inside the arg is NOT an -a flag. Codex round 3 P2.
+      -m*|-F*|-c*|-C*|-S*) ;;
+      --gpg-sign|--gpg-sign=*) ;;  # bare or attached: no next-token consumption
+      # Long options that are explicitly known NOT to add working-tree
+      # content beyond what's already in the index. Treat as plain mode.
+      --amend|--no-edit|--no-verify|--no-gpg-sign|--no-status|--no-post-rewrite|--no-template|--no-rerere-autoupdate|--no-allow-empty-message|--reset-author|--signoff|--no-signoff|--allow-empty|--allow-empty-message|--allow-empty-author|--quiet|--verbose|--dry-run|--short|--porcelain|--long|--status|--null|--no-edit-files|--branch) ;;
+      --cleanup=*|--template=*|--trailer=*|--message=*|--file=*|--author=*|--date=*|--reedit-message=*|--reuse-message=*|--squash=*|--fixup=*) ;;
+      # Unknown long option (incl. abbreviations like `--intera`,
+      # `--patc`, future git flags). Backstop: flip to UNCERTAIN so the
+      # diff-source selector uses `diff HEAD --numstat` (conservative).
+      # Codex round 6 closure: don't try to perfectly enumerate git's
+      # CLI; fail closed for anything we don't recognise.
+      --*) COMMIT_MODE_UNCERTAIN=true ;;
+      -*)
+        _flag_body="${_tok#-}"
+        case "$_flag_body" in
+          *a*) COMMIT_MODE_ALL=true; break ;;
+        esac
+        # Clustered short forms like -pm (=-p -m), -vp, -np: 'p' anywhere
+        # in the cluster opens patch mode → working-tree candidate set
+        # (Codex round 5 P1). -m*/-F*/-c*/-C*/-S* attached-arg patterns
+        # match earlier so they don't reach this branch.
+        case "$_flag_body" in
+          *p*) COMMIT_MODE_PATHSPEC=true ;;
+        esac
+        _last="${_flag_body: -1}"
+        case "$_last" in
+          m|F|c|C) _expect_arg=true ;;
+          # 'S' deliberately NOT in the consume list — see -S note above.
+        esac
+        ;;
+      *)
+        # First non-flag positional after the option block is a pathspec
+        # (or the message arg of a no-equals -m, but _expect_arg already
+        # consumed that case). Pathspec mode counts the working tree
+        # against HEAD because pathspec commits use working-tree content
+        # for the matched paths. Codex round 3 P1.
+        COMMIT_MODE_PATHSPEC=true
+        break
+        ;;
+    esac
+  done
+  unset _tok _flag_body _last _expect_arg _end_of_opts _scanning _CMD_TOKENS _line
+
+  if [[ "$COMMIT_MODE_ALL" == "true" || "$COMMIT_MODE_PATHSPEC" == "true" || "$COMMIT_MODE_UNCERTAIN" == "true" ]]; then
+    # ALL / PATHSPEC / UNCERTAIN: working-tree content may land in the
+    # commit. `git diff HEAD --numstat` covers both cached AND
+    # tracked-but-unstaged. Conservative fail-closed: if we can't be
+    # sure what's in the candidate set, count everything tracked.
+    CACHED_NUMSTAT="$(git diff HEAD --numstat 2>/dev/null)"
+  else
+    # PLAIN mode: candidate set is the index. Empty index means git
+    # commit will fail anyway ("nothing to commit") — leave CHURN at 0
+    # so we don't deny on unrelated WIP. Codex round 7 P2: the previous
+    # working-tree fallback re-created the F2 false positive for
+    # `git commit --amend --no-edit` and similar.
+    CACHED_NUMSTAT="$(git diff --cached --numstat 2>/dev/null)"
+  fi
+  CHURN="$(printf '%s\n' "$CACHED_NUMSTAT" | awk -v thresh="$SIZE_THRESHOLD" '
     {
       if ($1 == "-" || $2 == "-") {
         # Binary file — count as threshold+1 so layer always triggers.
@@ -245,6 +413,7 @@ if [[ "${SIZE_THRESHOLD:-0}" -gt 0 ]]; then
       if (binary_seen) print thresh + 1; else print added + removed + 0
     }
   ')"
+  unset CACHED_NUMSTAT
   if [[ "${CHURN:-0}" -gt "$SIZE_THRESHOLD" ]]; then
     adj_fresh=false
     if [[ -f "$ADJUDICATION" ]] \

@@ -1610,6 +1610,319 @@ else
   fail "size_threshold: plain commit with small staged should not count unstaged WIP (got: '$out')"
 fi
 
+# Layer-0-rescue Codex finding (P1): `git commit -am` with small
+# pre-staged change must NOT bypass the size gate when there's large
+# tracked WIP. The cached-emptiness heuristic (alone) was insufficient —
+# cached is non-empty (small staged file) so the old logic would count
+# only that and miss the WIP that -a will sweep into the commit.
+#
+# Setup is the same fixture as the false-positive test above (small
+# staged + 100-line tracked WIP), but the commit command uses -am.
+# Expectation: DENY because diff HEAD --numstat counts both.
+out=$(echo '{"tool_input":{"command":"git commit -am \"chore: -am sweep\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "size_threshold: git commit -am with large tracked WIP → deny (Codex P1 closed)"
+else
+  fail "size_threshold: -am bypass should deny on tracked WIP (got: '$out')"
+fi
+
+# Same for the spaced form `git commit -a -m`.
+out=$(echo '{"tool_input":{"command":"git commit -a -m \"chore: -a -m sweep\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "size_threshold: git commit -a -m with large tracked WIP → deny"
+else
+  fail "size_threshold: -a -m bypass should deny on tracked WIP (got: '$out')"
+fi
+
+# Regression: --amend (long option containing 'a') must NOT be
+# misclassified as -a mode. Plain commit semantics — small staged file
+# only, no pathspec → cached numstat counts the small file → ALLOW.
+# Codex round 3 P2: assert the parsed permission decision, not just
+# exit status (a misclassification denial would also exit 0).
+out=$(echo '{"tool_input":{"command":"git commit --amend --no-edit"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "pass" ] || [ -z "$out" ]; then
+  pass "size_threshold: git commit --amend not misclassified as -a (long opt with 'a' excluded)"
+else
+  fail "size_threshold: --amend should not trip -a detection (got: '$out')"
+fi
+
+# Layer-0-rescue Codex round 2 P2: message body containing "-a" must
+# NOT trigger -a mode. Quote-aware xargs tokenisation. Small staged +
+# 100-line tracked WIP; message contains -a inside quotes; plain
+# commit → cached only counts → ALLOW.
+( cd "$TMPROOT_SZ" && git restore --staged blob.bin 2>/dev/null || true; rm -f blob.bin )
+( cd "$TMPROOT_SZ" && git checkout -q -- wip.txt )
+echo "another tiny" > "$TMPROOT_SZ/another_tiny.txt"
+( cd "$TMPROOT_SZ" && git add another_tiny.txt )
+: > "$TMPROOT_SZ/wip.txt"
+for i in $(seq 1 100); do echo "wip line $i" >> "$TMPROOT_SZ/wip.txt"; done
+out=$(echo '{"tool_input":{"command":"git commit -m \"fix: -a flag handling\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "pass" ] || [ -z "$out" ]; then
+  pass "size_threshold: -a inside quoted message body not misclassified (quote-aware tokeniser)"
+else
+  fail "size_threshold: quoted -a in message should not trigger -a mode (got: '$out')"
+fi
+
+# Layer-0-rescue Codex round 3 P2: short option with attached arg
+# (-Salice@example.com) must NOT trigger -a — the 'a' is inside the arg
+# value, not a flag letter.
+out=$(echo '{"tool_input":{"command":"git commit -Salice@example.com -m \"signed\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "pass" ] || [ -z "$out" ]; then
+  pass "size_threshold: -Sname-with-a not misclassified as -a (attached short arg)"
+else
+  fail "size_threshold: -Sname should not trip -a detection (got: '$out')"
+fi
+
+# Layer-0-rescue Codex round 3 P1: pathspec commit with non-empty
+# index. Cached has small staged change; pathspec selects a tracked
+# WIP file with 100-line change. Bash sees: commit -m msg pathspec.
+# Pathspec mode → diff HEAD → counts BOTH → DENY.
+out=$(echo '{"tool_input":{"command":"git commit -m \"pathspec target\" wip.txt"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "size_threshold: pathspec commit with large WIP target → deny (Codex P1 closed)"
+else
+  fail "size_threshold: pathspec mode should count working tree (got: '$out')"
+fi
+
+# Layer-0-rescue Codex round 3 P2: end-of-options test fixture should
+# use an actual `-a-file` to prove the parser stops at `--`.
+echo "tiny content" > "$TMPROOT_SZ/-a-file.txt"
+out=$(echo '{"tool_input":{"command":"git commit -m \"plain msg\" -- -a-file.txt"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+# `--` marks end-of-options AND signals pathspec mode → diff HEAD →
+# tracked WIP IS counted → DENY (the fixture has 100-line WIP). Critical:
+# the parser must NOT crash or misclassify on the literal `-a-file.txt`
+# token after `--` (it must be treated as a path, never as a flag).
+if [ "$out" = "deny" ]; then
+  pass "size_threshold: -a-file.txt after -- treated as pathspec (end-of-options respected, deny on WIP)"
+else
+  fail "size_threshold: -a-file.txt after -- should be pathspec mode + deny (got: '$out')"
+fi
+rm -f "$TMPROOT_SZ/-a-file.txt"
+
+# Layer-0-rescue Codex round 4 P1: bare `-S` (sign with default key)
+# must NOT consume the next token. `git commit -m msg -S wip.txt`
+# treats wip.txt as a PATHSPEC; without the fix, `-S` ate it.
+out=$(echo '{"tool_input":{"command":"git commit -m \"signed\" -S wip.txt"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "size_threshold: bare -S does not eat pathspec → wip.txt classified, denied"
+else
+  fail "size_threshold: bare -S should leave wip.txt as pathspec (got: '$out')"
+fi
+
+# Layer-0-rescue Codex round 4 P1: `--interactive` opens a UI to add
+# tracked working-tree content → working-tree candidate set.
+out=$(echo '{"tool_input":{"command":"git commit --interactive -m \"interactive\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "size_threshold: --interactive classified as working-tree mode → denied on WIP"
+else
+  fail "size_threshold: --interactive should classify as pathspec mode (got: '$out')"
+fi
+
+# Layer-0-rescue Codex round 4 P1: `-p` (patch) same shape.
+out=$(echo '{"tool_input":{"command":"git commit -p -m \"patch\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "size_threshold: -p (patch) classified as working-tree mode → denied on WIP"
+else
+  fail "size_threshold: -p should classify as pathspec mode (got: '$out')"
+fi
+
+# Layer-0-rescue Codex round 4 P1: `--pathspec-from-file=` reads
+# pathspecs from a file → working-tree candidate set.
+out=$(echo '{"tool_input":{"command":"git commit -m \"from-file\" --pathspec-from-file=paths.txt"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "size_threshold: --pathspec-from-file=… classified as working-tree mode → denied on WIP"
+else
+  fail "size_threshold: --pathspec-from-file should classify as pathspec mode (got: '$out')"
+fi
+
+# Layer-0-rescue Codex round 4 P1: `--pathspec-from-file paths.txt`
+# (spaced form) — bare flag also classifies, AND consumes the next
+# token as the file argument (so a -a-looking name doesn't trip -a).
+out=$(echo '{"tool_input":{"command":"git commit -m msg --pathspec-from-file paths.txt"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "size_threshold: --pathspec-from-file (spaced) classified + consumes next token"
+else
+  fail "size_threshold: --pathspec-from-file (spaced) should be pathspec mode (got: '$out')"
+fi
+
+# Layer-0-rescue Codex round 5 P1: clustered short -pm (= -p -m). Patch
+# mode lets the user select tracked working-tree hunks → working-tree
+# candidate set. The 'p' is anywhere in the short cluster.
+out=$(echo '{"tool_input":{"command":"git commit -pm \"patch cluster\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "size_threshold: -pm cluster (= -p -m) classified as working-tree → denied on WIP"
+else
+  fail "size_threshold: -pm cluster should classify as pathspec mode (got: '$out')"
+fi
+
+# Same shape, verbose+patch.
+out=$(echo '{"tool_input":{"command":"git commit -vp -m \"verbose patch\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "size_threshold: -vp cluster (= -v -p) classified as working-tree → denied on WIP"
+else
+  fail "size_threshold: -vp cluster should classify as pathspec mode (got: '$out')"
+fi
+
+# Layer-0-rescue Codex round 6 closure: cross-check backstop architecture.
+# Abbreviated long options (--intera = --interactive, --patc = --patch,
+# any future git flag we don't whitelist) flip the parser to UNCERTAIN
+# mode → diff HEAD → counts WIP → DENY. This is the key guarantee:
+# round 7+ findings can't introduce new bypasses because unknown long
+# opts fail closed by construction.
+out=$(echo '{"tool_input":{"command":"git commit --intera -m \"abbreviated\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "size_threshold: --intera (abbreviated --interactive) → UNCERTAIN backstop denies"
+else
+  fail "size_threshold: --intera should hit UNCERTAIN backstop (got: '$out')"
+fi
+
+# Same shape: --patc (abbreviated --patch).
+out=$(echo '{"tool_input":{"command":"git commit --patc -m \"abbreviated\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "size_threshold: --patc (abbreviated --patch) → UNCERTAIN backstop denies"
+else
+  fail "size_threshold: --patc should hit UNCERTAIN backstop (got: '$out')"
+fi
+
+# Hypothetical future flag we don't recognise.
+out=$(echo '{"tool_input":{"command":"git commit --some-future-flag -m \"future\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "size_threshold: unknown future long opt → UNCERTAIN backstop denies (architectural guarantee)"
+else
+  fail "size_threshold: unknown long opt should fail closed (got: '$out')"
+fi
+
+# REGRESSION: whitelisted benign long opts must NOT trip UNCERTAIN.
+# --amend uses the staged set + previous commit; doesn't pull working
+# tree (unless -a is also given). Plain semantics → cached only → ALLOW
+# despite large WIP. This is the F2 false-positive guard preserved.
+out=$(echo '{"tool_input":{"command":"git commit --amend --no-edit"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "pass" ] || [ -z "$out" ]; then
+  pass "size_threshold: --amend --no-edit whitelisted (plain mode preserved despite WIP)"
+else
+  fail "size_threshold: --amend should not flip UNCERTAIN (got: '$out')"
+fi
+
+# REGRESSION: --signoff, --reset-author etc. are whitelisted.
+out=$(echo '{"tool_input":{"command":"git commit -m msg --signoff --reset-author"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "pass" ] || [ -z "$out" ]; then
+  pass "size_threshold: --signoff --reset-author whitelisted (plain mode preserved)"
+else
+  fail "size_threshold: --signoff/--reset-author should not flip UNCERTAIN (got: '$out')"
+fi
+
+# Layer-0-rescue Codex round 7 P1: shell variable expansion. Commands
+# like `mode=a; git commit -$mode -m msg` would expand to `git commit
+# -a` post-shell but the literal text contains `-$mode`. Any unescaped
+# $ or backtick → UNCERTAIN → diff HEAD → DENY on WIP.
+out=$(echo '{"tool_input":{"command":"mode=a; git commit -$mode -m \"sneaky\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "size_threshold: shell variable in command → UNCERTAIN backstop denies"
+else
+  fail "size_threshold: shell expansion should fail closed (got: '$out')"
+fi
+
+# Same shape: command substitution.
+out=$(echo '{"tool_input":{"command":"git commit $(cat flagsfile) -m \"subst\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "size_threshold: command substitution \$(...) → UNCERTAIN backstop denies"
+else
+  fail "size_threshold: \$(...) should fail closed (got: '$out')"
+fi
+
+# Layer-0-rescue Codex round 8 P0: shell glob expansion. `git commit -*
+# -m msg` with a file named `-a` in CWD expands `-*` to `-a` post-shell.
+# Pre-shell text contains `*` → UNCERTAIN → DENY.
+( cd "$TMPROOT_SZ" && touch -- -a 2>/dev/null )
+out=$(echo '{"tool_input":{"command":"git commit -* -m \"glob\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "size_threshold: shell glob (-*) → UNCERTAIN backstop denies (Codex R8 P0 closed)"
+else
+  fail "size_threshold: glob char should fail closed (got: '$out')"
+fi
+( cd "$TMPROOT_SZ" && rm -f -- -a 2>/dev/null )
+
+# Layer-0-rescue Codex round 7 P2: PLAIN mode with empty index must NOT
+# fall back to working-tree (re-creates F2 false positive). Empty index
+# = git itself will fail ("nothing to commit"); we don't need to gate.
+( cd "$TMPROOT_SZ" && git restore --staged another_tiny.txt 2>/dev/null || true )
+# Confirm cached is empty.
+out=$(echo '{"tool_input":{"command":"git commit --amend --no-edit"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "pass" ] || [ -z "$out" ]; then
+  pass "size_threshold: PLAIN with empty index → CHURN=0 (no working-tree fallback; F2 preserved)"
+else
+  fail "size_threshold: empty-index plain commit should not deny on WIP (got: '$out')"
+fi
+
 # F3 fix (/second-opinion finding): invalid threshold (non-integer)
 # falls back to default 50, with a stderr warning. Set threshold to
 # a string and verify the warning + correct fallback behavior.

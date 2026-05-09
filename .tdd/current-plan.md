@@ -1,8 +1,8 @@
-# Bugfix Plan: f1-path-aware-mutating-bash — close skill-self-write deadlock
+# Bugfix Plan: layer-0-rescue-cached-first — fold in F2-cycle leftover + close all bypass classes
 
 Status: active
-Cycle ID: f1-path-aware-mutating-bash
-Change type: bugfix
+Cycle ID: layer-0-rescue-cached-first
+Change type: bugfix (rescue cycle for prior cycle's missed work)
 Tier: 1
 
 <!-- TDD ceremony markers. Set each ONLY after the matching operator APPROVED reply. -->
@@ -17,161 +17,78 @@ Bug-elsewhere check complete: yes
 
 ## Bug
 
-F1 from the combined v1.6.0 code review (P0 — deadlocks normal use):
+The F2 commit message (758894a) advertised a Layer 0 false-positive
+fix ("cached diff first; fall back to working-tree only when cached is
+empty") but the actual code committed in 758894a still had the buggy
+`{ git diff --cached; git diff } | awk` pattern. The Layer 0 fix and
+its smoke test sat in the working tree, never committed.
 
-`require-second-opinion.sh`'s `is_bash_mutating()` detects mutating
-Bash patterns (`cat > path`, `tee path`, `>> file.ext`, etc.) but
-DOES NOT check whether the target path is skill-internal. The skill
-itself writes to `.tdd/codex/round1.json`, `.tdd/codex/disposition-
-matrix.md`, `.tdd/second-opinion-completed.md`, `.tdd/codex/
-independent-design.md` — all via `cat > path` patterns embedded in
-the bash blocks of SKILL.md.
+Discovered while preparing the F1 commit: `git diff HEAD` against
+gate-tier1-commit.sh showed the leftover. Layer 0's smoke test passed
+locally only because tests run against the working-tree hook, not HEAD.
+CI would have failed.
 
-Result: when the skill attempts to write its own artifacts, the hook
-fires, `is_bash_mutating` returns true, hook requires fresh
-adjudication. But on a cold cycle (no prior adjudication), the
-artifact doesn't exist yet — and the skill is in the act of writing
-it. **Deadlock.** The cycle can't bootstrap.
+## Iteration history (8 rounds of /second-opinion)
 
-Workaround today: operators have to use Edit/Write directly (which the
-hook tolerates because `.tdd/**` is in the Edit-branch always-allow)
-or pre-create the artifact file via Edit before the skill writes to it.
-Both are friction; the skill should Just Work.
+The simple "ship the leftover fix" task expanded into 8 rounds because
+Codex found progressively narrower bypass cases against any literal-
+text parser of `git commit ...`:
+
+  R1 P1: cached-emptiness was the wrong proxy → -a/--all detection
+  R2 2× P2: word-splitting + end-of-options → xargs tokeniser, --, scan-after-commit
+  R3 P1+3× P2: pathspec bypass + attached short args + weak tests + weak fixture
+       → COMMIT_MODE_PATHSPEC + -m*/-F*/-c*/-C*/-S* + jq decision parsing
+  R4 3× P1: bare -S, --interactive/--patch/-p, --pathspec-from-file
+       → -S optional-arg, pathspec-mode triggers
+  R5 P1: clustered -pm not detected → cluster scanning for 'p'
+  R6 P1: abbreviated long opts (--intera = --interactive) → ARCHITECTURAL PIVOT:
+       UNCERTAIN backstop classifies any unrecognised `--*` as conservative
+       (uses diff HEAD --numstat). Closes the iteration loop by construction.
+  R7 P1+P2: shell variable expansion, empty-index PLAIN fallback
+       → unescaped $/backtick → UNCERTAIN; PLAIN with empty cached → CHURN=0
+  R8 3× P0+P1: glob expansion, sh -c wrapping, git aliases, header docs
+       → glob char (* ? [) → UNCERTAIN; sh -c and git aliases documented as
+       gate-level limitations (deferred follow-up cycle)
 
 ## Reproduction
 
+Stash the working-tree fix; run the false-positive smoke test against
+the buggy HEAD code:
+
 ```
-TMPDIR=$(mktemp -d) && git init "$TMPDIR" ...
-cp .tdd/tdd-config.json "$TMPDIR/.tdd/"
-mkdir -p "$TMPDIR/internal/auth"
-echo "package auth" > "$TMPDIR/internal/auth/handler.go"
-git add . && git commit -m initial
-
-# Simulate skill-self-write (no current-plan.md, no adjudication):
-echo '{"tool_name":"Bash","tool_input":{"command":"cat > .tdd/codex/round1.json"}}' \
-  | CLAUDE_PROJECT_DIR=$TMPDIR bash .claude/hooks/require-second-opinion.sh
-
-# Expected: allow (target is skill-internal)
-# Actual:   deny (is_bash_mutating returns true; no adjudication)
+git stash push .claude/hooks/gate-tier1-commit.sh
+bash scripts/tdd-test-hooks.sh 2>&1 | grep "false-positive closed"
+# FAIL: 103 lines counted from unstaged WIP, denying small staged commit
+git stash pop
 ```
-
-## Expected behavior
-
-Bash commands writing to skill-internal paths (`.tdd/**`, `.claude/**`,
-`.second-opinion/**`) are not classified as "mutating production code."
-The hook allows them so the skill can self-bootstrap.
-
-Bash commands writing to PRODUCTION paths (`internal/**`,
-`cmd/**`, etc.) continue to be classified as mutating and require
-adjudication.
 
 ## Acceptance criteria
 
-1. `is_bash_mutating()` (or its caller) extracts the redirect target
-   from `cat > path`, `tee path`, and `>> path.ext` patterns.
-2. If the extracted target matches a skill-internal path prefix
-   (`.tdd/`, `.claude/`, `.second-opinion/`), the command is treated
-   as non-mutating (returns false).
-3. Bash commands with no extractable target OR with a target matching
-   PRODUCTION paths continue to be treated as mutating (existing
-   behavior preserved).
-4. Block-redirect form `{ ... } > .tdd/codex/disposition-matrix.md`
-   ALSO extracts the target and is treated as non-mutating if target
-   is skill-internal.
-5. Smoke test: `cat > .tdd/codex/round1.json` → allow (was deny).
-6. Smoke test: `cat > .tdd/second-opinion-completed.md` → allow.
-7. Smoke test: `cat > internal/auth/handler.go` → still deny (no
-   regression).
-8. Smoke test: `tee .tdd/research-packet.md` → allow.
-9. Smoke test: `tee internal/auth/handler.go` → still deny.
-10. Smoke test: `{ ... } > .tdd/codex/disposition-matrix.md` → allow.
-11. Existing 117 smoke tests still pass.
-
-## Non-goals
-
-- Consolidating all three "trivial paths" lists into one config field
-  (F13 from the v1.6.0 review). That's a separate cycle.
-- Changing `is_always_allowed_path()` for the Edit branch (already
-  works correctly for `.tdd/**`).
-- Path-aware checks for `sed -i`, `gofmt -w`, `go mod tidy` etc. —
-  those targets are positional args and rarely write skill-internal
-  paths in practice. Keep simple-deny for those.
+1. `git commit -m` plain with small staged + large WIP → ALLOW (F2 preserved)
+2. `git commit -am`, `-a -m`, `-pm` (cluster), pathspec, --interactive,
+   --patch, --pathspec-from-file (both forms) → DENY on WIP
+3. `git commit --amend --no-edit`, `--signoff`, `--reset-author` etc. → ALLOW
+4. Abbreviated long opts (--intera, --patc, future flags) → DENY (UNCERTAIN backstop)
+5. Shell expansion ($, backtick, glob *, ?, [) → DENY (UNCERTAIN backstop)
+6. PLAIN mode with empty index → CHURN=0 (no working-tree fallback)
+7. All 8 rounds of Codex findings closed or documented as out-of-scope
 
 ## Affected code
 
-- `.claude/hooks/require-second-opinion.sh` — add target extraction
-  and skill-internal check inside `is_bash_mutating` for redirect
-  patterns.
-- `scripts/tdd-test-hooks.sh` — add 6 new smoke tests (5, 6, 7, 8,
-  9, 10 above).
+- `.claude/hooks/gate-tier1-commit.sh` — option parser + UNCERTAIN backstop
+- `scripts/tdd-test-hooks.sh` — 12 new tests (R1-R8 closure + regressions)
 
-## Test plan
+## Non-goals
 
-| Test name | Pins criterion # |
-|---|---|
-| f1_cat_redirect_to_tdd_allowed | 5 |
-| f1_cat_redirect_to_second_opinion_artifact_allowed | 6 |
-| f1_cat_redirect_to_production_still_denied | 7 |
-| f1_tee_to_tdd_allowed | 8 |
-| f1_tee_to_production_still_denied | 9 |
-| f1_block_redirect_to_tdd_allowed | 10 |
-
-## Minimum implementation
-
-In `is_bash_mutating()`, for each redirect pattern:
-1. Run the existing detection.
-2. If matched, extract the target file (everything after the last
-   `>` token, trimmed).
-3. Check target against skill-internal prefixes
-   (`.tdd/`, `.claude/`, `.second-opinion/`).
-4. If skill-internal → continue (don't return 0; treat as non-mutating).
-5. Otherwise → return 0 (mutating, existing behavior).
-
-```bash
-# Helper inside the hook
-_extract_redirect_target() {
-  echo "$1" | awk -F'>+' '
-    NF >= 2 {
-      tgt = $NF
-      sub(/^[[:space:]]+/, "", tgt)
-      sub(/[[:space:]].*$/, "", tgt)
-      print tgt
-    }'
-}
-
-_target_is_skill_internal() {
-  local target="$1"
-  case "$target" in
-    .tdd/*|.claude/*|.second-opinion/*|*/.tdd/*|*/.claude/*|*/.second-opinion/*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-```
-
-Then wrap each redirect-style detection:
-
-```bash
-# OLD:
-echo "$cmd" | grep -Eq '(^|[;&|])[[:space:]]*cat[[:space:]]+([^|<]*[^|<0-9])?>+[[:space:]]*[^&[:space:]]'  && return 0
-
-# NEW:
-if echo "$cmd" | grep -Eq '(^|[;&|])[[:space:]]*cat[[:space:]]+([^|<]*[^|<0-9])?>+[[:space:]]*[^&[:space:]]'; then
-  target="$(_extract_redirect_target "$cmd")"
-  if [[ -n "$target" ]] && _target_is_skill_internal "$target"; then
-    : # skill-internal, fall through to next detection
-  else
-    return 0
-  fi
-fi
-```
-
-Same wrapping for `tee`, `>> file.ext`. The block-redirect form
-`{ ... } > path` needs a new detection regex; same target extraction.
+- Closing `sh -c 'git commit -a'` and `git -c alias.ci=commit ci` bypasses.
+  These are gate-level (COMMITS_RE doesn't match), not parser-level.
+  Documented in hook header; queued for follow-up cycle that broadens
+  the gate's command-detection regex or moves to git pre-commit hooks.
 
 ## Risk register
 
 | Risk | Mitigation |
 |---|---|
-| Extraction of multiple targets in compound commands (`cat a > b; cat c > d`) | Target extraction returns the LAST `>` target. If the last is skill-internal, all earlier targets are de facto allowed too. Acceptable for typical skill-bootstrap cases (one redirect per command). |
-| Operator deliberately writes production code via `cat > .tdd/foo` then moves it | The `.tdd/` directory contains hook state, not production code. Operators don't typically write production code there. Mitigation: integration_guards can encode "no production code in .tdd/" if needed. |
-| New paths the skill writes to (future cycles) outside `.tdd/`, `.claude/`, `.second-opinion/` | Add to the prefix list. Documented limitation; expand on demand. |
+| Future git release adds a new long opt that adds working-tree content; UNCERTAIN whitelist doesn't include it | Default-deny behavior is correct (fail closed). Add to whitelist when triggered. |
+| Legitimate commit message contains $ or * (e.g., `git commit -m "fix: $5 bug"`) | UNCERTAIN → operator runs /second-opinion to bypass. Friction but safe. |
+| Nested shell or git alias bypasses Layer 0 entirely | Documented as out-of-scope; follow-up cycle. |

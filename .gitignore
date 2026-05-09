@@ -40,7 +40,7 @@ CLAUDE.local.md
 .tdd/green-proof.md
 .tdd/codex/independent-design.md
 .tdd/codex/disposition-matrix.md
-.tdd/codex/round1.json
+.tdd/codex/round*.json
 
 # OS / editor
 .DS_Store
