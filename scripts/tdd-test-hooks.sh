@@ -1249,6 +1249,25 @@ else
   fail "non-Tier-1 should pass regardless of flags (got: '$out')"
 fi
 
+# F8 (combined v1.6.0 review): template ships with placeholder rows
+# F1/F2/F3 that the row-count regex matches as real findings. Test:
+# matrix is the template AS-IS (placeholder rows present) and round1.json
+# has 0 findings. Hook should ALLOW (placeholder IDs don't match the
+# `^\|\s+F[0-9]+\s+\|` regex after rename to F-EXAMPLE-N).
+cat > "$TMPROOT_V16/.tdd/codex/round1.json" <<'EOF'
+{"summary":"x","findings":[]}
+EOF
+# Copy the template as the matrix.
+cp .tdd/templates/disposition-matrix-template.md "$TMPROOT_V16/.tdd/codex/disposition-matrix.md"
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V16" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "F8: template placeholder rows don't count toward findings (matrix=template, findings=0 → allow)"
+else
+  fail "F8: placeholder rows should not be counted as real (got: '$out')"
+fi
+
 rm -rf "$TMPROOT_V16"
 
 echo
@@ -1563,6 +1582,32 @@ if [ "$out" = "deny" ]; then
   pass "size_threshold: binary file (numstat -\\t-) treated as large change → deny (F2 fix)"
 else
   fail "size_threshold: binary should trigger layer (got: $out)"
+fi
+
+# F2-cycle /second-opinion finding: small staged commit + large
+# unstaged tracked change under plain `git commit -m` should NOT be
+# denied (the unstaged change isn't part of the commit). Earlier code
+# unconditionally combined cached + working-tree diffs, false-positive'ing
+# this case.
+( cd "$TMPROOT_SZ" && git restore --staged blob.bin 2>/dev/null || true; rm -f blob.bin )
+sz_set_threshold 50
+# Make a tracked file with large unstaged WIP.
+echo "tracked v1" > "$TMPROOT_SZ/wip.txt"
+( cd "$TMPROOT_SZ" && git add wip.txt && git commit -q -m "track wip" )
+: > "$TMPROOT_SZ/wip.txt"
+for i in $(seq 1 100); do echo "wip line $i" >> "$TMPROOT_SZ/wip.txt"; done
+# Now stage only a small change (different file).
+echo "small staged change" > "$TMPROOT_SZ/small_staged.txt"
+( cd "$TMPROOT_SZ" && git add small_staged.txt )
+# Plain `git commit -m` (NOT -a) — only small_staged.txt is committed.
+# wip.txt's 100-line change is unstaged and shouldn't count.
+out=$(echo '{"tool_input":{"command":"git commit -m \"chore: small staged commit\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "size_threshold: small staged + large unstaged WIP under plain git commit → allow (false-positive closed)"
+else
+  fail "size_threshold: plain commit with small staged should not count unstaged WIP (got: '$out')"
 fi
 
 # F3 fix (/second-opinion finding): invalid threshold (non-integer)

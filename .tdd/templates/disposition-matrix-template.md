@@ -43,9 +43,18 @@ Spec change column: yes | partial | no.>
 
 | ID | Source | Severity | Concern (1 line) | Disposition | Reason | Spec change |
 |----|--------|----------|------------------|-------------|--------|-------------|
-| F1 | Codex  | P0       | <one-line concern> | <ACCEPT|PARTIAL|REJECT|PUSHBACK> | <reason per discipline rules above> | <yes|partial|no> |
-| F2 | Codex  | P1       | ... | ... | ... | ... |
-| F3 | Codex  | P2       | ... | ... | ... | ... |
+| F-EXAMPLE-1 | Codex  | P0       | <one-line concern> | <ACCEPT|PARTIAL|REJECT|PUSHBACK> | <reason per discipline rules above> | <yes|partial|no> |
+| F-EXAMPLE-2 | Codex  | P1       | ... | ... | ... | ... |
+| F-EXAMPLE-3 | Codex  | P2       | ... | ... | ... | ... |
+
+<!--
+NOTE on placeholder IDs: rows above use F-EXAMPLE-N intentionally so the
+hook's row-count regex (^\|[[:space:]]+F[0-9]+[[:space:]]+\|) does NOT
+match them. When Claude writes real adjudication rows, use F1, F2, F3,
+... — those WILL be counted by the regex. Closes F8 from the combined
+v1.6.0 review (placeholder rows were previously counted as real findings,
+masking unedited-template adjudications as complete).
+-->
 
 <add rows until every finding from Codex's JSON output has a row>
 
