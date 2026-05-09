@@ -233,6 +233,37 @@ The matrix template uses `F-EXAMPLE-N` placeholder rows; real rows
 must use `F1`/`F2`/... — those are counted by the row-count gate
 (F8 invariant). Do not copy the example IDs into a real adjudication.
 
+### Git-side enforcement (optional second layer)
+
+The pack also ships `scripts/git-hooks/{pre-commit,prepare-commit-msg}`
+that run inside git itself. They mirror the PreToolUse Tier 1 commit
+gate but execute AFTER shell expansion / aliasing / wrapping —
+closing bypass classes the PreToolUse layer can't see (`sh -c`,
+transparent-exec prefixes like `time`/`sudo`/`nice`, operator-
+configured aliases, `--no-verify`, interpreter wrappers like
+`python -c`, future git global opts).
+
+Install (opt-in):
+
+  bash scripts/install-git-hooks.sh             # default: copy + chmod +x
+  bash scripts/install-git-hooks.sh --symlink   # symlink for auto-update
+  bash scripts/install-git-hooks.sh --hookspath # set core.hooksPath
+  bash scripts/install-git-hooks.sh --uninstall # reverse
+
+The install script refuses to overwrite an existing custom
+`.git/hooks/pre-commit` (or `prepare-commit-msg`); operator must back
+it up first. `--uninstall` only removes hooks that are byte-identical
+to the pack version (or symlinks to it) — operator's custom hooks
+are preserved.
+
+Both hooks must be installed to close the `--no-verify` bypass:
+`pre-commit` is the primary gate; `prepare-commit-msg` is a thin
+wrapper that fires even when `--no-verify` is used (per git docs,
+`--no-verify` skips ONLY pre-commit + commit-msg).
+
+Killswitch (env var, emergency only — document in commit message):
+`TDD_GIT_HOOK_DISABLE=1`. Same key disables both hooks.
+
 ## Reference
 
 A worked Tier 1 TDD cycle (spec → red → green → refactor) is in

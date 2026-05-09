@@ -1,10 +1,10 @@
-# Bugfix Plan: gate-level-no-verify-closure — close `git commit --no-verify` bypass via prepare-commit-msg
+# Bugfix Plan: gate-level-install-and-docs — install script + AGENTS.md/CLAUDE.md updates for git-side hooks
 
 Status: active
-Cycle ID: gate-level-no-verify-closure
-Change type: enhancement (close known limit deferred from
-                          gate-level-followup-pre-commit-hook)
-Tier: 1
+Cycle ID: gate-level-install-and-docs
+Change type: enhancement (operator ergonomics + discoverability;
+                          deferred from gate-level-followup cycle)
+Tier: 1 (touches scripts + AGENTS/CLAUDE.md)
 
 <!-- TDD ceremony markers. Set each ONLY after the matching operator APPROVED reply. -->
 Bug reproduced: yes
@@ -18,163 +18,179 @@ Bug-elsewhere check complete: yes
 
 ## Bug
 
-`scripts/git-hooks/pre-commit` (shipped in cycle gate-level-followup)
-documents one known limit: `git commit --no-verify` (or `-n`) skips
-ALL pre-commit hooks by git design. The deferred follow-up:
+`scripts/git-hooks/{pre-commit,prepare-commit-msg}` ship in the pack
+but operators install them by hand per the header docs. Two real
+gaps:
 
-> Closing this requires moving to `prepare-commit-msg` (different
-> semantics — can't reject, only mutate the message); architecturally
-> larger than this cycle.
+  1. **Install friction.** Operators have to read each hook's header,
+     run `cp` + `chmod` + verify, OR set `git config core.hooksPath`
+     manually. Easy to install pre-commit and forget prepare-commit-
+     msg — which silently re-opens the `--no-verify` bypass closed
+     last cycle.
 
-That spec text was wrong on one point. Per git's own documentation:
+  2. **Discoverability.** AGENTS.md and CLAUDE.md don't mention the
+     git-side hook layer at all. Operators reading "Operator config
+     & killswitches" learn about enforcement_mode, hash binding, and
+     killswitch env vars but have no idea the git-side enforcement
+     exists or what it adds.
 
-  "--no-verify" / "-n": "Bypasses the pre-commit and commit-msg hooks."
-
-Notably absent from the bypass list: **prepare-commit-msg**. And per
-githooks(5): "If [prepare-commit-msg] exits with a non-zero status,
-the commit will be aborted." So prepare-commit-msg CAN reject — the
-"can't reject" claim was wrong.
-
-This cycle ships the prepare-commit-msg layer to close the
-`--no-verify` bypass.
-
-Concrete bypass surface today (with the pre-commit hook installed):
-
-  git config alias.ci 'commit --no-verify'   # operator-configured
-  git ci -m "skip the gate"                  # alias resolves to --no-verify
-  # → pre-commit hook NOT invoked → Tier 1 commit lands without ceremony
-
-  git commit -n -m msg                       # direct
-  git commit --no-verify -m msg              # direct
-  bash -c 'git commit --no-verify'           # wrapper still hits the
-                                             # PreToolUse layer, but if it
-                                             # passes (e.g., the operator
-                                             # disabled guard-dangerous-bash),
-                                             # pre-commit is skipped
+The previous cycle (gate-level-followup) explicitly deferred both
+items as part of the operator's smaller-scope decision. This cycle
+ships them.
 
 ## Reproduction
 
 ```
-TMPDIR=$(mktemp -d) && cd $TMPDIR && git init -q
-mkdir -p .tdd internal/auth scripts/git-hooks
-cp /home/toha/go-projects-claude-starter/.tdd/tdd-config.json .tdd/
-cp /home/toha/go-projects-claude-starter/scripts/git-hooks/pre-commit \
-   scripts/git-hooks/
-git config core.hooksPath scripts/git-hooks
-echo "package auth" > internal/auth/handler.go
-git add . && git config user.email t@t && git config user.name t && git commit -q -m initial
+$ ls scripts/install-git-hooks.sh 2>&1
+ls: cannot access 'scripts/install-git-hooks.sh': No such file or directory
 
-echo "// edit" >> internal/auth/handler.go
-git add internal/auth/handler.go
-
-# pre-commit fires → blocks (no plan)
-git commit -m "tier1 no plan" 2>&1 | head -3
-# Output: [git-pre-commit] BLOCKED ...
-
-# But --no-verify skips pre-commit:
-git commit --no-verify -m "tier1 bypass" 2>&1 | head -3
-# Output: [main 1234567] tier1 bypass  ← BYPASS
-
-# After this cycle: prepare-commit-msg also fires → blocks even with
-# --no-verify.
+$ grep -c "git-hooks\|pre-commit\|prepare-commit-msg" AGENTS.md CLAUDE.md
+AGENTS.md:0
+CLAUDE.md:0
 ```
+
+Confirmed absent from both surfaces.
 
 ## Acceptance criteria
 
-1. `scripts/git-hooks/prepare-commit-msg` exists, has shebang, is
-   executable.
-2. The hook runs the SAME Tier 1 checks as `pre-commit` (delegate
-   to pre-commit logic; don't duplicate).
-3. The hook denies on the same conditions: missing plan, missing
-   markers, missing/stale adjudication, hash mismatch (when flag on),
-   malformed config.
-4. The hook honors `enforcement_mode_overrides["git-prepare-commit-msg"]`
-   if present, falling back to the global `enforcement_mode`. Same
-   semantics as pre-commit (warn → stderr + allow; off → silent).
-5. Killswitch `TDD_GIT_HOOK_DISABLE=1` ALSO disables prepare-commit-msg
-   (one env var disables the entire git-side enforcement layer).
-6. Hook receives 1-3 args from git ($1=message-file, $2=source,
-   $3=commit-sha) — must IGNORE all args (Tier 1 check is independent
-   of the message contents).
-7. Update `scripts/git-hooks/pre-commit` header: replace the "KNOWN
-   LIMITATION — git commit --no-verify" block with a "CLOSED IN
-   FOLLOW-UP" note pointing to the prepare-commit-msg sibling.
-8. Smoke tests:
-   - prepare-commit-msg file exists and is executable
-   - prepare-commit-msg denies on the same fixtures pre-commit denies
-   - prepare-commit-msg allows on the same clean fixtures
-   - prepare-commit-msg honors the killswitch
-   - prepare-commit-msg honors enforcement_mode (warn/off)
-   - Documentation updated in pre-commit header
+### Install script
+
+1. `scripts/install-git-hooks.sh` exists, has shebang, is executable.
+2. Default mode (no flags) copies BOTH `pre-commit` and
+   `prepare-commit-msg` from `scripts/git-hooks/` to `.git/hooks/`,
+   chmod +x, prints what it did.
+3. Idempotent: re-running on an already-installed repo verifies the
+   files are byte-identical and reports "already installed" without
+   writing.
+4. Refuses to overwrite `.git/hooks/pre-commit` or
+   `.git/hooks/prepare-commit-msg` if it exists with DIFFERENT
+   content (not from this pack). Prints a clear message + the diff
+   command operator should run.
+5. `--symlink` flag: symlink instead of copy (future pack updates
+   apply automatically).
+6. `--hookspath` flag: sets `git config core.hooksPath scripts/git-hooks`
+   instead of touching `.git/hooks/`. Refuses if `core.hooksPath`
+   is already set to a different path.
+7. `--uninstall` flag: removes both hooks from `.git/hooks/`. Only
+   removes files that are byte-identical to the pack version OR are
+   symlinks pointing to the pack version (refuses to delete operator's
+   custom hooks).
+8. Works from any cwd inside the repo (uses `git rev-parse
+   --show-toplevel`); fails with a clear message outside a git repo.
+9. Fails cleanly if either source hook is missing in `scripts/git-hooks/`.
+10. Fails cleanly on bare repo / unsupported worktree layout.
+
+### Documentation
+
+11. AGENTS.md "Operator config & killswitches" section gains a new
+    sub-section "Git-side enforcement (optional second layer)"
+    documenting the two hooks, what they catch, the
+    `TDD_GIT_HOOK_DISABLE` killswitch, and the install command.
+12. CLAUDE.md gets the same sub-section (parity).
+
+### Tests
+
+13. Smoke tests cover: install/idempotent/refuse-overwrite/uninstall/
+    symlink/--hookspath/non-git-dir fail/source-missing fail.
+14. AGENTS.md + CLAUDE.md mention `scripts/install-git-hooks.sh` AND
+    both hook names.
 
 ## Non-goals
 
-- Auto-install. Same operator-decision scope as pre-commit; install
-  manually or via core.hooksPath.
-- Coordinating output between pre-commit and prepare-commit-msg
-  (they may both fire on a normal `git commit` without --no-verify;
-  duplicate "BLOCKED" message is acceptable — defense in depth).
-- Touching the post-rewrite or post-commit hooks. Out of scope.
-- Fully closing the case where the operator removes the
-  prepare-commit-msg hook from `.git/hooks/`. That's the operator's
-  active opt-out; pack-side cannot prevent it.
+- Cross-platform installer (Windows). bash + git assumed.
+- Auto-detecting third-party hook managers (lefthook/husky/pre-commit)
+  and integrating with them. Operators using those wire the hook
+  manually per their tool's conventions.
+- Auto-running on `make install` or as a setup step. Install is
+  explicitly opt-in.
+- A separate uninstall confirmation prompt. The script is destructive
+  by design when `--uninstall` is passed; operator owns the choice.
 
 ## Affected code
 
-- `scripts/git-hooks/prepare-commit-msg` — NEW (thin wrapper)
-- `scripts/git-hooks/pre-commit` — header updated (KNOWN LIMIT →
-  CLOSED IN FOLLOW-UP)
+- `scripts/install-git-hooks.sh` — NEW
+- `AGENTS.md` — new "Git-side enforcement" sub-section
+- `CLAUDE.md` — same (parity)
 - `scripts/tdd-test-hooks.sh` — new smoke tests
 
 ## Test plan
 
 | Test name | Pins criterion # |
 |---|---|
-| nv_prepare_commit_msg_exists_and_executable | 1 |
-| nv_prepare_commit_msg_denies_no_plan | 3 |
-| nv_prepare_commit_msg_denies_missing_marker | 3 |
-| nv_prepare_commit_msg_denies_missing_adjudication | 3 |
-| nv_prepare_commit_msg_allows_clean_state | regression |
-| nv_prepare_commit_msg_honors_killswitch | 5 |
-| nv_prepare_commit_msg_honors_warn_mode | 4 |
-| nv_prepare_commit_msg_ignores_args | 6 |
-| nv_pre_commit_header_updated | 7 |
+| install_script_exists_and_executable | 1 |
+| install_default_copies_both_hooks | 2 |
+| install_idempotent_on_pack_content | 3 |
+| install_refuses_overwrite_of_custom_hook | 4 |
+| install_symlink_mode | 5 |
+| install_hookspath_mode | 6 |
+| install_uninstall_removes_pack_hooks | 7 |
+| install_uninstall_preserves_custom_hooks | 7 |
+| install_fails_outside_git_repo | 8 |
+| install_fails_on_missing_source | 9 |
+| docs_agents_md_mentions_install_script | 14 |
+| docs_agents_md_mentions_both_hook_names | 14 |
+| docs_claude_md_mentions_install_script | 14 |
+| docs_claude_md_mentions_both_hook_names | 14 |
 
 ## Minimum implementation
 
-Thin wrapper that delegates to pre-commit (one file, one logic;
-zero drift surface):
+### `scripts/install-git-hooks.sh`
 
 ```bash
 #!/usr/bin/env bash
-# scripts/git-hooks/prepare-commit-msg
-#
-# Runs the SAME Tier 1 commit gate as pre-commit, but unlike
-# pre-commit this hook IS NOT skipped by `git commit --no-verify`
-# (per git docs / githooks(5) — --no-verify only bypasses pre-commit
-# and commit-msg). Closes the `--no-verify` bypass deferred from
-# cycle gate-level-followup-pre-commit-hook.
-#
-# This is a thin wrapper that delegates to pre-commit's check logic.
-# Args from git ($1=message-file, $2=source, $3=commit-sha) are
-# ignored — Tier 1 enforcement is independent of message contents.
-#
-# Installation, killswitch, and config: see pre-commit's header.
+# Install scripts/git-hooks/{pre-commit,prepare-commit-msg} into the
+# current repo's .git/hooks/. Default: copy. Flags:
+#   --symlink     Symlink instead of copy (auto-update on pack changes)
+#   --hookspath   Set core.hooksPath instead of touching .git/hooks
+#   --uninstall   Remove pack-installed hooks (preserves custom hooks)
+#   -h, --help    Show usage
 
-exec "$(dirname "$0")/pre-commit" "$@"
+set -uo pipefail
+
+usage() {
+  cat <<USG
+usage: scripts/install-git-hooks.sh [--symlink|--hookspath|--uninstall|-h]
+
+  Default     cp + chmod +x for pre-commit and prepare-commit-msg
+  --symlink   symlink to scripts/git-hooks/<hook> (auto-update)
+  --hookspath set core.hooksPath scripts/git-hooks (covers entire dir)
+  --uninstall remove pack-installed hooks (refuses to remove custom)
+USG
+}
+
+# ... (install / refuse-overwrite / idempotent / uninstall logic)
 ```
 
-The pre-commit script itself doesn't reference its own args
-(`set -uo pipefail` doesn't trip on extra args); passing them through
-is harmless and future-proof if pre-commit ever wants to inspect
-them.
+### AGENTS.md / CLAUDE.md addition
+
+In "Operator config & killswitches", add:
+
+```markdown
+### Git-side enforcement (optional second layer)
+
+The pack also ships `scripts/git-hooks/{pre-commit,prepare-commit-msg}`
+that run inside git itself. They mirror the PreToolUse Tier 1 commit
+gate but execute AFTER shell expansion / aliasing / wrapping, closing
+bypass classes the PreToolUse layer can't see (sh -c, transparent-exec
+prefixes, aliases, --no-verify, interpreter wrappers).
+
+Install (opt-in):
+  bash scripts/install-git-hooks.sh             # default: copy
+  bash scripts/install-git-hooks.sh --symlink   # symlink for auto-update
+  bash scripts/install-git-hooks.sh --hookspath # set core.hooksPath
+  bash scripts/install-git-hooks.sh --uninstall # reverse
+
+Both hooks must be installed to close the `--no-verify` bypass.
+Killswitch (env var, emergency only): `TDD_GIT_HOOK_DISABLE=1`.
+```
 
 ## Risk register
 
 | Risk | Mitigation |
 |---|---|
-| prepare-commit-msg fires even when commit will fail later (e.g., empty staged set after merge resolution) | The hook returns 0 early when no Tier 1 staged. Same path as pre-commit; no extra cost. |
-| Both pre-commit AND prepare-commit-msg fire on a normal commit, double-output | Acceptable. Both produce "BLOCKED" messages with the same content. Defense in depth; operators see the message once and act on it. |
-| Operator installs pre-commit but forgets prepare-commit-msg | Both are required to close the --no-verify bypass. core.hooksPath = scripts/git-hooks/ activates BOTH. Manual cp install needs both files; documented in headers. |
-| Wrapper invocation overhead per commit | A `bash exec` is microseconds. The actual gate logic is the cost; that runs once either way. |
-| Future change to pre-commit's expected env vars / arg handling breaks the wrapper | Both files are in the same directory and committed together; review process catches drift. Smoke test asserts wrapper still produces same exit code on shared fixtures. |
+| Install script overwrites operator's custom pre-commit | AC 4: refuse + clear diff command. Operator must move/back up first. |
+| Operator runs --uninstall and it removes their custom hook | AC 7: only removes byte-identical or symlink-to-pack files. |
+| --hookspath disables operator's existing hooks | Header warns; confirms before setting if `core.hooksPath` already configured to non-empty. |
+| AGENTS.md / CLAUDE.md drift | Tests assert presence of install command + both hook names in BOTH files. |
+| Install script's "byte-identical" check breaks if pack updates the hook | Idempotent flag detects diff and re-installs (default copy mode); symlink mode auto-updates by construction. Acceptable: re-running install is the documented update path. |
+| Operator on a worktree (where .git is a file) | git rev-parse --git-path hooks resolves correctly; install to that resolved path. |

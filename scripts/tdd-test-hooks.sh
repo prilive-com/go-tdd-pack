@@ -3511,6 +3511,244 @@ fi
 
 echo
 
+# gate-level-install-and-docs cycle: install script + AGENTS.md/
+# CLAUDE.md updates for git-side hooks (deferred from gate-level-followup).
+echo "Testing gate-level-install-and-docs (install script + docs)..."
+
+INSTALL_SCRIPT="$PROJECT_ROOT/scripts/install-git-hooks.sh"
+
+# AC 1: install script exists and is executable.
+if [ -x "$INSTALL_SCRIPT" ]; then
+  pass "ig: scripts/install-git-hooks.sh exists and is executable"
+else
+  fail "ig: $INSTALL_SCRIPT missing or not executable"
+fi
+
+# Helper: realistic fixture — temp git repo with the pack scripts/
+# tree mirrored into it so the install script can find its source.
+ig_setup() {
+  local d
+  d=$(mktemp -d)
+  git init -q "$d"
+  mkdir -p "$d/scripts/git-hooks"
+  cp "$PROJECT_ROOT/scripts/git-hooks/pre-commit"         "$d/scripts/git-hooks/" 2>/dev/null
+  cp "$PROJECT_ROOT/scripts/git-hooks/prepare-commit-msg" "$d/scripts/git-hooks/" 2>/dev/null
+  if [ -f "$PROJECT_ROOT/scripts/install-git-hooks.sh" ]; then
+    cp "$PROJECT_ROOT/scripts/install-git-hooks.sh" "$d/scripts/"
+    chmod +x "$d/scripts/install-git-hooks.sh"
+  fi
+  echo "$d"
+}
+
+# Helper: invoke the install script in a fixture and capture rc.
+ig_invoke() {
+  local dir="$1" rc=0
+  shift
+  ( cd "$dir" && bash scripts/install-git-hooks.sh "$@" >/dev/null 2>&1 ) || rc=$?
+  echo "$rc"
+}
+
+# AC 2: default (copy) installs both hooks.
+TMP=$(ig_setup)
+ig_invoke "$TMP" >/dev/null
+if [ -x "$TMP/.git/hooks/pre-commit" ] && [ -x "$TMP/.git/hooks/prepare-commit-msg" ]; then
+  pass "ig: default install copies both hooks (executable)"
+else
+  fail "ig: default install should produce .git/hooks/{pre-commit,prepare-commit-msg}"
+fi
+rm -rf "$TMP"
+
+# AC 3: idempotent — re-run on already-installed repo doesn't error.
+TMP=$(ig_setup)
+ig_invoke "$TMP" >/dev/null
+rc=$(ig_invoke "$TMP")
+if [ "$rc" -eq 0 ]; then
+  pass "ig: re-install on identical pack content → idempotent (rc=0)"
+else
+  fail "ig: re-install on identical content should succeed (rc=$rc)"
+fi
+rm -rf "$TMP"
+
+# AC 4: refuses to overwrite a custom hook (different content).
+TMP=$(ig_setup)
+mkdir -p "$TMP/.git/hooks"
+echo "#!/bin/sh
+echo CUSTOM" > "$TMP/.git/hooks/pre-commit"
+chmod +x "$TMP/.git/hooks/pre-commit"
+ig_out=$( ( cd "$TMP" && bash scripts/install-git-hooks.sh 2>&1 ); echo "exit:$?")
+# After refusal, the custom hook should be UNCHANGED.
+custom_intact=false
+grep -q "CUSTOM" "$TMP/.git/hooks/pre-commit" 2>/dev/null && custom_intact=true
+if [[ "$custom_intact" == "true" ]] && [[ "$ig_out" != *"exit:0"* ]]; then
+  pass "ig: refuses to overwrite custom hook (preserved + non-zero exit)"
+else
+  fail "ig: should refuse + preserve custom hook (got: '$ig_out')"
+fi
+rm -rf "$TMP"
+
+# AC 5: --symlink mode.
+TMP=$(ig_setup)
+ig_invoke "$TMP" --symlink >/dev/null
+if [ -L "$TMP/.git/hooks/pre-commit" ] && [ -L "$TMP/.git/hooks/prepare-commit-msg" ]; then
+  pass "ig: --symlink mode creates symlinks"
+else
+  fail "ig: --symlink should produce symlinks at .git/hooks/{pre-commit,prepare-commit-msg}"
+fi
+rm -rf "$TMP"
+
+# AC 6: --hookspath sets git config core.hooksPath.
+TMP=$(ig_setup)
+ig_invoke "$TMP" --hookspath >/dev/null
+hp=$( ( cd "$TMP" && git config --get core.hooksPath ) 2>/dev/null || true)
+if [[ "$hp" == *"git-hooks"* ]]; then
+  pass "ig: --hookspath sets core.hooksPath to scripts/git-hooks"
+else
+  fail "ig: --hookspath should set core.hooksPath (got: '$hp')"
+fi
+rm -rf "$TMP"
+
+# AC 7a: --uninstall removes pack-installed hooks.
+TMP=$(ig_setup)
+ig_invoke "$TMP" >/dev/null
+ig_invoke "$TMP" --uninstall >/dev/null
+if [ ! -e "$TMP/.git/hooks/pre-commit" ] && [ ! -e "$TMP/.git/hooks/prepare-commit-msg" ]; then
+  pass "ig: --uninstall removes pack-installed hooks"
+else
+  fail "ig: --uninstall should remove .git/hooks/{pre-commit,prepare-commit-msg}"
+fi
+rm -rf "$TMP"
+
+# AC 7b: --uninstall PRESERVES custom hooks (only removes pack-identical).
+TMP=$(ig_setup)
+mkdir -p "$TMP/.git/hooks"
+echo "#!/bin/sh
+echo CUSTOM_PROD" > "$TMP/.git/hooks/pre-commit"
+chmod +x "$TMP/.git/hooks/pre-commit"
+ig_invoke "$TMP" --uninstall >/dev/null 2>&1 || true
+if [ -f "$TMP/.git/hooks/pre-commit" ] && grep -q "CUSTOM_PROD" "$TMP/.git/hooks/pre-commit"; then
+  pass "ig: --uninstall preserves custom hooks (only removes pack-identical)"
+else
+  fail "ig: --uninstall must NOT delete operator's custom hooks"
+fi
+rm -rf "$TMP"
+
+# AC 8: fails outside a git repo.
+TMP=$(mktemp -d)
+mkdir -p "$TMP/scripts"
+cp "$PROJECT_ROOT/scripts/install-git-hooks.sh" "$TMP/scripts/" 2>/dev/null || true
+ig_out=$( ( cd "$TMP" && bash scripts/install-git-hooks.sh 2>&1 ); echo "exit:$?")
+if [[ "$ig_out" != *"exit:0"* ]]; then
+  pass "ig: fails cleanly outside a git repo"
+else
+  fail "ig: should fail outside a git repo (got: '$ig_out')"
+fi
+rm -rf "$TMP"
+
+# AC 9: fails when source hook is missing.
+TMP=$(mktemp -d)
+git init -q "$TMP"
+mkdir -p "$TMP/scripts/git-hooks"
+# Only copy ONE source hook (deliberately omit the other).
+cp "$PROJECT_ROOT/scripts/git-hooks/pre-commit" "$TMP/scripts/git-hooks/" 2>/dev/null || true
+cp "$PROJECT_ROOT/scripts/install-git-hooks.sh" "$TMP/scripts/" 2>/dev/null || true
+ig_out=$( ( cd "$TMP" && bash scripts/install-git-hooks.sh 2>&1 ); echo "exit:$?")
+if [[ "$ig_out" != *"exit:0"* ]] && [[ "$ig_out" == *"prepare-commit-msg"* ]]; then
+  pass "ig: fails cleanly when source hook is missing"
+else
+  fail "ig: should fail when prepare-commit-msg source missing (got: '$ig_out')"
+fi
+rm -rf "$TMP"
+
+# AC 14a: AGENTS.md mentions install script + both hook names.
+if grep -q "install-git-hooks.sh" "$PROJECT_ROOT/AGENTS.md" \
+   && grep -q "pre-commit" "$PROJECT_ROOT/AGENTS.md" \
+   && grep -q "prepare-commit-msg" "$PROJECT_ROOT/AGENTS.md"; then
+  pass "ig: AGENTS.md mentions install script + both hook names"
+else
+  fail "ig: AGENTS.md missing install-git-hooks.sh / pre-commit / prepare-commit-msg"
+fi
+
+# AC 14b: CLAUDE.md mentions install script + both hook names (parity).
+if grep -q "install-git-hooks.sh" "$PROJECT_ROOT/CLAUDE.md" \
+   && grep -q "pre-commit" "$PROJECT_ROOT/CLAUDE.md" \
+   && grep -q "prepare-commit-msg" "$PROJECT_ROOT/CLAUDE.md"; then
+  pass "ig: CLAUDE.md mentions install script + both hook names"
+else
+  fail "ig: CLAUDE.md missing install-git-hooks.sh / pre-commit / prepare-commit-msg"
+fi
+
+# Codex R1 P1 #1: install from a SUBDIRECTORY of the repo must
+# install into the actual .git/hooks (not subdir/.git/hooks). Verify
+# by checking the target file exists at the REPO ROOT after subdir-
+# invocation.
+TMP=$(ig_setup)
+mkdir -p "$TMP/sub/dir"
+( cd "$TMP/sub/dir" && bash ../../scripts/install-git-hooks.sh >/dev/null 2>&1 )
+if [ -x "$TMP/.git/hooks/pre-commit" ] && [ ! -e "$TMP/sub/dir/.git" ]; then
+  pass "ig-codex: install from subdir uses repo-root .git/hooks (R1 P1 #1 closed)"
+else
+  fail "ig-codex: install from subdir should resolve to repo-root .git/hooks"
+fi
+rm -rf "$TMP"
+
+# Codex R1 P1 #2: re-install restores executable bit if operator
+# removed it. Idempotent path used to skip silently.
+TMP=$(ig_setup)
+ig_invoke "$TMP" >/dev/null
+chmod -x "$TMP/.git/hooks/pre-commit"
+ig_invoke "$TMP" >/dev/null
+if [ -x "$TMP/.git/hooks/pre-commit" ]; then
+  pass "ig-codex: re-install restores +x bit if operator removed it (R1 P1 #2 closed)"
+else
+  fail "ig-codex: re-install should restore lost +x bit"
+fi
+rm -rf "$TMP"
+
+# Codex R1 P1 #3: --uninstall reverses --hookspath (unsets
+# core.hooksPath when it points at our pack dir).
+TMP=$(ig_setup)
+ig_invoke "$TMP" --hookspath >/dev/null
+ig_invoke "$TMP" --uninstall >/dev/null
+hp_after=$( ( cd "$TMP" && git config --get core.hooksPath ) 2>/dev/null || true)
+if [[ -z "$hp_after" ]]; then
+  pass "ig-codex: --uninstall unsets core.hooksPath when it points at pack (R1 P1 #3 closed)"
+else
+  fail "ig-codex: --uninstall should unset pack-pointing core.hooksPath (got: '$hp_after')"
+fi
+rm -rf "$TMP"
+
+# Codex R1 P1 #4: mutation failures propagate (set -e). If cp fails
+# (e.g., target dir is read-only), install must exit non-zero.
+TMP=$(ig_setup)
+mkdir -p "$TMP/.git/hooks"
+chmod -w "$TMP/.git/hooks"  # read-only hooks dir
+rc=$( ( cd "$TMP" && bash scripts/install-git-hooks.sh >/dev/null 2>&1 ); echo $? )
+chmod +w "$TMP/.git/hooks"  # restore for cleanup
+if [ "$rc" -ne 0 ]; then
+  pass "ig-codex: mutation failure (read-only target) propagates non-zero exit (R1 P1 #4 closed)"
+else
+  fail "ig-codex: cp into read-only dir should fail loudly (got rc=$rc)"
+fi
+rm -rf "$TMP"
+
+# Codex R1 P2: dangling custom symlink at .git/hooks/pre-commit must
+# block --symlink overwrite (was bypassed because [[ -e ]] is false
+# on dangling symlinks).
+TMP=$(ig_setup)
+mkdir -p "$TMP/.git/hooks"
+ln -s /nonexistent/custom-hook "$TMP/.git/hooks/pre-commit"
+ig_out=$( ( cd "$TMP" && bash scripts/install-git-hooks.sh --symlink 2>&1 ); echo "exit:$?")
+# After refusal, the dangling symlink should still be there.
+if [[ "$ig_out" != *"exit:0"* ]] && [ -L "$TMP/.git/hooks/pre-commit" ] \
+   && [[ "$(readlink "$TMP/.git/hooks/pre-commit")" == "/nonexistent/custom-hook" ]]; then
+  pass "ig-codex: --symlink refuses to overwrite dangling custom symlink (R1 P2 closed)"
+else
+  fail "ig-codex: dangling custom symlink should block --symlink (got: '$ig_out')"
+fi
+rm -rf "$TMP"
+
+echo
+
 # gate-level-no-verify-closure cycle: prepare-commit-msg closes the
 # --no-verify bypass that's deferred in the pre-commit hook header.
 # git's --no-verify ONLY bypasses pre-commit + commit-msg (per docs);
