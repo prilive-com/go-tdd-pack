@@ -1,8 +1,8 @@
-# Bugfix Plan: layer-0-rescue-cached-first — fold in F2-cycle leftover + close all bypass classes
+# Bugfix Plan: gate-level-bypass-closure — broaden COMMITS_RE for shell wrappers + inline aliases
 
 Status: active
-Cycle ID: layer-0-rescue-cached-first
-Change type: bugfix (rescue cycle for prior cycle's missed work)
+Cycle ID: gate-level-bypass-closure
+Change type: bugfix
 Tier: 1
 
 <!-- TDD ceremony markers. Set each ONLY after the matching operator APPROVED reply. -->
@@ -17,78 +17,88 @@ Bug-elsewhere check complete: yes
 
 ## Bug
 
-The F2 commit message (758894a) advertised a Layer 0 false-positive
-fix ("cached diff first; fall back to working-tree only when cached is
-empty") but the actual code committed in 758894a still had the buggy
-`{ git diff --cached; git diff } | awk` pattern. The Layer 0 fix and
-its smoke test sat in the working tree, never committed.
+Layer 0 size threshold and Tier 1 ceremony checks in
+`gate-tier1-commit.sh` are bypassed because `COMMITS_RE` only matches
+literal `git commit` at command start (or after a shell separator).
+Two known forms slip through:
 
-Discovered while preparing the F1 commit: `git diff HEAD` against
-gate-tier1-commit.sh showed the leftover. Layer 0's smoke test passed
-locally only because tests run against the working-tree hook, not HEAD.
-CI would have failed.
+```
+sh -c 'git commit -a -m msg'                  # outer is `sh -c`
+git -c alias.ci='commit -a' ci -m msg          # outer is `git -c`
+```
 
-## Iteration history (8 rounds of /second-opinion)
-
-The simple "ship the leftover fix" task expanded into 8 rounds because
-Codex found progressively narrower bypass cases against any literal-
-text parser of `git commit ...`:
-
-  R1 P1: cached-emptiness was the wrong proxy → -a/--all detection
-  R2 2× P2: word-splitting + end-of-options → xargs tokeniser, --, scan-after-commit
-  R3 P1+3× P2: pathspec bypass + attached short args + weak tests + weak fixture
-       → COMMIT_MODE_PATHSPEC + -m*/-F*/-c*/-C*/-S* + jq decision parsing
-  R4 3× P1: bare -S, --interactive/--patch/-p, --pathspec-from-file
-       → -S optional-arg, pathspec-mode triggers
-  R5 P1: clustered -pm not detected → cluster scanning for 'p'
-  R6 P1: abbreviated long opts (--intera = --interactive) → ARCHITECTURAL PIVOT:
-       UNCERTAIN backstop classifies any unrecognised `--*` as conservative
-       (uses diff HEAD --numstat). Closes the iteration loop by construction.
-  R7 P1+P2: shell variable expansion, empty-index PLAIN fallback
-       → unescaped $/backtick → UNCERTAIN; PLAIN with empty cached → CHURN=0
-  R8 3× P0+P1: glob expansion, sh -c wrapping, git aliases, header docs
-       → glob char (* ? [) → UNCERTAIN; sh -c and git aliases documented as
-       gate-level limitations (deferred follow-up cycle)
+Origin: Codex round 8 P0 finding from the Layer-0-rescue cycle. The
+parser fixes shipped in 278d268 close all parser-level bypasses for
+literal `git commit ...` invocations, but leave these gate-level
+bypasses open.
 
 ## Reproduction
 
-Stash the working-tree fix; run the false-positive smoke test against
-the buggy HEAD code:
+With the buggy HEAD code, `sh -c 'git commit -a'` exits 0 silently
+even when staged Tier 1 file + no plan should deny:
 
 ```
-git stash push .claude/hooks/gate-tier1-commit.sh
-bash scripts/tdd-test-hooks.sh 2>&1 | grep "false-positive closed"
-# FAIL: 103 lines counted from unstaged WIP, denying small staged commit
-git stash pop
+TMPDIR=$(mktemp -d) && git init "$TMPDIR" ...
+cp .tdd/tdd-config.json "$TMPDIR/.tdd/"
+echo "package auth" > "$TMPDIR/internal/auth/handler.go"
+git add . && git commit -m initial
+echo "// edit" >> "$TMPDIR/internal/auth/handler.go"
+git add internal/auth/handler.go
+
+# Bypass form — no plan, Tier 1 staged. Expected: deny.
+echo '{"tool_input":{"command":"sh -c \"git commit -a -m sneaky\""}}' \
+  | CLAUDE_PROJECT_DIR=$TMPDIR bash .claude/hooks/gate-tier1-commit.sh
+# Actual: exit 0 silently (gate didn't fire)
 ```
 
 ## Acceptance criteria
 
-1. `git commit -m` plain with small staged + large WIP → ALLOW (F2 preserved)
-2. `git commit -am`, `-a -m`, `-pm` (cluster), pathspec, --interactive,
-   --patch, --pathspec-from-file (both forms) → DENY on WIP
-3. `git commit --amend --no-edit`, `--signoff`, `--reset-author` etc. → ALLOW
-4. Abbreviated long opts (--intera, --patc, future flags) → DENY (UNCERTAIN backstop)
-5. Shell expansion ($, backtick, glob *, ?, [) → DENY (UNCERTAIN backstop)
-6. PLAIN mode with empty index → CHURN=0 (no working-tree fallback)
-7. All 8 rounds of Codex findings closed or documented as out-of-scope
-
-## Affected code
-
-- `.claude/hooks/gate-tier1-commit.sh` — option parser + UNCERTAIN backstop
-- `scripts/tdd-test-hooks.sh` — 12 new tests (R1-R8 closure + regressions)
+1. `sh -c 'git commit -a'` triggers gate (currently bypasses)
+2. `bash -c`, `zsh -c`, `dash -c`, `ksh -c`, `eval` wrappers all trigger
+3. `git -c alias.ci='commit -a' ci` triggers when alias value contains `commit`
+4. Negative: `echo "git commit -m foo"` does NOT trigger (commit-as-string)
+5. Negative: `git log --grep="git commit"` does NOT trigger (grep arg)
+6. Negative: `cat file | grep "git commit"` does NOT trigger (pipe arg)
+7. Existing direct `git commit` matching unchanged — 150 baseline tests pass
+8. New smoke tests cover positive (1-3) and negative (4-6) cases
 
 ## Non-goals
 
-- Closing `sh -c 'git commit -a'` and `git -c alias.ci=commit ci` bypasses.
-  These are gate-level (COMMITS_RE doesn't match), not parser-level.
-  Documented in hook header; queued for follow-up cycle that broadens
-  the gate's command-detection regex or moves to git pre-commit hooks.
+- Pre-configured user aliases from `.gitconfig` (`git ci -m msg` where
+  `ci` is operator-defined). Detection requires `git config --get
+  alias.<word>` per hook invocation; real but rare in threat model
+  (operator-configured, not Claude-injected). Document as known
+  limitation; defer to follow-up cycle.
+- Wrappers that read commands from files (`bash some-script.sh` where
+  the script contains `git commit`). We don't read script files.
+- `python -c '...'` or other interpreters that could shell-out. Same
+  as above — too broad to scan.
+
+## Affected code
+
+- `.claude/hooks/gate-tier1-commit.sh` lines 82-85 — replace single
+  COMMITS_RE with a function that checks multiple invocation patterns
+- `scripts/tdd-test-hooks.sh` — ~10 new smoke tests
+
+## Test plan
+
+| Test name | Pins criterion # |
+|---|---|
+| gate_sh_c_wrapper_triggers | 1 |
+| gate_bash_c_wrapper_triggers | 2 |
+| gate_zsh_c_wrapper_triggers | 2 |
+| gate_eval_wrapper_triggers | 2 |
+| gate_inline_alias_injection_triggers | 3 |
+| gate_inline_alias_without_commit_does_not_trigger | 4 |
+| gate_echo_commit_string_does_not_trigger | 4 |
+| gate_grep_commit_string_does_not_trigger | 5 |
+| gate_pipe_grep_commit_does_not_trigger | 6 |
+| gate_existing_direct_commit_still_triggers | 7 |
 
 ## Risk register
 
 | Risk | Mitigation |
 |---|---|
-| Future git release adds a new long opt that adds working-tree content; UNCERTAIN whitelist doesn't include it | Default-deny behavior is correct (fail closed). Add to whitelist when triggered. |
-| Legitimate commit message contains $ or * (e.g., `git commit -m "fix: $5 bug"`) | UNCERTAIN → operator runs /second-opinion to bypass. Friction but safe. |
-| Nested shell or git alias bypasses Layer 0 entirely | Documented as out-of-scope; follow-up cycle. |
+| New patterns produce false positives in legitimate workflows | Keep wrapper detection narrow: must match the wrapper form AND contain `git commit` substring. Tests 4-6 guard. |
+| `git -c alias.X=commit X` regex too narrow; misses URL-encoded or quoted variants | Stick to common shell-quoting forms; document edge cases. |
+| `eval` matching might catch unrelated `eval $(...)` shell setup | The eval branch requires `git commit` substring after eval; legitimate shell setup eval doesn't typically contain `git commit`. |

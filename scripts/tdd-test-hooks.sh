@@ -1980,6 +1980,455 @@ fi
 rm -rf "$TMPROOT_F2"
 
 echo
+echo "Testing gate-level bypass closure (cycle gate-level-bypass-closure)..."
+
+# Codex round 8 P0 (Layer-0-rescue cycle): COMMITS_RE only matches
+# literal `git commit` at command start. Bypass forms slip through:
+#   sh -c 'git commit -a'     → outer is sh -c
+#   git -c alias.X='commit' X → outer is git -c
+# Fix: broaden the match to detect wrapper forms + inline alias injection.
+# Negative cases (echo/grep "git commit" as text) must NOT trigger.
+
+TMPROOT_GATE=$(mktemp -d)
+git init -q "$TMPROOT_GATE"
+( cd "$TMPROOT_GATE" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMPROOT_GATE/.tdd" "$TMPROOT_GATE/internal/auth"
+cp .tdd/tdd-config.json "$TMPROOT_GATE/.tdd/"
+echo "package auth" > "$TMPROOT_GATE/internal/auth/handler.go"
+( cd "$TMPROOT_GATE" && git add . && git commit -q -m initial )
+echo "// modified" >> "$TMPROOT_GATE/internal/auth/handler.go"
+( cd "$TMPROOT_GATE" && git add internal/auth/handler.go )
+
+# AC 1: sh -c 'git commit -a' bypass — should DENY (Tier 1 staged, no plan)
+out=$(echo '{"tool_input":{"command":"sh -c \"git commit -a -m sneaky\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: sh -c wrapper triggers gate"
+else
+  fail "gate-level: sh -c 'git commit' should trigger gate (got: '$out')"
+fi
+
+# AC 2a: bash -c
+out=$(echo '{"tool_input":{"command":"bash -c \"git commit -a -m bash\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: bash -c wrapper triggers gate"
+else
+  fail "gate-level: bash -c 'git commit' should trigger gate (got: '$out')"
+fi
+
+# AC 2b: zsh -c
+out=$(echo '{"tool_input":{"command":"zsh -c \"git commit -a -m zsh\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: zsh -c wrapper triggers gate"
+else
+  fail "gate-level: zsh -c 'git commit' should trigger gate (got: '$out')"
+fi
+
+# AC 2c: dash -c
+out=$(echo '{"tool_input":{"command":"dash -c \"git commit -a -m dash\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: dash -c wrapper triggers gate"
+else
+  fail "gate-level: dash -c 'git commit' should trigger gate (got: '$out')"
+fi
+
+# AC 2d: ksh -c
+out=$(echo '{"tool_input":{"command":"ksh -c \"git commit -a -m ksh\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: ksh -c wrapper triggers gate"
+else
+  fail "gate-level: ksh -c 'git commit' should trigger gate (got: '$out')"
+fi
+
+# AC 2e: eval
+out=$(echo '{"tool_input":{"command":"eval \"git commit -a -m evald\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: eval wrapper triggers gate"
+else
+  fail "gate-level: eval 'git commit' should trigger gate (got: '$out')"
+fi
+
+# AC 3: git -c alias.X='commit -a' X — inline alias injection
+out=$(echo '{"tool_input":{"command":"git -c alias.ci=\"commit -a\" ci -m injected"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: git -c alias.X='commit ...' triggers gate (inline alias injection)"
+else
+  fail "gate-level: inline alias injection should trigger gate (got: '$out')"
+fi
+
+# AC 4: echo with "git commit" as a string — must NOT trigger
+out=$(echo '{"tool_input":{"command":"echo \"to commit run git commit -m foo\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]] && [[ "$out" != *"permissionDecision"* ]]; then
+  pass "gate-level: echo with 'git commit' string does NOT trigger gate"
+else
+  fail "gate-level: echo string should not trigger gate (got: '$out')"
+fi
+
+# AC 5: git log --grep="git commit" — must NOT trigger
+out=$(echo '{"tool_input":{"command":"git log --grep=\"git commit\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]] && [[ "$out" != *"permissionDecision"* ]]; then
+  pass "gate-level: git log --grep='git commit' does NOT trigger gate"
+else
+  fail "gate-level: git log --grep should not trigger gate (got: '$out')"
+fi
+
+# AC 6: cat | grep "git commit" — must NOT trigger
+out=$(echo '{"tool_input":{"command":"cat README.md | grep \"git commit\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]] && [[ "$out" != *"permissionDecision"* ]]; then
+  pass "gate-level: cat | grep 'git commit' does NOT trigger gate"
+else
+  fail "gate-level: pipe grep should not trigger gate (got: '$out')"
+fi
+
+# AC 7: existing direct `git commit` continues to trigger (regression).
+out=$(echo '{"tool_input":{"command":"git commit -m \"direct\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: direct git commit still triggers (regression preserved)"
+else
+  fail "gate-level: direct git commit should still trigger (got: '$out')"
+fi
+
+# Negative: git -c alias.X=somethingelse X — alias does NOT mention commit
+out=$(echo '{"tool_input":{"command":"git -c alias.lg=\"log --oneline\" lg"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]] && [[ "$out" != *"permissionDecision"* ]]; then
+  pass "gate-level: git -c alias.X='log ...' (no commit) does NOT trigger"
+else
+  fail "gate-level: alias without 'commit' should not trigger (got: '$out')"
+fi
+
+# Codex round 1 F1 (P1): git global options before subcommand. The old
+# regex required `git[[:space:]]+commit`; `git -c key=val commit`,
+# `git -C path commit`, `git --git-dir=X commit` all bypassed.
+out=$(echo '{"tool_input":{"command":"git -c user.name=x commit -m global-c"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: git -c key=val commit triggers (Codex R1 F1 closed)"
+else
+  fail "gate-level: git -c global opt + commit should trigger (got: '$out')"
+fi
+
+out=$(echo '{"tool_input":{"command":"git -C /tmp commit -m bigC"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: git -C path commit triggers (global opt before subcommand)"
+else
+  fail "gate-level: git -C global opt + commit should trigger (got: '$out')"
+fi
+
+out=$(echo '{"tool_input":{"command":"git --git-dir=.git commit -m gitdir"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: git --git-dir=X commit triggers (attached long opt)"
+else
+  fail "gate-level: --git-dir=X + commit should trigger (got: '$out')"
+fi
+
+# Negative regression: git status with global opts must NOT trigger.
+out=$(echo '{"tool_input":{"command":"git -c color.ui=true status"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]] && [[ "$out" != *"permissionDecision"* ]]; then
+  pass "gate-level: git -c color.ui=true status does NOT trigger (non-commit subcommand)"
+else
+  fail "gate-level: git status with global opt should not trigger (got: '$out')"
+fi
+
+# Codex round 1 F3 (P2): wrapper false positives. The old code grepped
+# the WHOLE command for `git commit` after seeing a wrapper. The fix
+# checks only the wrapper's payload (next token after -c).
+out=$(echo '{"tool_input":{"command":"bash -c \"echo done\"; echo \"git commit -m note\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]] && [[ "$out" != *"permissionDecision"* ]]; then
+  pass "gate-level: bash -c with separate echo 'git commit' does NOT trigger (Codex R1 F3 closed)"
+else
+  fail "gate-level: false positive on text after wrapper (got: '$out')"
+fi
+
+# Word boundary: commit-msg (git hook name) should NOT match commit.
+out=$(echo '{"tool_input":{"command":"bash -c \"echo running commit-msg hook\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]] && [[ "$out" != *"permissionDecision"* ]]; then
+  pass "gate-level: 'commit-msg' (git hook name) does NOT match (word boundary)"
+else
+  fail "gate-level: commit-msg should not match commit (got: '$out')"
+fi
+
+# Codex round 1 F4 (P2): alias false positive. The old loop checked ALL
+# tokens; `echo alias.ci=commit` would trigger. Fix: alias check only
+# fires when the token follows `git -c` in the active git invocation.
+out=$(echo '{"tool_input":{"command":"echo alias.ci=commit"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]] && [[ "$out" != *"permissionDecision"* ]]; then
+  pass "gate-level: echo alias.ci=commit does NOT trigger (Codex R1 F4 closed)"
+else
+  fail "gate-level: alias-shaped echo arg should not trigger (got: '$out')"
+fi
+
+# Same for printf with alias-shaped arg.
+out=$(echo '{"tool_input":{"command":"printf %s alias.review=commit-message"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]] && [[ "$out" != *"permissionDecision"* ]]; then
+  pass "gate-level: printf alias.review=commit-message does NOT trigger"
+else
+  fail "gate-level: printf with alias-text arg should not trigger (got: '$out')"
+fi
+
+# Codex round 2 P1: bash long opts containing 'c' (--norc, --rcfile)
+# must NOT be misclassified as the -c short cluster.
+out=$(echo '{"tool_input":{"command":"bash --norc -c \"git commit -m norc\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: bash --norc -c 'git commit' triggers (long opt before -c, R2 P1 closed)"
+else
+  fail "gate-level: bash --norc -c should still find -c (got: '$out')"
+fi
+
+out=$(echo '{"tool_input":{"command":"bash --rcfile /tmp/r -c \"git commit -m rcfile\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: bash --rcfile FILE -c 'git commit' triggers (--rcfile consumes value)"
+else
+  fail "gate-level: bash --rcfile -c should still find -c (got: '$out')"
+fi
+
+# Long cluster -lc (login + command).
+out=$(echo '{"tool_input":{"command":"bash -lc \"git commit -m login\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: bash -lc 'git commit' triggers (cluster with c)"
+else
+  fail "gate-level: bash -lc should match (got: '$out')"
+fi
+
+# Codex round 2 P1: adjacent shell operators without spaces.
+out=$(echo '{"tool_input":{"command":"true&&git commit -m adj"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: true&&git commit (adjacent &&) triggers (R2 P1 closed)"
+else
+  fail "gate-level: true&&git commit should trigger (got: '$out')"
+fi
+
+out=$(echo '{"tool_input":{"command":"true;git commit -m adj"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: true;git commit (adjacent ;) triggers"
+else
+  fail "gate-level: true;git commit should trigger (got: '$out')"
+fi
+
+out=$(echo '{"tool_input":{"command":"false||git commit -m adj"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: false||git commit (adjacent ||) triggers"
+else
+  fail "gate-level: false||git commit should trigger (got: '$out')"
+fi
+
+# Codex round 2 P1: wrapper payload may itself use global opts or alias.
+out=$(echo '{"tool_input":{"command":"bash -c \"git -c user.name=x commit -m nested\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: bash -c 'git -c key=val commit' triggers (recursive payload, R2 P1 closed)"
+else
+  fail "gate-level: nested global-opt commit should trigger (got: '$out')"
+fi
+
+out=$(echo '{"tool_input":{"command":"bash -c \"git -c alias.ci=commit ci -m nested-alias\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: bash -c 'git -c alias.X=commit X' triggers (recursive alias)"
+else
+  fail "gate-level: nested alias injection should trigger (got: '$out')"
+fi
+
+# Codex round 2 P1: eval with unquoted args. eval concatenates ALL args
+# and evaluates; my old code only checked the next token.
+out=$(echo '{"tool_input":{"command":"eval git commit -m unquoted"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: eval git commit (unquoted args) triggers (R2 P1 closed)"
+else
+  fail "gate-level: eval unquoted should trigger (got: '$out')"
+fi
+
+# Codex round 2 P2: alias defined but NOT invoked. Should NOT trigger.
+out=$(echo '{"tool_input":{"command":"git -c alias.ci=commit status"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]] && [[ "$out" != *"permissionDecision"* ]]; then
+  pass "gate-level: git -c alias.ci=commit status does NOT trigger (alias not invoked, R2 P2 closed)"
+else
+  fail "gate-level: defined-but-not-invoked alias should not trigger (got: '$out')"
+fi
+
+# Codex round 3 P1: --login is NO-VALUE flag (login shell). Was wrongly
+# in the value-consuming list, causing it to skip past the real -c.
+out=$(echo '{"tool_input":{"command":"bash --login -c \"git commit -m login-shell\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: bash --login -c 'git commit' triggers (R3 P1 closed)"
+else
+  fail "gate-level: --login should not consume next token (got: '$out')"
+fi
+
+# Codex round 4 P1: bash short opts that consume next token (-o, -O).
+# `bash -o posix -c "git commit"` would consume `posix` and break before -c.
+out=$(echo '{"tool_input":{"command":"bash -o posix -c \"git commit -m posix\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: bash -o posix -c 'git commit' triggers (R4 P1 closed)"
+else
+  fail "gate-level: -o consumes next token; should still find -c (got: '$out')"
+fi
+
+# Codex round 4 P0: shell positions where `git commit` can appear that
+# the structured matcher doesn't enumerate. Cross-check backstop catches
+# adjacent bare `git`+`commit` tokens not preceded by string-output cmd.
+#
+# Subshell grouping: (git commit -m x)
+out=$(echo '{"tool_input":{"command":"( git commit -m subshell )"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: ( git commit ) subshell triggers (backstop)"
+else
+  fail "gate-level: subshell git commit should trigger (got: '$out')"
+fi
+
+# Brace grouping: { git commit -m x; }
+out=$(echo '{"tool_input":{"command":"{ git commit -m brace ; }"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: { git commit ; } brace triggers (backstop)"
+else
+  fail "gate-level: brace git commit should trigger (got: '$out')"
+fi
+
+# Env-var assignment prefix: FOO=x git commit -m x
+out=$(echo '{"tool_input":{"command":"GIT_AUTHOR_NAME=x git commit -m envvar"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: env-var prefix git commit triggers (backstop)"
+else
+  fail "gate-level: env-var prefix should trigger (got: '$out')"
+fi
+
+# Pipe: true | git commit -m x
+out=$(echo '{"tool_input":{"command":"true | git commit -m pipe"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: true | git commit triggers (backstop)"
+else
+  fail "gate-level: pipe git commit should trigger (got: '$out')"
+fi
+
+# Newline-separated: true\ngit commit -m x. JSON-encoded \n becomes a
+# literal newline in the command string after jq -r.
+out=$(printf '{"tool_input":{"command":"true\\ngit commit -m newline"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "gate-level: newline-separated git commit triggers (backstop)"
+else
+  fail "gate-level: \\n git commit should trigger (got: '$out')"
+fi
+
+# Backstop NEGATIVE: echo with bare unquoted args (no quotes) should
+# NOT trigger because backstop walks back and finds `echo`.
+out=$(echo '{"tool_input":{"command":"echo git commit -m foo"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]] && [[ "$out" != *"permissionDecision"* ]]; then
+  pass "gate-level: echo git commit (unquoted) backstop walks back to echo, does NOT trigger"
+else
+  fail "gate-level: echo git commit should not trigger (got: '$out')"
+fi
+
+# Backstop NEGATIVE: printf, cat, sed are also string-output commands.
+out=$(echo '{"tool_input":{"command":"printf %s git commit"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_GATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]] && [[ "$out" != *"permissionDecision"* ]]; then
+  pass "gate-level: printf %s git commit (unquoted) does NOT trigger"
+else
+  fail "gate-level: printf git commit should not trigger (got: '$out')"
+fi
+
+rm -rf "$TMPROOT_GATE"
+
+echo
 echo "Testing layer-1 vs layer-2 split (guards fire independent of TDD cycle)..."
 
 # Pack-self dogfooding finding (2026-05-08): guards were dormant on commits

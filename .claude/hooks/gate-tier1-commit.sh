@@ -71,16 +71,225 @@ mkdir -p "$ROOT/.tdd" 2>/dev/null
 CMD="$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.command // empty' 2>/dev/null)"
 [[ -z "$CMD" ]] && exit 0
 
-# Match git commit at command start (allow leading whitespace).
-# The anchor avoids matching command bodies that mention "git commit" in
-# comments or quoted strings.
+# Match git commit invocations — direct, via shell wrappers, with global
+# git options, or via inline alias injection. Earlier versions used a
+# single regex anchored to `git[[:space:]]+commit` at command start;
+# Codex review (8 rounds across two cycles) surfaced bypasses:
+#   sh -c 'git commit -a'                      → outer is `sh -c`
+#   git -c alias.X='commit' X                  → outer is `git -c`
+#   git -c user.name=x commit -m msg            → global opt before subcommand
+#   echo alias.ci=commit                        → false positive on alias substring
+#   bash -c "echo done"; echo "git commit"      → false positive on text in args
 #
-# D-SO-05 (2026-05-08): regex previously matched (commit|tag|push). The
-# gating logic only inspects staged files — meaningful for commit, not
-# for push or tag. Aligning the regex with what the script actually
-# does. Header doc was updated in the same commit.
-COMMITS_RE='(^|;|&&|\|\|)[[:space:]]*git[[:space:]]+commit([[:space:]]|$)'
-if ! printf '%s' "$CMD" | grep -qE "$COMMITS_RE"; then
+# matches_git_commit() tokenises with xargs (quote-aware), tracks command
+# boundaries (;, &&, ||), and walks tokens to recognise:
+#   1. `git [global-opts] commit ...` (direct, with optional global opts)
+#   2. `git -c alias.X=...commit... X` (inline alias injection)
+#   3. `(sh|bash|zsh|dash|ksh) -*c* PAYLOAD` where PAYLOAD invokes `git commit`
+#   4. `eval PAYLOAD` where PAYLOAD invokes `git commit`
+#
+# KNOWN OUT-OF-SCOPE bypasses (Codex rounds 1 F2 + 5; same architectural
+# class as Layer-0-rescue out-of-scope items — can't predict exec without
+# eval'ing). Tracked for follow-up cycle:
+#   * `python -c "import os; os.system('git commit')"` — interpreter wrapper
+#   * Pre-configured user aliases from .gitconfig (`git ci -m`) — needs
+#     `git config --get alias.<word>` lookup per invocation
+#   * `time bash -c "git commit"`, `sudo bash -c "..."`, `nice bash -c`,
+#     `env FOO=1 bash -c`, `nohup bash -c` — transparent-exec prefix
+#     before a recognised wrapper hides the wrapper from this matcher
+#   * `xargs git commit` and `find -exec git commit \;` — these execute
+#     commit but xargs/find are in the backstop's string-output safe-list
+#   * Compact metachars without surrounding whitespace: `true|git commit`,
+#     `(git commit -m x)` (no space after paren) — pre-normalisation
+#     only splits `;`, `&&`, `||`, `\n`
+#   * Unknown git global opts before commit (`git --some-future-opt
+#     commit`) — global-opt enumeration is incomplete by construction
+# Closing this class requires either a real shell parser or pivoting
+# the gate to a git pre-commit hook (which sees actual `git commit`
+# invocations regardless of how they're spelled).
+matches_git_commit() {
+  local cmd="$1"
+
+  # Pre-normalise: insert spaces around shell control operators so xargs
+  # tokenises adjacent forms (`true&&git commit`, `true;git commit`)
+  # correctly. Codex round 2 P1: bash parameter expansion is a literal
+  # string substitution, so this also affects content INSIDE quoted
+  # strings — but that only changes what we OBSERVE, not what gets
+  # executed, so it's safe for analysis.
+  local _gc_norm="$cmd"
+  # Treat newlines as command separators (xargs would otherwise collapse
+  # them into whitespace and lose command-boundary context).
+  _gc_norm="${_gc_norm//$'\n'/ ; }"
+  _gc_norm="${_gc_norm//;/ ; }"
+  # bash treats `&` in replacement specially (doubles it); escape with \&.
+  _gc_norm="${_gc_norm//&&/ \&\& }"
+  _gc_norm="${_gc_norm//||/ || }"
+
+  local _gc_tokens=() _gc_line
+  if command -v xargs >/dev/null 2>&1; then
+    while IFS= read -r _gc_line; do
+      _gc_tokens+=("$_gc_line")
+    done < <(printf '%s' "$_gc_norm" | xargs -n1 printf '%s\n' 2>/dev/null)
+  fi
+  if [[ ${#_gc_tokens[@]} -eq 0 ]]; then
+    read -ra _gc_tokens <<< "$_gc_norm"
+  fi
+
+  local _gc_at_start=true
+  local _gc_i=0 _gc_n=${#_gc_tokens[@]}
+  while [[ $_gc_i -lt $_gc_n ]]; do
+    local _gc_tok="${_gc_tokens[_gc_i]}"
+
+    if [[ "$_gc_at_start" == "true" ]]; then
+      case "$_gc_tok" in
+        git)
+          # Walk forward through global opts, look for `commit` subcommand
+          # OR `-c alias.X=...commit...` injection where alias `X` is the
+          # subcommand actually invoked. Other subcommands break.
+          local _gc_j=$((_gc_i + 1))
+          local _gc_pending_alias=""
+          while [[ $_gc_j -lt $_gc_n ]]; do
+            local _gc_sub="${_gc_tokens[_gc_j]}"
+            case "$_gc_sub" in
+              -c)
+                local _gc_kv="${_gc_tokens[$((_gc_j+1))]:-}"
+                # Codex round 2 P2: only record alias name if value
+                # contains `commit`; defer firing until we see the alias
+                # invoked as the subcommand.
+                case "$_gc_kv" in
+                  alias.*=*commit*)
+                    local _gc_aliasname="${_gc_kv#alias.}"
+                    _gc_aliasname="${_gc_aliasname%%=*}"
+                    if [[ -n "$_gc_aliasname" ]]; then
+                      _gc_pending_alias="${_gc_pending_alias}|${_gc_aliasname}|"
+                    fi
+                    ;;
+                esac
+                _gc_j=$((_gc_j + 2))
+                ;;
+              -C|--git-dir|--work-tree|--namespace|--super-prefix|--exec-path|--list-cmds)
+                _gc_j=$((_gc_j + 2)) ;;
+              --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--exec-path=*|--list-cmds=*)
+                _gc_j=$((_gc_j + 1)) ;;
+              --no-pager|--bare|--paginate|--no-replace-objects|--literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs|--no-optional-locks|--no-advice|--version|--help|-h|-p|-P)
+                _gc_j=$((_gc_j + 1)) ;;
+              commit) return 0 ;;
+              *)
+                # Check pending alias names against this subcommand.
+                # _gc_pending_alias accumulated as `|name1|name2|`.
+                if [[ -n "$_gc_pending_alias" ]]; then
+                  case "$_gc_pending_alias" in
+                    *"|${_gc_sub}|"*) return 0 ;;
+                  esac
+                fi
+                break
+                ;;
+            esac
+          done
+          ;;
+        sh|bash|zsh|dash|ksh)
+          # Walk forward looking for -c flag (short cluster, NOT a long
+          # opt that happens to contain 'c' like --norc / --rcfile).
+          # Codex round 2 P1: --* must be matched before -*c*.
+          local _gc_j=$((_gc_i + 1))
+          while [[ $_gc_j -lt $_gc_n ]]; do
+            local _gc_sub="${_gc_tokens[_gc_j]}"
+            case "$_gc_sub" in
+              --) break ;;
+              # Long opts that take a next-token value (skip the value too).
+              # Codex round 3 P1: --login is a NO-VALUE flag for bash/zsh;
+              # putting it here would skip past the real -c.
+              --rcfile|--init-file)
+                _gc_j=$((_gc_j + 2)) ;;
+              # Short opts that take a next-token value. Codex round 4 P1:
+              # `bash -o posix -c '...'` would consume `posix` and then
+              # break before reaching the real -c.
+              -o|-O|+o|+O)
+                _gc_j=$((_gc_j + 2)) ;;
+              --*) _gc_j=$((_gc_j + 1)) ;;
+              -*c*)
+                # Codex round 2 P1: payload may itself be a recognisable
+                # commit invocation (e.g., `git -c key=val commit`).
+                # Recurse on the payload instead of grepping literal text.
+                local _gc_payload="${_gc_tokens[$((_gc_j+1))]:-}"
+                if [[ -n "$_gc_payload" ]] && matches_git_commit "$_gc_payload"; then
+                  return 0
+                fi
+                break
+                ;;
+              -*) _gc_j=$((_gc_j + 1)) ;;
+              *) break ;;
+            esac
+          done
+          ;;
+        eval)
+          # Codex round 2 P1: `eval git commit -m x` (unquoted) tokenises
+          # as eval, git, commit, ... — the next-token-only check missed.
+          # eval concatenates ALL its args; concat remaining tokens up to
+          # next command boundary and recurse.
+          local _gc_eval_buf=""
+          local _gc_j=$((_gc_i + 1))
+          while [[ $_gc_j -lt $_gc_n ]]; do
+            local _gc_t2="${_gc_tokens[_gc_j]}"
+            case "$_gc_t2" in
+              \;|'&&'|'||') break ;;
+            esac
+            _gc_eval_buf+=" ${_gc_t2}"
+            _gc_j=$((_gc_j + 1))
+          done
+          if [[ -n "$_gc_eval_buf" ]] && matches_git_commit "$_gc_eval_buf"; then
+            return 0
+          fi
+          ;;
+      esac
+    fi
+
+    # Command boundary: standalone separator tokens (now standalone after
+    # the pre-normalisation) reset _gc_at_start.
+    case "$_gc_tok" in
+      \;|'&&'|'||') _gc_at_start=true ;;
+      *) _gc_at_start=false ;;
+    esac
+
+    _gc_i=$((_gc_i + 1))
+  done
+
+  # Cross-check backstop (Codex round 4 P0). Same architectural pattern
+  # as Layer-0-rescue UNCERTAIN: instead of enumerating every shell-syntax
+  # position where `git commit` can appear (subshell `()`, brace `{}`,
+  # env-var prefix `FOO=x git commit`, pipe `|`, `time`, `nice`, etc.),
+  # treat ADJACENT bare `git`+`commit` tokens as a commit invocation
+  # UNLESS they are clearly arguments to a string-output command
+  # (echo, printf, cat, grep, sed, awk, etc.). xargs strips quotes, so
+  # `echo "git commit"` becomes one quoted token (NOT adjacent bare),
+  # while a real `git commit` invocation produces two adjacent bare
+  # tokens regardless of the surrounding shell syntax.
+  local _gc_idx=1
+  while [[ $_gc_idx -lt $_gc_n ]]; do
+    if [[ "${_gc_tokens[$((_gc_idx - 1))]}" == "git" && "${_gc_tokens[_gc_idx]}" == "commit" ]]; then
+      # Walk back from `git` looking for a string-output cmd at the head
+      # of this command segment (stopping at known boundaries).
+      local _gc_back=$((_gc_idx - 2))
+      local _gc_safe=false
+      while [[ $_gc_back -ge 0 ]]; do
+        case "${_gc_tokens[_gc_back]}" in
+          echo|printf|cat|grep|fgrep|egrep|less|more|head|tail|sed|awk|cut|sort|uniq|wc|tr|tee|jq|yq|xargs|find)
+            _gc_safe=true; break ;;
+          \;|'&&'|'||'|'|') break ;;
+        esac
+        _gc_back=$((_gc_back - 1))
+      done
+      if [[ "$_gc_safe" != "true" ]]; then
+        return 0
+      fi
+    fi
+    _gc_idx=$((_gc_idx + 1))
+  done
+
+  return 1
+}
+
+if ! matches_git_commit "$CMD"; then
   exit 0
 fi
 
