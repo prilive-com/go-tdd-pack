@@ -716,96 +716,45 @@ will be **denied with exit 2**.
 
 #### 6a. Adjudication artifact (always required)
 
-Compute hashes for the diff and plan BEFORE writing the adjudication
-so they're stable and bound to the work you just reviewed. The
-`require-second-opinion.sh` hook compares these against current
-content (when `second_opinion.require_hash_binding_tier1=true`) and
-denies on mismatch — closing the bypass where a stale adjudication
-silently covers later unrelated work.
+Canonical template:
+`.tdd/templates/second-opinion-adjudication-template.md`. Copy it,
+compute hashes (F5 binds adjudication to specific diff/plan content
+when `require_hash_binding_tier1=true`), then fill in the placeholders.
 
 ```bash
 mkdir -p .tdd
-
-# F5 — hash binding. Both fields are always written; hook only enforces
-# the comparison when the Tier-1 flag is enabled.
-diff_sha=""
-if command -v sha256sum >/dev/null 2>&1; then
-  diff_sha=$(git diff HEAD --cached 2>/dev/null | sha256sum | awk '{print $1}')
-fi
+# Portable sha256 (Linux: sha256sum; macOS: shasum -a 256).
+sha256() { command -v sha256sum >/dev/null && sha256sum || shasum -a 256; }
+diff_sha=$(git diff HEAD --cached 2>/dev/null | sha256 | awk '{print $1}')
 plan_sha=""
-if [[ -f .tdd/current-plan.md ]] && command -v sha256sum >/dev/null 2>&1; then
-  plan_sha=$(sha256sum .tdd/current-plan.md | awk '{print $1}')
-fi
+[[ -f .tdd/current-plan.md ]] && plan_sha=$(sha256 < .tdd/current-plan.md | awk '{print $1}')
 
-cat > .tdd/second-opinion-completed.md <<EOF
-# Second opinion adjudication
-date: $(date -u +%FT%TZ)
-scope: <Tier 1 or non-Tier-1, copy the value from the chat header you printed>
-model: <the model name from the chat header>
-diff_sha256: $diff_sha
-plan_sha256: $plan_sha
-files_in_scope:
-$(printf '  - %s\n' "$@")
-findings_total: <N>
-adjudication_summary: |
-  <one paragraph summarizing your stance — accepts vs rejects vs
-   pushbacks, what changed in the plan/code as a result>
-findings:
-  # One block per finding. Required keys: id, severity, stance.
-  # PARTIAL stance ALSO requires: accepted, rejected, why_split (each
-  # substantive — "nothing"/"n/a"/"none"/blank are rejected by the hook).
-  - id: F1
-    severity: <P0|P1|P2|P3>
-    stance: <ACCEPT|REJECT|PARTIAL|PUSHBACK>
-    # For PARTIAL only:
-    # accepted: <what you are taking from the finding>
-    # rejected: <what you disagree with — substantive, not "nothing">
-    # why_split: <≥2 sentences>
-    # For P0 ACCEPT only:
-    # why_correct: <≥3 sentences explaining the technical claim>
-adjudicated_by: claude
-EOF
+ADJ=.tdd/second-opinion-completed.md
+cp .tdd/templates/second-opinion-adjudication-template.md "$ADJ"
+# Portable temp-file rewrite (GNU `sed -i` and BSD `sed -i ''` differ).
+sed -e "s|^date: .*|date: $(date -u +%FT%TZ)|" \
+    -e "s|^diff_sha256: .*|diff_sha256: ${diff_sha}|" \
+    -e "s|^plan_sha256: .*|plan_sha256: ${plan_sha}|" \
+    "$ADJ" > "$ADJ.tmp" && mv "$ADJ.tmp" "$ADJ"
+
+# Then edit scope / model / files_in_scope / findings_total /
+# adjudication_summary / findings per Step 5. PARTIAL stances need
+# substantive accepted/rejected/why_split.
 ```
 
 #### 6b. Disposition matrix (Tier 1 only — v1.6.0)
 
-For Tier 1 cycles, ALSO write `.tdd/codex/disposition-matrix.md` with
-one row per Codex finding. The hook checks row count == findings_total.
+Canonical template: `.tdd/templates/disposition-matrix-template.md`.
+The placeholder rows use `F-EXAMPLE-N` so the hook's row-count regex
+(`^\|[[:space:]]+F[0-9]+[[:space:]]+\|`) does NOT match them. Real
+rows must use `F1`/`F2`/... — those WILL be counted (F8 invariant).
 
 ```bash
 mkdir -p .tdd/codex
-cat > .tdd/codex/disposition-matrix.md <<EOF
-# Concern Disposition Matrix
-date: $(date -u +%FT%TZ)
-cycle_id: <slug>
-findings_total: <N — must equal row count below>
-codex_model: <model name>
-review_phase: <plan|diff>
-
-## Cross-cutting observations
-
-<0-3 sentences. Empty if no cross-cutting pattern across findings.
-Examples:
-- "Three findings (F2, F5, F7) point at error handling. Single style
-  change in cycle scope addresses all three."
-- "No cross-cutting patterns."
-This is the v1.6.0 patterns pre-pass — surface global observations
-BEFORE the per-finding loop.>
-
-## Findings table
-
-| ID | Source | Severity | Concern (1 line) | Disposition | Reason | Spec change |
-|----|--------|----------|------------------|-------------|--------|-------------|
-| F1 | Codex  | <P0..P3> | <one line>       | <ACCEPT|PARTIAL|REJECT|PUSHBACK> | <discipline-compliant reason — see template> | <yes|partial|no> |
-<one row per Codex finding from round1.json>
-
-## Pass A divergences
-
-<Tier 1 with Pass A only. List major divergences between Codex's
-independent design (.tdd/codex/independent-design.md) and Claude's
-plan, with Claude's stance on each. Mark addressed-by F-ID or
-"stylistic, overridden".>
-EOF
+cp .tdd/templates/disposition-matrix-template.md \
+   .tdd/codex/disposition-matrix.md
+# Then edit: cycle_id, findings_total, model, review_phase, cross-
+# cutting observations, and REPLACE F-EXAMPLE-N with real F1/F2/...
 ```
 
 Discipline rules for the matrix:

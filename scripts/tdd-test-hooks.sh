@@ -3268,6 +3268,97 @@ rm -rf "$TMPROOT_AB"
 echo
 echo "Testing F3 (smoke tests in CI) — CI configs invoke this runner..."
 
+# F9 cycle (f9-skill-md-template-extraction): SKILL.md inlined two
+# templates that already exist (or should exist) in .tdd/templates/.
+# The inlined matrix template silently re-opened F8 (used literal `F1`
+# instead of the F-EXAMPLE-N convention).
+echo "Testing F9 (SKILL.md template extraction)..."
+
+ADJ_TEMPLATE="$PROJECT_ROOT/.tdd/templates/second-opinion-adjudication-template.md"
+MATRIX_TEMPLATE="$PROJECT_ROOT/.tdd/templates/disposition-matrix-template.md"
+SKILL_FILE="$PROJECT_ROOT/.claude/skills/second-opinion/SKILL.md"
+
+# AC 1: adjudication template file exists.
+if [ -f "$ADJ_TEMPLATE" ]; then
+  pass "F9: .tdd/templates/second-opinion-adjudication-template.md exists"
+else
+  fail "F9: adjudication template file missing at $ADJ_TEMPLATE"
+fi
+
+# AC 1b: adjudication template has the required fields.
+if [ -f "$ADJ_TEMPLATE" ]; then
+  missing=()
+  for field in date scope model diff_sha256 plan_sha256 files_in_scope findings_total adjudication_summary findings adjudicated_by; do
+    grep -q "^${field}:" "$ADJ_TEMPLATE" || missing+=("$field")
+  done
+  if [ ${#missing[@]} -eq 0 ]; then
+    pass "F9: adjudication template has all required fields"
+  else
+    fail "F9: adjudication template missing fields: ${missing[*]}"
+  fi
+else
+  fail "F9: cannot check fields — template file missing"
+fi
+
+# AC 2: SKILL.md Step 6a no longer inlines the adjudication heredoc.
+if ! grep -q 'cat > .tdd/second-opinion-completed.md <<EOF' "$SKILL_FILE"; then
+  pass "F9: SKILL.md Step 6a no longer inlines the adjudication heredoc"
+else
+  fail "F9: SKILL.md still has inline 'cat > .tdd/second-opinion-completed.md <<EOF'"
+fi
+
+# AC 4: SKILL.md Step 6b no longer inlines the matrix heredoc.
+if ! grep -q 'cat > .tdd/codex/disposition-matrix.md <<EOF' "$SKILL_FILE"; then
+  pass "F9: SKILL.md Step 6b no longer inlines the matrix heredoc"
+else
+  fail "F9: SKILL.md still has inline 'cat > .tdd/codex/disposition-matrix.md <<EOF'"
+fi
+
+# AC 3: SKILL.md references the adjudication template by path.
+if grep -q 'second-opinion-adjudication-template.md' "$SKILL_FILE"; then
+  pass "F9: SKILL.md references the adjudication template by path"
+else
+  fail "F9: SKILL.md does not reference second-opinion-adjudication-template.md"
+fi
+
+# AC 5: SKILL.md references the matrix template by path.
+if grep -q 'disposition-matrix-template.md' "$SKILL_FILE"; then
+  pass "F9: SKILL.md references the disposition matrix template by path"
+else
+  fail "F9: SKILL.md does not reference disposition-matrix-template.md"
+fi
+
+# AC 6: SKILL.md line count dropped by ≥50 lines (was 917).
+skill_lines=$(wc -l < "$SKILL_FILE")
+if [ "$skill_lines" -le 867 ]; then
+  pass "F9: SKILL.md line count dropped to $skill_lines (was 917; target ≤867)"
+else
+  fail "F9: SKILL.md still $skill_lines lines (target ≤867)"
+fi
+
+# AC 8: F8 invariant — neither SKILL.md nor the standalone matrix
+# template may carry rows matching the hook's row-count regex
+# `^\|[[:space:]]+F[0-9]+`. Codex round 2 P2: match the EXACT hook
+# regex (not a narrower literal) so any future placeholder shape
+# that the hook would count is also caught here.
+HOOK_ROW_RE='^\|[[:space:]]+F[0-9]+[[:space:]]+\|'
+if ! grep -qE "$HOOK_ROW_RE" "$SKILL_FILE"; then
+  pass "F9: SKILL.md has no rows matching hook row-count regex (F8 invariant preserved)"
+else
+  fail "F9: SKILL.md has a row matching '$HOOK_ROW_RE' — would silently false-pass row-count gate"
+fi
+
+# Codex round 1 P2: F8 invariant now lives in the standalone matrix
+# template since SKILL.md just cps it. Same hook regex applied.
+if grep -qE '^\| F-EXAMPLE-[0-9]+[[:space:]]+\| Codex' "$MATRIX_TEMPLATE" \
+   && ! grep -qE "$HOOK_ROW_RE" "$MATRIX_TEMPLATE"; then
+  pass "F9-codex: disposition-matrix-template.md uses F-EXAMPLE-N + no rows match hook regex (R1 P2 + R2 P2 closed)"
+else
+  fail "F9-codex: matrix template must use F-EXAMPLE-N (not F[0-9]+) so unedited copies don't false-pass row-count gate"
+fi
+
+echo
+
 # F3 cycle (f3-smoke-tests-in-ci): the smoke runner exists and exits
 # non-zero on failure, but neither GitHub Actions nor GitLab CI invokes
 # it. Regressions in any hook can ship because CI is the deterministic
