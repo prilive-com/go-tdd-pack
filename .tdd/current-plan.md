@@ -1,7 +1,7 @@
-# Bugfix Plan: gate-level-bypass-closure — broaden COMMITS_RE for shell wrappers + inline aliases
+# Bugfix Plan: f7-pipefail-substring-bypass — tighten pipefail detection regex
 
 Status: active
-Cycle ID: gate-level-bypass-closure
+Cycle ID: f7-pipefail-substring-bypass
 Change type: bugfix
 Tier: 1
 
@@ -17,88 +17,115 @@ Bug-elsewhere check complete: yes
 
 ## Bug
 
-Layer 0 size threshold and Tier 1 ceremony checks in
-`gate-tier1-commit.sh` are bypassed because `COMMITS_RE` only matches
-literal `git commit` at command start (or after a shell separator).
-Two known forms slip through:
+F7 from the v1.6.x review: `guard-bash-pipefail.sh` line 30's
+"pipefail is set" detection regex has two bypass classes.
 
-```
-sh -c 'git commit -a -m msg'                  # outer is `sh -c`
-git -c alias.ci='commit -a' ci -m msg          # outer is `git -c`
+```bash
+! echo "$cmd" | grep -qE 'set[[:space:]]+-o[[:space:]]+pipefail|set[[:space:]]+-[a-zA-Z]*o[a-zA-Z]*[[:space:]]|pipefail|bash[[:space:]]+-o[[:space:]]+pipefail'
 ```
 
-Origin: Codex round 8 P0 finding from the Layer-0-rescue cycle. The
-parser fixes shipped in 278d268 close all parser-level bypasses for
-literal `git commit ...` invocations, but leave these gate-level
-bypasses open.
+**Bypass A** — bare `pipefail` substring (third alternation):
+matches the literal word `pipefail` ANYWHERE in the command, even
+when it's part of a path, a grep argument, or a comment. Anyone can
+silence the gate by mentioning the word.
+
+```
+go build ./pipefail/... 2>&1 | head -10
+go test ./... 2>&1 | grep pipefail
+echo "remember pipefail"; go build ./... | head
+```
+
+All three currently exit 0 silently — the gate doesn't fire.
+
+**Bypass B** — `set -o <option>` regex too loose:
+the second alternation `set[[:space:]]+-[a-zA-Z]*o[a-zA-Z]*[[:space:]]`
+requires the cluster to end with whitespace but does NOT verify that
+`pipefail` follows. So `set -o errexit` (a different option) or
+`set -e` (which the regex allows because the cluster pattern can be
+empty around 'o') would silence the gate.
+
+```
+set -o errexit; go build ./... | head -10
+```
+
+Currently exits 0 silently.
 
 ## Reproduction
 
-With the buggy HEAD code, `sh -c 'git commit -a'` exits 0 silently
-even when staged Tier 1 file + no plan should deny:
+Direct reproduction (verified):
 
 ```
-TMPDIR=$(mktemp -d) && git init "$TMPDIR" ...
-cp .tdd/tdd-config.json "$TMPDIR/.tdd/"
-echo "package auth" > "$TMPDIR/internal/auth/handler.go"
-git add . && git commit -m initial
-echo "// edit" >> "$TMPDIR/internal/auth/handler.go"
-git add internal/auth/handler.go
-
-# Bypass form — no plan, Tier 1 staged. Expected: deny.
-echo '{"tool_input":{"command":"sh -c \"git commit -a -m sneaky\""}}' \
-  | CLAUDE_PROJECT_DIR=$TMPDIR bash .claude/hooks/gate-tier1-commit.sh
-# Actual: exit 0 silently (gate didn't fire)
+echo '{"tool_input":{"command":"go build ./pipefail/... 2>&1 | head -10"}}' \
+  | bash .claude/hooks/guard-bash-pipefail.sh
+echo "exit: $?"
+# Expected: deny + exit 2 (gate fires)
+# Actual:   exit 0 silently (bypass)
 ```
 
 ## Acceptance criteria
 
-1. `sh -c 'git commit -a'` triggers gate (currently bypasses)
-2. `bash -c`, `zsh -c`, `dash -c`, `ksh -c`, `eval` wrappers all trigger
-3. `git -c alias.ci='commit -a' ci` triggers when alias value contains `commit`
-4. Negative: `echo "git commit -m foo"` does NOT trigger (commit-as-string)
-5. Negative: `git log --grep="git commit"` does NOT trigger (grep arg)
-6. Negative: `cat file | grep "git commit"` does NOT trigger (pipe arg)
-7. Existing direct `git commit` matching unchanged — 150 baseline tests pass
-8. New smoke tests cover positive (1-3) and negative (4-6) cases
+1. `go build ./pipefail/... 2>&1 | head -10` (pipefail as path) → DENY
+2. `go test ./... 2>&1 | grep pipefail` (pipefail in grep arg) → DENY
+3. `echo "remember pipefail"; go build ./... | head` (in echo) → DENY
+4. `set -o errexit; go build ./... | head` (different `-o` option) → DENY
+5. `set -o pipefail; go build ./... | head` → ALLOW (regression preserved)
+6. `set -eo pipefail; go build ./... | head` (cluster) → ALLOW
+7. `bash -c 'set -o pipefail; go build ./... | head'` → ALLOW (in payload)
+8. `bash -o pipefail -c 'go build ./... | head'` → ALLOW (bash flag)
+9. `go build ./... | head -10` (no pipefail mentioned) → DENY (regression)
 
 ## Non-goals
 
-- Pre-configured user aliases from `.gitconfig` (`git ci -m msg` where
-  `ci` is operator-defined). Detection requires `git config --get
-  alias.<word>` per hook invocation; real but rare in threat model
-  (operator-configured, not Claude-injected). Document as known
-  limitation; defer to follow-up cycle.
-- Wrappers that read commands from files (`bash some-script.sh` where
-  the script contains `git commit`). We don't read script files.
-- `python -c '...'` or other interpreters that could shell-out. Same
-  as above — too broad to scan.
+- Detecting environment-set pipefail (`SHELLOPTS=pipefail bash -c '...'`).
+  Rare in practice; not in the spec.
+- Detecting `shopt -s` (different mechanism).
+- Cross-shell support (zsh/dash). The hook's outer Go-tool regex
+  applies to bash idioms; we keep that scope.
 
 ## Affected code
 
-- `.claude/hooks/gate-tier1-commit.sh` lines 82-85 — replace single
-  COMMITS_RE with a function that checks multiple invocation patterns
-- `scripts/tdd-test-hooks.sh` — ~10 new smoke tests
+- `.claude/hooks/guard-bash-pipefail.sh` line 30 — replace the regex
+- `scripts/tdd-test-hooks.sh` — add 9 smoke tests (one per AC)
 
 ## Test plan
 
 | Test name | Pins criterion # |
 |---|---|
-| gate_sh_c_wrapper_triggers | 1 |
-| gate_bash_c_wrapper_triggers | 2 |
-| gate_zsh_c_wrapper_triggers | 2 |
-| gate_eval_wrapper_triggers | 2 |
-| gate_inline_alias_injection_triggers | 3 |
-| gate_inline_alias_without_commit_does_not_trigger | 4 |
-| gate_echo_commit_string_does_not_trigger | 4 |
-| gate_grep_commit_string_does_not_trigger | 5 |
-| gate_pipe_grep_commit_does_not_trigger | 6 |
-| gate_existing_direct_commit_still_triggers | 7 |
+| f7_path_with_pipefail_blocked | 1 |
+| f7_grep_arg_pipefail_blocked | 2 |
+| f7_echo_with_pipefail_blocked | 3 |
+| f7_set_o_errexit_blocked | 4 |
+| f7_set_o_pipefail_allowed | 5 |
+| f7_set_eo_pipefail_allowed | 6 |
+| f7_bash_c_with_pipefail_allowed | 7 |
+| f7_bash_o_pipefail_flag_allowed | 8 |
+| f7_no_pipefail_blocked | 9 |
+
+## Minimum implementation
+
+Replace the current regex with one that requires `pipefail` to follow
+a recognised pipefail-enabling pattern, anchored to whitespace/start:
+
+```
+(^|[[:space:];&|()])-[a-zA-Z]*o[a-zA-Z]*[[:space:]]+pipefail([[:space:]]|;|&|$)
+```
+
+Covers:
+- `set -o pipefail` — `-o ` cluster (empty around o), then space, then pipefail
+- `set -eo pipefail` — `-eo` cluster, then space, then pipefail
+- `bash -o pipefail` — same shape, just different command
+- `set -e -o pipefail` — substring match anywhere
+- `set -o errexit -o pipefail` — substring match at the second `-o`
+
+Rejects:
+- bare `pipefail` (no `-o ` before it)
+- `set -o errexit` (no `pipefail` after the cluster)
+- `pipefail` as a path/arg
 
 ## Risk register
 
 | Risk | Mitigation |
 |---|---|
-| New patterns produce false positives in legitimate workflows | Keep wrapper detection narrow: must match the wrapper form AND contain `git commit` substring. Tests 4-6 guard. |
-| `git -c alias.X=commit X` regex too narrow; misses URL-encoded or quoted variants | Stick to common shell-quoting forms; document edge cases. |
-| `eval` matching might catch unrelated `eval $(...)` shell setup | The eval branch requires `git commit` substring after eval; legitimate shell setup eval doesn't typically contain `git commit`. |
+| Regex too narrow; misses `SHELLOPTS=pipefail` env-var form | Documented as out-of-scope; rare. |
+| Word `pipefail` appears in a long flag like `--with-pipefail` | The regex anchors `-o[[:space:]]+pipefail` so `--with-pipefail` (ends in pipefail without `-o ` before) doesn't match. ✓ |
+| Future bash flag for pipefail without `-o` | Add to regex when surfaced. |

@@ -540,6 +540,134 @@ else
   fail "go build without pipe should pass (got: '$out')"
 fi
 
+# F7 cycle (f7-pipefail-substring-bypass): the old "is pipefail set"
+# regex had two bypasses:
+#   (a) bare `pipefail` substring matched anywhere (path, grep arg, echo)
+#   (b) `set -o <opt>` cluster regex didn't verify `pipefail` follows
+#       (so `set -o errexit` silenced the gate).
+
+# AC 1: pipefail as a path component
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"go build ./pipefail/... 2>&1 | head -10"}}' \
+  | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/guard-bash-pipefail.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "F7: go build ./pipefail/... | head denied (path-substring bypass closed)"
+else
+  fail "F7: pipefail-as-path should not silence the gate (got: '$out')"
+fi
+
+# AC 2: pipefail as grep argument
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"go test ./... 2>&1 | grep pipefail"}}' \
+  | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/guard-bash-pipefail.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "F7: go test | grep pipefail denied (grep-arg bypass closed)"
+else
+  fail "F7: pipefail in grep arg should not silence the gate (got: '$out')"
+fi
+
+# AC 3: pipefail in echo string
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"echo \"remember pipefail\"; go build ./... | head"}}' \
+  | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/guard-bash-pipefail.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "F7: echo 'pipefail'; go build | head denied (echo-substring bypass closed)"
+else
+  fail "F7: pipefail in echo string should not silence the gate (got: '$out')"
+fi
+
+# AC 4: set -o errexit (DIFFERENT option than pipefail)
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"set -o errexit; go build ./... | head -10"}}' \
+  | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/guard-bash-pipefail.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "F7: set -o errexit (not pipefail) denied (loose set-o regex closed)"
+else
+  fail "F7: set -o errexit should not silence the pipefail gate (got: '$out')"
+fi
+
+# AC 5: regression — set -o pipefail still allowed.
+# Codex round 1 P2: assert no deny JSON, not just exit:0.
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"set -o pipefail; go build ./... | head -10"}}' \
+  | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/guard-bash-pipefail.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "pass" ] || [ -z "$out" ]; then
+  pass "F7: set -o pipefail (regression) still allowed"
+else
+  fail "F7: legitimate set -o pipefail should pass (got: '$out')"
+fi
+
+# AC 6: cluster form — set -eo pipefail
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"set -eo pipefail; go build ./... | head -10"}}' \
+  | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/guard-bash-pipefail.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "pass" ] || [ -z "$out" ]; then
+  pass "F7: set -eo pipefail (cluster) allowed"
+else
+  fail "F7: cluster set -eo pipefail should pass (got: '$out')"
+fi
+
+# AC 7: pipefail inside bash -c payload
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"bash -c \"set -o pipefail; go build ./... | head\""}}' \
+  | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/guard-bash-pipefail.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "pass" ] || [ -z "$out" ]; then
+  pass "F7: bash -c 'set -o pipefail; ...' allowed (payload check)"
+else
+  fail "F7: pipefail in bash -c payload should pass (got: '$out')"
+fi
+
+# AC 8: bash -o pipefail flag form
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"bash -o pipefail -c \"go build ./... | head\""}}' \
+  | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/guard-bash-pipefail.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "pass" ] || [ -z "$out" ]; then
+  pass "F7: bash -o pipefail -c '...' allowed (bash flag form)"
+else
+  fail "F7: bash -o pipefail flag should pass (got: '$out')"
+fi
+
+# Codex round 1 P1: -o pipefail in unrelated tool argv must NOT silence
+# the gate. printf/grep/find treating "-o pipefail" as their own args
+# doesn't enable shell pipefail.
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"printf %s -o pipefail; go build ./... 2>&1 | head -10"}}' \
+  | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/guard-bash-pipefail.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "F7-codex: printf -o pipefail does NOT silence (R1 P1 closed)"
+else
+  fail "F7-codex: printf with '-o pipefail' arg should not silence gate (got: '$out')"
+fi
+
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"grep -o pipefail README.md; go build ./... 2>&1 | head -10"}}' \
+  | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/guard-bash-pipefail.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "F7-codex: grep -o pipefail does NOT silence (R1 P1 closed)"
+else
+  fail "F7-codex: grep with '-o pipefail' should not silence gate (got: '$out')"
+fi
+
+# Set with intervening flags: set -e -u -o pipefail
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"set -e -u -o pipefail; go build ./... | head -10"}}' \
+  | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/guard-bash-pipefail.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "pass" ] || [ -z "$out" ]; then
+  pass "F7-codex: set -e -u -o pipefail (intervening flags) allowed"
+else
+  fail "F7-codex: set with multiple flags before -o pipefail should pass (got: '$out')"
+fi
+
+# AC 9: regression — go build | head with NO pipefail mention denied
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"go build ./internal/foo/... | head -10"}}' \
+  | timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/guard-bash-pipefail.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "F7: go build | head with no pipefail denied (regression preserved)"
+else
+  fail "F7: pipe with no pipefail should be denied (got: '$out')"
+fi
+
 echo
 echo "Testing 4-marker model + alias + phase-aware test policy (require-tdd-state.sh)..."
 

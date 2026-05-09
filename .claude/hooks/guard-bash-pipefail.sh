@@ -26,8 +26,39 @@ cmd="$(jq -r '.tool_input.command // empty' <<<"$stdin" 2>/dev/null || echo '')"
 # Only inspect commands that involve a Go verification tool.
 if echo "$cmd" | grep -qE '(^|[[:space:]]|;|&|\|)(go|gofmt|goimports|golangci-lint|staticcheck|govulncheck|deadcode|unparam)[[:space:]]+(build|test|vet|run|mod|tidy|install|version|env)'; then
   # Inspect: is there a pipe AND no pipefail set?
+  #
+  # F7 fix (cycle f7-pipefail-substring-bypass): the prior regex had
+  # bypass classes — bare `pipefail` substring (matched anywhere),
+  # loose `set -o <opt>` (didn't verify pipefail follows), and the
+  # initial F7 fix was still too loose: `printf -o pipefail`, `grep -o
+  # pipefail`, etc. would silence the gate because `-o pipefail` appears
+  # in an unrelated tool's argv (Codex round 1 P1).
+  #
+  # New regex: require `set` or `bash` IMMEDIATELY before the cluster
+  # (with optional intervening short flags like -e, -u). Covers:
+  #   set -o pipefail            set + -o pipefail
+  #   set -eo pipefail           set + -eo pipefail (cluster)
+  #   set -e -o pipefail         set + -e + -o pipefail
+  #   set -e -u -o pipefail      set + -e + -u + -o pipefail
+  #   bash -o pipefail -c '...'  bash + -o pipefail
+  #   bash -l -o pipefail -c     bash + -l + -o pipefail
+  # Rejects:
+  #   bare `pipefail` substring
+  #   `set -o errexit` (no pipefail after cluster)
+  #   `printf -o pipefail` / `grep -o pipefail` (not set/bash)
+  #   `--with-pipefail` long flag
+  #
+  # KNOWN LIMIT (out of scope for F7): substring match against quote
+  # boundaries means `echo "set -o pipefail before running tests"` would
+  # silence the gate because the literal text inside the quoted echo arg
+  # matches the regex. The anchor includes `"` and `'` so legitimate
+  # `bash -c "set -o pipefail; ..."` works, which means quoted text
+  # in OTHER commands can also match. This is the same architectural
+  # class as the gate-level cycle (no shell-aware tokenisation here).
+  # Documented; follow-up cycle if needed. Threat model: contrived
+  # bypass; Claude doesn't typically craft such echo strings.
   if echo "$cmd" | grep -q '|' \
-     && ! echo "$cmd" | grep -qE 'set[[:space:]]+-o[[:space:]]+pipefail|set[[:space:]]+-[a-zA-Z]*o[a-zA-Z]*[[:space:]]|pipefail|bash[[:space:]]+-o[[:space:]]+pipefail'; then
+     && ! echo "$cmd" | grep -qE '(^|[[:space:];&|()"'"'"'])(set|bash)([[:space:]]+-[a-zA-Z]+)*[[:space:]]+-[a-zA-Z]*o[a-zA-Z]*[[:space:]]+pipefail([[:space:]]|;|&|$)'; then
     cat <<'JSON'
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Verification command pipes Go output through another command without 'set -o pipefail'. The exit code of the Go tool is masked by the downstream command (e.g. 'head' returns 0 even when 'go build' failed). Real build failures look like successes. Wrap in: bash -c 'set -o pipefail; <command> 2>&1 | head -20'"}}
 JSON
