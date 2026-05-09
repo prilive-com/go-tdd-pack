@@ -147,25 +147,128 @@ is_always_allowed_path() {
   return 1
 }
 
+# Reject a target containing path-traversal segments (`..`). Without
+# this, prefix-only classification is bypassable: ".tdd/../internal/x.go"
+# matches `.tdd/*` but Bash resolves it to `internal/x.go` and writes
+# production code. Codex round-1 P0 (F1 traversal).
+_target_has_traversal() {
+  case "$1" in
+    *..*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Test whether a target path is skill-internal (hook state, config, etc.).
+# These paths are not production code; the skill writes them as part of
+# its own workflow and should not trigger the mutating-Bash gate.
+# F1 closure (combined v1.6.0 review): skill self-writes to .tdd/codex/
+# round1.json etc. were deadlocking because the gate required adjudication
+# while the skill was in the act of writing the adjudication.
+# /dev/* covers /dev/null and other device files (legitimate stderr
+# redirect targets like `cat > .tdd/foo 2>/dev/null`).
+_target_is_skill_internal() {
+  local target="$1"
+  case "$target" in
+    /dev/*) return 0 ;;
+    .tdd/*|.claude/*|.second-opinion/*) return 0 ;;
+    */.tdd/*|*/.claude/*|*/.second-opinion/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Extract ALL redirect targets from a command. Critical for bash semantics:
+# `cat > a > b` opens AND truncates `a`, then redirects stdout to `b` —
+# checking only the last target lets a production write slip through.
+# Codex round-1 P0 (F2 multi-redirect).
+_extract_all_redirect_targets() {
+  echo "$1" | awk '
+    {
+      n = split($0, parts, /[[:space:]]*>+[[:space:]]*/)
+      for (i = 2; i <= n; i++) {
+        target = parts[i]
+        sub(/^[[:space:]]+/, "", target)
+        sub(/[[:space:]].*$/, "", target)
+        if (length(target) > 0) print target
+      }
+    }'
+}
+
+# Extract ALL tee positional targets — tee writes to every operand,
+# not just the first. Codex round-1 P1 (F3 multi-tee).
+_extract_all_tee_targets() {
+  echo "$1" | awk '{
+    for (i = 1; i <= NF; i++) {
+      if ($i == "tee") {
+        for (j = i + 1; j <= NF; j++) {
+          tok = $j
+          if (tok == "|" || tok == "&" || tok == ";" || tok == "&&" || tok == "||") exit
+          if (tok ~ /^[0-9]*>/) exit
+          if (substr(tok, 1, 1) == "-") continue
+          print tok
+        }
+        exit
+      }
+    }
+  }'
+}
+
+# Test whether ALL extracted targets are skill-internal AND none has
+# path traversal. Returns 0 if all safe, 1 if any unsafe (or empty list,
+# which means the extractor saw no concrete target — fail closed).
+_all_targets_safe() {
+  local targets="$1"
+  [[ -z "$targets" ]] && return 1
+  local t
+  while IFS= read -r t; do
+    [[ -z "$t" ]] && continue
+    _target_has_traversal "$t" && return 1
+    _target_is_skill_internal "$t" || return 1
+  done <<< "$targets"
+  return 0
+}
+
+# Helper: detection-with-target-check. Runs a regex; if it matches, also
+# checks ALL targets. Returns 0 (mutating) if regex matches AND any
+# target is unsafe (production path or contains traversal). Returns 1
+# (not mutating) if regex doesn't match OR every target is safe.
+#
+# Pass extractor function name as third arg (default _extract_all_redirect_targets).
+_redirect_mutating() {
+  local cmd="$1" pattern="$2" extractor="${3:-_extract_all_redirect_targets}"
+  echo "$cmd" | grep -Eq "$pattern" || return 1
+  local targets; targets="$("$extractor" "$cmd")"
+  if _all_targets_safe "$targets"; then
+    return 1
+  fi
+  return 0
+}
+
 # Bash mutating-pattern detection. Without these, Claude can bypass via
 # `cat > file.go`, `sed -i`, `gofmt -w`, etc.
 is_bash_mutating() {
   local cmd="$1"
+  # In-place edits — no redirect target to check; always mutating.
   echo "$cmd" | grep -Eq '(^|[;&|])[[:space:]]*sed[[:space:]]+-i\b'                               && return 0
   echo "$cmd" | grep -Eq '(^|[;&|])[[:space:]]*perl[[:space:]]+-i\b'                              && return 0
   echo "$cmd" | grep -Eq '(^|[;&|])[[:space:]]*gofmt[[:space:]]+-w\b'                             && return 0
   echo "$cmd" | grep -Eq '(^|[;&|])[[:space:]]*goimports[[:space:]]+-w\b'                         && return 0
   echo "$cmd" | grep -Eq '(^|[;&|])[[:space:]]*go[[:space:]]+mod[[:space:]]+(tidy|edit|init)\b'    && return 0
   echo "$cmd" | grep -Eq '(^|[;&|])[[:space:]]*go[[:space:]]+get\b'                               && return 0
-  # cat > file or cat foo > bar — but NOT cat foo 2>/dev/null (numbered
-  # fd redirect, read-only). Char immediately before `>` must NOT be a
-  # digit; that excludes 1>, 2>, etc. while still catching cat > file
-  # (space before >) and cat foo > bar (space before >). Reported by the
-  # parasitoid trial.
-  echo "$cmd" | grep -Eq '(^|[;&|])[[:space:]]*cat[[:space:]]+([^|<]*[^|<0-9])?>+[[:space:]]*[^&[:space:]]'  && return 0
-  echo "$cmd" | grep -Eq '(^|[;&|])[[:space:]]*tee[[:space:]]+[^|]'                               && return 0
   echo "$cmd" | grep -Eq '(^|[;&|])[[:space:]]*truncate\b'                                        && return 0
-  echo "$cmd" | grep -Eq '>>?[[:space:]]*[^&[:space:]]+\.(go|sh|py|ts|js|json|yml|yaml|toml)([[:space:]]|$)' && return 0
+
+  # Redirect-style mutations. Target is extracted; skill-internal paths
+  # (.tdd/, .claude/, .second-opinion/) are allowed so the skill can
+  # write its own artifacts without deadlock. Production targets still
+  # trip the gate.
+  #
+  # cat > file (with the F2-from-parasitoid-trial digit-before-> guard
+  # so cat foo 2>/dev/null doesn't false-positive).
+  _redirect_mutating "$cmd" '(^|[;&|])[[:space:]]*cat[[:space:]]+([^|<]*[^|<0-9])?>+[[:space:]]*[^&[:space:]]'  && return 0
+  # tee path (path-aware now; uses tee-specific extractor since tee writes
+  # to its positional arg, not via `>` redirect; checks ALL operands)
+  _redirect_mutating "$cmd" '(^|[;&|])[[:space:]]*tee[[:space:]]+[^|]' _extract_all_tee_targets  && return 0
+  # >> file.ext (any redirect to source-extension files)
+  _redirect_mutating "$cmd" '>>?[[:space:]]*[^&[:space:]]+\.(go|sh|py|ts|js|json|yml|yaml|toml)([[:space:]]|$)'  && return 0
   return 1
 }
 

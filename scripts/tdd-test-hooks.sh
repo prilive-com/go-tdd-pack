@@ -1773,6 +1773,134 @@ else
 fi
 rm -rf "$TMPROOT_PG"
 
+# F1 (combined v1.6.0 review): is_bash_mutating must NOT fire on
+# skill-internal targets. Skill writes to .tdd/codex/round1.json,
+# .tdd/second-opinion-completed.md, etc. via cat > path. Path-aware
+# extraction allows skill-internal redirects while preserving
+# enforcement on production targets.
+TMPROOT_F1=$(mktemp -d)
+mkdir -p "$TMPROOT_F1/.tdd" "$TMPROOT_F1/.claude"
+
+# AC 5: cat > .tdd/codex/round1.json → allow (skill self-write)
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"cat > .tdd/codex/round1.json"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "pass" ] || [ -z "$out" ]; then
+  pass "F1: cat > .tdd/codex/round1.json allowed (skill self-write)"
+else
+  fail "F1: skill self-write to .tdd/ should be allowed (got: '$out')"
+fi
+
+# AC 6: cat > .tdd/second-opinion-completed.md → allow
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"cat > .tdd/second-opinion-completed.md"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "pass" ] || [ -z "$out" ]; then
+  pass "F1: cat > .tdd/second-opinion-completed.md allowed (skill writes adjudication)"
+else
+  fail "F1: skill adjudication write should be allowed (got: '$out')"
+fi
+
+# AC 7: cat > internal/auth/handler.go → still deny (production)
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"cat > internal/auth/handler.go <<EOF\npackage auth\nEOF"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "F1: cat > internal/auth/handler.go still denied (production target preserved)"
+else
+  fail "F1: production cat redirect should still deny (got: '$out')"
+fi
+
+# AC 8: tee .tdd/research-packet.md → allow
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"tee .tdd/research-packet.md"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "pass" ] || [ -z "$out" ]; then
+  pass "F1: tee .tdd/research-packet.md allowed (skill writes research packet)"
+else
+  fail "F1: tee to .tdd/ should be allowed (got: '$out')"
+fi
+
+# AC 9: tee internal/auth/handler.go → still deny (production)
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"tee internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "F1: tee internal/auth/handler.go still denied (production target preserved)"
+else
+  fail "F1: production tee should still deny (got: '$out')"
+fi
+
+# AC 10: { ... } > .tdd/codex/disposition-matrix.md → allow (block-redirect form)
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"{ echo a; echo b; } > .tdd/codex/disposition-matrix.md"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "pass" ] || [ -z "$out" ]; then
+  pass "F1: { ... } > .tdd/codex/disposition-matrix.md allowed (block-redirect skill write)"
+else
+  fail "F1: block-redirect to .tdd/ should be allowed (got: '$out')"
+fi
+
+# Codex round-1 finding (P0): path-traversal bypass.
+# .tdd/../internal/x.go matches the .tdd/* prefix but Bash resolves it
+# to internal/x.go and writes production code.
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"cat > .tdd/../internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "F1-codex: traversal bypass .tdd/../internal/x.go denied"
+else
+  fail "F1-codex: traversal bypass via .tdd/.. should deny (got: '$out')"
+fi
+
+# Codex round-1 finding (P0): multi-redirect bypass.
+# `cat > internal/x.go > .tdd/safe.json` — bash truncates internal/x.go
+# (first redirect) before redirecting stdout to .tdd/safe.json.
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"cat > internal/auth/handler.go > .tdd/safe.json"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "F1-codex: multi-redirect with production first target denied"
+else
+  fail "F1-codex: multi-redirect production-first should deny (got: '$out')"
+fi
+
+# Codex round-1 finding (P1): multi-tee bypass.
+# `tee .tdd/safe.md internal/x.go` — tee writes to ALL positional args,
+# not just the first.
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"tee .tdd/safe.md internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "F1-codex: multi-tee with second production target denied"
+else
+  fail "F1-codex: multi-tee with production target should deny (got: '$out')"
+fi
+
+# Codex round-1 sanity: legitimate stderr to /dev/null must NOT regress.
+# The new ALL-redirects extractor sees both `.tdd/foo` and `/dev/null`;
+# /dev/* in _target_is_skill_internal handles this case.
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"cat > .tdd/foo 2>/dev/null"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "pass" ] || [ -z "$out" ]; then
+  pass "F1-codex: cat > .tdd/foo 2>/dev/null still allowed"
+else
+  fail "F1-codex: stderr to /dev/null should not block (got: '$out')"
+fi
+
+rm -rf "$TMPROOT_F1"
+
 # AI-bloat hook: must NOT fire on .md-only edits with TODO text. The
 # old version scanned ALL files; markdown spec/red-proof commits with
 # legitimate TODO discussion were tripping the advisory.
