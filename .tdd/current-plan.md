@@ -1,9 +1,9 @@
-# Bugfix Plan: f7-pipefail-substring-bypass — tighten pipefail detection regex
+# Bugfix Plan: f3-smoke-tests-in-ci — wire scripts/tdd-test-hooks.sh into CI
 
 Status: active
-Cycle ID: f7-pipefail-substring-bypass
-Change type: bugfix
-Tier: 1
+Cycle ID: f3-smoke-tests-in-ci
+Change type: bugfix (gap)
+Tier: 0 (CI config files are not Tier 1 path)
 
 <!-- TDD ceremony markers. Set each ONLY after the matching operator APPROVED reply. -->
 Bug reproduced: yes
@@ -17,115 +17,109 @@ Bug-elsewhere check complete: yes
 
 ## Bug
 
-F7 from the v1.6.x review: `guard-bash-pipefail.sh` line 30's
-"pipefail is set" detection regex has two bypass classes.
+`scripts/tdd-test-hooks.sh` is the smoke-test suite for every hook in
+`.claude/hooks/`. It now has 201 tests covering require-tdd-state,
+require-second-opinion, gate-tier1-commit, guard-bash-pipefail,
+guard-dangerous-bash, scan-for-secrets, ai-bloat, etc. The runner
+exits non-zero on any failure (line 1 `set -euo pipefail`; final line
+`[ $FAIL -eq 0 ]`). `make tdd-test` is already wired up.
 
-```bash
-! echo "$cmd" | grep -qE 'set[[:space:]]+-o[[:space:]]+pipefail|set[[:space:]]+-[a-zA-Z]*o[a-zA-Z]*[[:space:]]|pipefail|bash[[:space:]]+-o[[:space:]]+pipefail'
-```
+But neither `.github/workflows/ci.yml` nor `.gitlab-ci.yml` runs it.
+Regressions in any hook ship to consumers because:
+- The pre-commit hooks of the local dev loop are advisory (Claude
+  may bypass; gates use `permissionDecision`, not blocking shell rc)
+- CI is the deterministic floor (per `.gitlab-ci.yml` header comment)
+- CI doesn't run the suite — so the floor leaks
 
-**Bypass A** — bare `pipefail` substring (third alternation):
-matches the literal word `pipefail` ANYWHERE in the command, even
-when it's part of a path, a grep argument, or a comment. Anyone can
-silence the gate by mentioning the word.
-
-```
-go build ./pipefail/... 2>&1 | head -10
-go test ./... 2>&1 | grep pipefail
-echo "remember pipefail"; go build ./... | head
-```
-
-All three currently exit 0 silently — the gate doesn't fire.
-
-**Bypass B** — `set -o <option>` regex too loose:
-the second alternation `set[[:space:]]+-[a-zA-Z]*o[a-zA-Z]*[[:space:]]`
-requires the cluster to end with whitespace but does NOT verify that
-`pipefail` follows. So `set -o errexit` (a different option) or
-`set -e` (which the regex allows because the cluster pattern can be
-empty around 'o') would silence the gate.
-
-```
-set -o errexit; go build ./... | head -10
-```
-
-Currently exits 0 silently.
+This was caught in this cycle's planning: the F2-cycle Layer 0 fix
+sat in working tree because local smoke ran against working tree;
+CI would have caught the unstaged-fix mismatch.
 
 ## Reproduction
 
-Direct reproduction (verified):
-
-```
-echo '{"tool_input":{"command":"go build ./pipefail/... 2>&1 | head -10"}}' \
-  | bash .claude/hooks/guard-bash-pipefail.sh
-echo "exit: $?"
-# Expected: deny + exit 2 (gate fires)
-# Actual:   exit 0 silently (bypass)
-```
+Confirmed by inspection: `grep -l tdd-test-hooks .github/workflows/
+.gitlab-ci.yml` returns nothing. Neither config invokes the runner.
 
 ## Acceptance criteria
 
-1. `go build ./pipefail/... 2>&1 | head -10` (pipefail as path) → DENY
-2. `go test ./... 2>&1 | grep pipefail` (pipefail in grep arg) → DENY
-3. `echo "remember pipefail"; go build ./... | head` (in echo) → DENY
-4. `set -o errexit; go build ./... | head` (different `-o` option) → DENY
-5. `set -o pipefail; go build ./... | head` → ALLOW (regression preserved)
-6. `set -eo pipefail; go build ./... | head` (cluster) → ALLOW
-7. `bash -c 'set -o pipefail; go build ./... | head'` → ALLOW (in payload)
-8. `bash -o pipefail -c 'go build ./... | head'` → ALLOW (bash flag)
-9. `go build ./... | head -10` (no pipefail mentioned) → DENY (regression)
+1. `.github/workflows/ci.yml` has a job that runs
+   `bash scripts/tdd-test-hooks.sh` (or `make tdd-test`).
+2. The GitHub job runs on the same triggers as the existing `verify`
+   job (push to main + pull_request).
+3. The GitHub job installs the runtime deps the suite needs (`jq`,
+   `git` already present on ubuntu-latest, `bash`).
+4. `.gitlab-ci.yml` has an equivalent job in the `verify` stage.
+5. The GitLab job uses an image with `bash`, `jq`, `git` available
+   (the existing `golang:1.26-alpine` + apk install pattern works).
+6. Both jobs FAIL the build when the smoke runner exits non-zero.
+   (Default behavior for both CIs; no special flag needed.)
+7. Smoke test: the new YAML configs parse cleanly (yamllint or
+   `python -c 'import yaml; yaml.safe_load(open(...))'`).
+8. Smoke test: each YAML config invokes the smoke runner (grep for
+   `tdd-test-hooks` substring).
 
 ## Non-goals
 
-- Detecting environment-set pipefail (`SHELLOPTS=pipefail bash -c '...'`).
-  Rare in practice; not in the spec.
-- Detecting `shopt -s` (different mechanism).
-- Cross-shell support (zsh/dash). The hook's outer Go-tool regex
-  applies to bash idioms; we keep that scope.
+- Running the smoke suite in BOTH GitHub and GitLab in production;
+  the README says "delete whichever you don't need" — this cycle just
+  ensures both work.
+- Splitting the smoke suite into per-hook jobs for parallelism. The
+  whole suite runs in <60s currently; no parallelism needed yet.
+- Adding new tests. This cycle wires existing tests into CI.
 
 ## Affected code
 
-- `.claude/hooks/guard-bash-pipefail.sh` line 30 — replace the regex
-- `scripts/tdd-test-hooks.sh` — add 9 smoke tests (one per AC)
+- `.github/workflows/ci.yml` — add `tdd-test-hooks` job
+- `.gitlab-ci.yml` — add `tdd-test-hooks` job
+- `scripts/tdd-test-hooks.sh` — add 2 self-tests (AC 7, 8) at the end
 
 ## Test plan
 
 | Test name | Pins criterion # |
 |---|---|
-| f7_path_with_pipefail_blocked | 1 |
-| f7_grep_arg_pipefail_blocked | 2 |
-| f7_echo_with_pipefail_blocked | 3 |
-| f7_set_o_errexit_blocked | 4 |
-| f7_set_o_pipefail_allowed | 5 |
-| f7_set_eo_pipefail_allowed | 6 |
-| f7_bash_c_with_pipefail_allowed | 7 |
-| f7_bash_o_pipefail_flag_allowed | 8 |
-| f7_no_pipefail_blocked | 9 |
+| f3_github_workflow_yaml_valid | 7 |
+| f3_github_workflow_invokes_smoke_runner | 8 |
+| f3_gitlab_yaml_valid | 7 |
+| f3_gitlab_invokes_smoke_runner | 8 |
+
+(AC 1-6 are config presence/behavior; verified by AC 7-8 tests + manual
+inspection of the resulting YAML.)
 
 ## Minimum implementation
 
-Replace the current regex with one that requires `pipefail` to follow
-a recognised pipefail-enabling pattern, anchored to whitespace/start:
+### `.github/workflows/ci.yml`
 
+Add after the `verify` job:
+
+```yaml
+  hook-smoke-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Run hook smoke suite
+        run: bash scripts/tdd-test-hooks.sh
 ```
-(^|[[:space:];&|()])-[a-zA-Z]*o[a-zA-Z]*[[:space:]]+pipefail([[:space:]]|;|&|$)
+
+### `.gitlab-ci.yml`
+
+Add to the `verify` stage:
+
+```yaml
+hook-smoke-tests:
+  stage: verify
+  script:
+    - bash scripts/tdd-test-hooks.sh
 ```
 
-Covers:
-- `set -o pipefail` — `-o ` cluster (empty around o), then space, then pipefail
-- `set -eo pipefail` — `-eo` cluster, then space, then pipefail
-- `bash -o pipefail` — same shape, just different command
-- `set -e -o pipefail` — substring match anywhere
-- `set -o errexit -o pipefail` — substring match at the second `-o`
-
-Rejects:
-- bare `pipefail` (no `-o ` before it)
-- `set -o errexit` (no `pipefail` after the cluster)
-- `pipefail` as a path/arg
+(`default.before_script` already installs bash + jq + git in alpine.)
 
 ## Risk register
 
 | Risk | Mitigation |
 |---|---|
-| Regex too narrow; misses `SHELLOPTS=pipefail` env-var form | Documented as out-of-scope; rare. |
-| Word `pipefail` appears in a long flag like `--with-pipefail` | The regex anchors `-o[[:space:]]+pipefail` so `--with-pipefail` (ends in pipefail without `-o ` before) doesn't match. ✓ |
-| Future bash flag for pipefail without `-o` | Add to regex when surfaced. |
+| Smoke suite has external deps not in CI image (codex, etc.) | Verified: hooks pass through when codex is absent. The smoke tests don't invoke codex directly. |
+| Suite is slow (>5min) and bloats CI time | Local run is <60s; ubuntu-latest should match. If too slow, follow-up cycle to parallelise. |
+| Tests reference $HOME or absolute paths | Verified: `PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"` is used; no hardcoded user paths. |
+| Tests depend on host git config | Tests use `git config user.email/name` inside test fixtures; safe in CI. |

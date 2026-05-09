@@ -2832,6 +2832,63 @@ fi
 rm -rf "$TMPROOT_AB"
 
 echo
+echo "Testing F3 (smoke tests in CI) — CI configs invoke this runner..."
+
+# F3 cycle (f3-smoke-tests-in-ci): the smoke runner exists and exits
+# non-zero on failure, but neither GitHub Actions nor GitLab CI invokes
+# it. Regressions in any hook can ship because CI is the deterministic
+# floor (per .gitlab-ci.yml header) but the floor doesn't include this
+# suite.
+
+GITHUB_CI="$PROJECT_ROOT/.github/workflows/ci.yml"
+GITLAB_CI="$PROJECT_ROOT/.gitlab-ci.yml"
+
+# AC 7 + 8 for GitHub Actions. Codex round 2 P2: filter comment-only
+# lines (^[[:space:]]*#) before grepping so the docstring above the
+# job (which mentions tdd-test-hooks.sh) doesn't false-positive when
+# the actual run line is removed.
+if [ -f "$GITHUB_CI" ]; then
+  if python3 -c "import yaml" 2>/dev/null; then
+    if python3 -c "import yaml,sys; yaml.safe_load(open('$GITHUB_CI'))" 2>/dev/null; then
+      pass "F3: .github/workflows/ci.yml parses as valid YAML"
+    else
+      fail "F3: .github/workflows/ci.yml has YAML syntax errors"
+    fi
+  else
+    pass "F3: .github/workflows/ci.yml YAML check skipped (no python3 yaml)"
+  fi
+  if grep -v '^[[:space:]]*#' "$GITHUB_CI" \
+       | grep -qE 'bash[[:space:]]+scripts/tdd-test-hooks\.sh|make[[:space:]]+tdd-test'; then
+    pass "F3: .github/workflows/ci.yml invokes the smoke runner (non-comment line)"
+  else
+    fail "F3: .github/workflows/ci.yml does NOT invoke scripts/tdd-test-hooks.sh"
+  fi
+else
+  fail "F3: .github/workflows/ci.yml missing — cycle assumes GitHub config exists"
+fi
+
+# AC 7 + 8 for GitLab CI
+if [ -f "$GITLAB_CI" ]; then
+  if python3 -c "import yaml" 2>/dev/null; then
+    if python3 -c "import yaml,sys; yaml.safe_load(open('$GITLAB_CI'))" 2>/dev/null; then
+      pass "F3: .gitlab-ci.yml parses as valid YAML"
+    else
+      fail "F3: .gitlab-ci.yml has YAML syntax errors"
+    fi
+  else
+    pass "F3: .gitlab-ci.yml YAML check skipped (no python3 yaml)"
+  fi
+  if grep -v '^[[:space:]]*#' "$GITLAB_CI" \
+       | grep -qE 'bash[[:space:]]+scripts/tdd-test-hooks\.sh|make[[:space:]]+tdd-test'; then
+    pass "F3: .gitlab-ci.yml invokes the smoke runner (non-comment line)"
+  else
+    fail "F3: .gitlab-ci.yml does NOT invoke scripts/tdd-test-hooks.sh"
+  fi
+else
+  fail "F3: .gitlab-ci.yml missing — cycle assumes GitLab config exists"
+fi
+
+echo
 echo "Self-test: timeout wrapper kills a hanging hook within budget..."
 TMPHOOK="$(mktemp)"
 cat > "$TMPHOOK" <<'HANG'

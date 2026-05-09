@@ -50,6 +50,24 @@ test:
     - go test -race -count=1 ./...
   coverage: '/coverage: \d+\.\d+%/'
 
+hook-smoke-tests:
+  # F3: run scripts/tdd-test-hooks.sh in CI. The 200+ smoke tests
+  # cover every hook in .claude/hooks/ (require-tdd-state,
+  # require-second-opinion, gate-tier1-commit, guard-bash-pipefail,
+  # guard-dangerous-bash, scan-for-secrets, ai-bloat, etc.). The
+  # runner exits non-zero on any failure (final line: [ $FAIL -eq 0 ]).
+  # Without this job, hook regressions can land — caught by the
+  # F2-cycle Layer-0 leftover where local smoke ran against working
+  # tree but the committed code was actually broken.
+  stage: verify
+  before_script:
+    # Override default before_script to add python3 + py3-yaml for the
+    # F3 self-tests that validate the CI YAML files (Codex round 1 P2).
+    - apk add --no-cache git make bash jq python3 py3-yaml
+    - go version
+  script:
+    - bash scripts/tdd-test-hooks.sh
+
 staticcheck:
   stage: verify
   script:

@@ -60,6 +60,26 @@ jobs:
         with:
           version: latest
 
+  hook-smoke-tests:
+    # F3: run scripts/tdd-test-hooks.sh in CI. The 200+ smoke tests
+    # cover every hook in .claude/hooks/ (require-tdd-state,
+    # require-second-opinion, gate-tier1-commit, guard-bash-pipefail,
+    # guard-dangerous-bash, scan-for-secrets, ai-bloat, etc.). The
+    # runner exits non-zero on any failure (final line: [ $FAIL -eq 0 ]).
+    # Without this job, hook regressions can land — caught by the
+    # F2-cycle Layer-0 leftover where local smoke ran against working
+    # tree but the committed code was actually broken.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install jq + python3-yaml
+        # python3-yaml is needed for the F3 self-tests that validate
+        # the CI YAML files. Without it, the self-tests skip silently
+        # (Codex round 1 P2: skip-as-pass hides genuine YAML errors).
+        run: sudo apt-get update && sudo apt-get install -y jq python3-yaml
+      - name: Run hook smoke suite
+        run: bash scripts/tdd-test-hooks.sh
+
   security:
     runs-on: ubuntu-latest
     steps:
