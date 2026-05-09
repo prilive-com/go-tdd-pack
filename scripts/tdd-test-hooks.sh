@@ -1436,6 +1436,96 @@ fi
 rm -rf "$TMPROOT_F4"
 
 echo
+echo "Testing size-threshold commit gate (cycle size-threshold-commit-gate)..."
+
+# Layer-0: any commit with churn > threshold requires fresh /second-opinion
+# adjudication, regardless of Tier 1/cycle state. Catches large refactors
+# on non-Tier-1 paths that the Tier-1-specific gate misses.
+
+TMPROOT_SZ=$(mktemp -d)
+git init -q "$TMPROOT_SZ"
+( cd "$TMPROOT_SZ" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMPROOT_SZ/.tdd"
+cp .tdd/tdd-config.json "$TMPROOT_SZ/.tdd/"
+echo "initial" > "$TMPROOT_SZ/README.md"
+( cd "$TMPROOT_SZ" && git add . && git commit -q -m initial )
+
+# Helper: set the threshold in the fixture's tdd-config.json.
+sz_set_threshold() {
+  local n="$1"
+  jq ".second_opinion.size_threshold_lines = ${n}" \
+    "$TMPROOT_SZ/.tdd/tdd-config.json" \
+    > "$TMPROOT_SZ/.tdd/tdd-config.json.tmp"
+  mv "$TMPROOT_SZ/.tdd/tdd-config.json.tmp" "$TMPROOT_SZ/.tdd/tdd-config.json"
+}
+
+# Helper: stage a file with N lines added.
+sz_stage_lines() {
+  local count="$1" path="${2:-bigfile.txt}"
+  : > "$TMPROOT_SZ/$path"
+  for i in $(seq 1 "$count"); do
+    echo "line $i" >> "$TMPROOT_SZ/$path"
+  done
+  ( cd "$TMPROOT_SZ" && git add "$path" )
+}
+
+# Test: commit > threshold without adjudication → deny.
+# Pinned to acceptance criterion 9.
+sz_set_threshold 50
+sz_stage_lines 80
+out=$(echo '{"tool_input":{"command":"git commit -m \"chore: big change\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "size_threshold: 80-line commit without adjudication → deny"
+else
+  fail "size_threshold: large commit should require adjudication (got: $out)"
+fi
+
+# Test: commit ≤ threshold without adjudication → allow.
+# Pinned to acceptance criterion 10.
+( cd "$TMPROOT_SZ" && git restore --staged bigfile.txt 2>/dev/null && rm -f bigfile.txt )
+sz_stage_lines 10 small.txt
+out=$(echo '{"tool_input":{"command":"git commit -m \"chore: tiny\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "size_threshold: 10-line commit (≤ threshold) allowed without adjudication"
+else
+  fail "size_threshold: small commit should pass (got: '$out')"
+fi
+
+# Test: large commit WITH fresh adjudication → allow.
+# Pinned to acceptance criterion 11.
+( cd "$TMPROOT_SZ" && git restore --staged small.txt 2>/dev/null && rm -f small.txt )
+sz_stage_lines 80 bigfile2.txt
+touch "$TMPROOT_SZ/.tdd/second-opinion-completed.md"
+out=$(echo '{"tool_input":{"command":"git commit -m \"chore: big with review\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "size_threshold: large commit with fresh adjudication allowed"
+else
+  fail "size_threshold: large+adjudicated commit should pass (got: '$out')"
+fi
+
+# Test: threshold = 0 disables the layer.
+# Pinned to acceptance criterion 12.
+rm -f "$TMPROOT_SZ/.tdd/second-opinion-completed.md"
+sz_set_threshold 0
+out=$(echo '{"tool_input":{"command":"git commit -m \"chore: big with disabled gate\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "size_threshold: threshold=0 disables layer (large commit allowed)"
+else
+  fail "size_threshold: 0 should disable (got: '$out')"
+fi
+
+rm -rf "$TMPROOT_SZ"
+
+echo
 echo "Testing layer-1 vs layer-2 split (guards fire independent of TDD cycle)..."
 
 # Pack-self dogfooding finding (2026-05-08): guards were dormant on commits

@@ -182,6 +182,69 @@ glob_to_regex() {
   printf '^%s$\n' "$g"
 }
 
+# ---- LAYER 0: Size threshold (project-wide, always fire) -----------------
+#
+# Any commit with churn (added + removed lines) above
+# `second_opinion.size_threshold_lines` requires a fresh
+# /second-opinion adjudication. Fires regardless of TDD cycle state or
+# Tier 1 path matching — catches large refactors on non-Tier-1 paths
+# that the Tier-1-specific gate misses.
+#
+# Default threshold: 50 lines. Set to 0 (or negative) in tdd-config.json
+# to disable the layer entirely.
+#
+# Origin: cycle size-threshold-commit-gate (2026-05-08). Triggered by the
+# observation that the gate-tier1-commit.sh refactor (commit 31c5add,
+# 280-line bash refactor) shipped without /second-opinion review,
+# introducing two bugs (red() bypass + broad COMMITS_RE) that another
+# reviewer caught later via D-SO-04 and D-SO-05. Layer 0 closes the
+# class: substantial commits cannot land without cross-model review,
+# regardless of which paths they touch.
+
+SIZE_THRESHOLD="$(jq -r '.second_opinion.size_threshold_lines // 50' "$CONFIG" 2>/dev/null || echo 50)"
+
+if [[ "${SIZE_THRESHOLD:-0}" -gt 0 ]]; then
+  CHURN="$(git diff --cached --numstat 2>/dev/null \
+    | awk '{added+=$1; removed+=$2} END {print added+removed+0}')"
+  if [[ "${CHURN:-0}" -gt "$SIZE_THRESHOLD" ]]; then
+    adj_fresh=false
+    if [[ -f "$ADJUDICATION" ]] \
+       && [[ -n "$(find "$ADJUDICATION" -mmin -60 -print 2>/dev/null)" ]]; then
+      adj_fresh=true
+    fi
+    if [[ "$adj_fresh" != "true" ]]; then
+      audit "deny" "size_threshold_no_adjudication:${CHURN}>${SIZE_THRESHOLD}"
+      cat <<JSON
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Commit blocked: ${CHURN} lines changed (threshold: ${SIZE_THRESHOLD}). Large commits require fresh /second-opinion adjudication. Run /second-opinion diff first; the skill writes .tdd/second-opinion-completed.md."}}
+JSON
+      cat >&2 <<DIRECTIVE
+[gate-tier1-commit] BLOCKED: large commit (${CHURN} lines > ${SIZE_THRESHOLD} threshold) without fresh /second-opinion review.
+
+<claude-directive>
+This commit changes ${CHURN} lines, above the configured size
+threshold (${SIZE_THRESHOLD} lines). Large commits require a fresh
+cross-model review even when not on Tier 1 paths — refactors,
+sweeping renames, and large additions need a second pair of eyes.
+
+You MUST do one of:
+  1. Run /second-opinion diff on the staged changes. The skill writes
+     .tdd/second-opinion-completed.md when it finishes.
+  2. Split the commit: stage only a subset of files and commit them
+     incrementally. Each chunk under threshold passes without review.
+  3. Configure: set second_opinion.size_threshold_lines: 0 in
+     .tdd/tdd-config.json to disable this layer for the project. Do
+     this only if the team explicitly opts out of size-based review.
+
+This layer is project-wide — it does NOT depend on TDD cycle state or
+Tier 1 path matching. It catches the failure mode where substantial
+refactors on non-Tier-1 files ship without cross-model review.
+</claude-directive>
+DIRECTIVE
+      exit 2
+    fi
+  fi
+fi
+
 # ---- LAYER 1: Integration guards (project-wide, always fire) -------------
 #
 # Fires on every commit when integration_guards is non-empty. Decoupled

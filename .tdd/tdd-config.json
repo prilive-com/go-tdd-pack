@@ -136,6 +136,9 @@
     "fallback_model": "gpt-5.4",
     "require_research_packet_tier1": false,
     "require_pass_a_tier1": false,
-    "require_disposition_matrix_tier1": false
+    "require_disposition_matrix_tier1": false,
+
+    "_size_threshold_doc": "Layer-0 commit-time check in gate-tier1-commit.sh: any commit with churn (added + removed lines) above size_threshold_lines requires fresh /second-opinion adjudication, regardless of Tier 1/cycle state. Catches large refactors on non-Tier-1 paths that the Tier-1-specific gate misses. Set to 0 (or negative) to disable. Default 50 — calibrated for routine work; bump higher for projects that commit large vendored content or big generated files.",
+    "size_threshold_lines": 50
   }
 }
