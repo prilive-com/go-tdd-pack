@@ -1,0 +1,306 @@
+#!/usr/bin/env bash
+# scripts/git-hooks/pre-commit
+# Tier 1 commit gate at git's commit-time layer.
+#
+# WHY THIS EXISTS
+#
+# The .claude/hooks/gate-tier1-commit.sh PreToolUse hook can only see
+# the literal command text Claude is about to run; it can't observe
+# what the shell will execute after expansion / aliasing / wrapping.
+# Bypass surface (deferred R5 from cycle gate-level-bypass-closure):
+#
+#   sh -c 'git commit -a'           — outer command is `sh -c`
+#   git ci -m x                     — operator-configured alias
+#   time bash -c 'git commit -m x'  — transparent-exec prefix
+#   (git commit -m x)               — compact paren grouping
+#   xargs git commit                — exec wrapper
+#   python -c "os.system('git commit')" — interpreter wrapper
+#
+# This git pre-commit hook runs INSIDE git AFTER all that work is
+# done. The actual staged set is observable; the actual commit
+# candidate is fixed. Bypass classes above all collapse to: "git is
+# now invoking the pre-commit hook" — which fires regardless of how
+# git was invoked. Defense in depth on top of the PreToolUse layer.
+#
+# INSTALLATION (operator action required; this hook is opt-in)
+#
+#   Option A — copy to .git/hooks/pre-commit:
+#     cp scripts/git-hooks/pre-commit .git/hooks/pre-commit
+#     chmod +x .git/hooks/pre-commit
+#
+#   Option B — point git at scripts/git-hooks via core.hooksPath:
+#     git config core.hooksPath scripts/git-hooks
+#     # WARNING: this DISABLES any existing .git/hooks/pre-commit
+#     # for the repo. Prefer Option A on shared installs.
+#
+#   Option C — third-party hook manager (lefthook, husky, pre-commit):
+#     wire your manager to invoke scripts/git-hooks/pre-commit
+#
+# KILLSWITCH (emergency; document in commit message if used)
+#   TDD_GIT_HOOK_DISABLE=1 git commit ...
+#
+# KNOWN LIMITATION — `git commit --no-verify` (Codex round 1 P1)
+#
+# Git itself skips ALL pre-commit hooks when --no-verify (or -n) is
+# used. That's documented git behavior, not something this hook can
+# override. The PreToolUse layer (.claude/hooks/guard-dangerous-bash.sh)
+# already denies `--no-verify` / `-n` in any Bash command, so Claude
+# can't reach this state via a normal command. The remaining bypass
+# requires an operator-configured alias like
+# `git config alias.ci 'commit --no-verify'` — i.e., a deliberate,
+# conscious circumvention. Closing this requires moving the check to
+# `prepare-commit-msg` (which IS NOT skipped by --no-verify) and is
+# architecturally larger than this cycle. Tracked as follow-up.
+#
+# CONFIG (mirrors .claude/hooks/gate-tier1-commit.sh)
+#   .tdd/tdd-config.json
+#     - tier1_path_regexes
+#     - required_markers_edit_time (or required_markers fallback)
+#     - marker_aliases
+#     - second_opinion.require_hash_binding_tier1 (F5)
+#     - enforcement_mode + enforcement_mode_overrides[git-pre-commit] (F6)
+
+set -uo pipefail
+
+# Killswitch (env var; emergency only — document in commit message).
+[[ "${TDD_GIT_HOOK_DISABLE:-0}" == "1" ]] && exit 0
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+CONFIG="$ROOT/.tdd/tdd-config.json"
+PLAN="$ROOT/.tdd/current-plan.md"
+ADJUDICATION="$ROOT/.tdd/second-opinion-completed.md"
+HOOK_NAME="git-pre-commit"
+
+# No config means TDD ceremony not configured for this project — allow.
+[[ ! -f "$CONFIG" ]] && exit 0
+
+# Codex round 1 P1: missing jq used to fall through silently — every
+# downstream jq query returned empty, tier1_path_regexes was empty,
+# Tier 1 commits sailed through. Fail closed instead with a clear
+# install hint. Same pattern as the malformed-config check below
+# (environment fault → deny, bypasses enforcement_mode by design).
+if ! command -v jq >/dev/null 2>&1; then
+  cat >&2 <<'HOOK_MSG'
+[git-pre-commit] BLOCKED: jq is required to read .tdd/tdd-config.json.
+
+The git-side Tier 1 gate cannot enforce discipline without parsing
+the config and refuses to silently fail open.
+
+Install jq:
+  Debian/Ubuntu: sudo apt-get install jq
+  macOS:         brew install jq
+  Alpine:        apk add jq
+
+Then retry the commit.
+HOOK_MSG
+  exit 1
+fi
+
+# Validate config parses BEFORE downstream jq queries. Malformed config
+# is an environment fault — fail closed via deny+stderr (bypasses
+# enforcement_mode by design; matches require-tdd-state.sh F6 R2).
+if ! jq -e . "$CONFIG" >/dev/null 2>&1; then
+  cat >&2 <<HOOK_MSG
+[git-pre-commit] BLOCKED: .tdd/tdd-config.json failed to parse.
+
+Fix the JSON syntax and verify with: jq . .tdd/tdd-config.json
+Then retry the commit. (This check bypasses enforcement_mode by
+design — malformed config is an environment fault, not TDD discipline.)
+HOOK_MSG
+  exit 1
+fi
+
+# F6: enforcement_mode resolver. Returns "strict"|"warn"|"off". Per-hook
+# override (.enforcement_mode_overrides[hook]) wins over global; invalid
+# values fall back to "strict" with a stderr warning (typo can't soften).
+resolve_enforcement_mode() {
+  local hook="$1" cfg="$2"
+  if [[ ! -f "$cfg" ]] || ! command -v jq >/dev/null 2>&1; then
+    echo "strict"; return
+  fi
+  local override
+  override="$(jq -r --arg n "$hook" \
+    '.enforcement_mode_overrides[$n] // empty' "$cfg" 2>/dev/null || true)"
+  if [[ -n "$override" && "$override" != "null" ]]; then
+    case "$override" in
+      strict|warn|off) echo "$override"; return ;;
+      *)
+        echo "[git-pre-commit] WARN: invalid enforcement_mode_overrides[$hook]='$override'; using strict" >&2
+        echo "strict"; return
+        ;;
+    esac
+  fi
+  local global
+  global="$(jq -r '.enforcement_mode // "strict"' "$cfg" 2>/dev/null || true)"
+  case "$global" in
+    strict|warn|off) echo "$global" ;;
+    *) echo "[git-pre-commit] WARN: invalid enforcement_mode='$global'; using strict" >&2; echo "strict" ;;
+  esac
+}
+ENFORCEMENT_MODE="$(resolve_enforcement_mode "$HOOK_NAME" "$CONFIG")"
+
+# F6: dispatch on mode. warn → stderr advisory + exit 0; off → silent
+# passthrough; strict → original deny + exit 1.
+deny() {
+  local reason="$1"
+  case "$ENFORCEMENT_MODE" in
+    off) exit 0 ;;
+    warn)
+      cat >&2 <<EOF
+[git-pre-commit] WARNING (enforcement_mode=warn): $reason
+This would be DENIED in strict mode. Set enforcement_mode (or the
+git-pre-commit override) to "strict" in .tdd/tdd-config.json to
+enforce. Killswitch: TDD_GIT_HOOK_DISABLE=1 git commit ...
+EOF
+      exit 0
+      ;;
+  esac
+  cat >&2 <<EOF
+[git-pre-commit] BLOCKED: $reason
+
+This is the git-side Tier 1 commit gate (mirror of the PreToolUse
+.claude/hooks/gate-tier1-commit.sh layer). Killswitch (emergency
+only, document in commit message): TDD_GIT_HOOK_DISABLE=1 git commit
+EOF
+  exit 1
+}
+
+# Get staged files. If git rev-parse failed earlier, $ROOT may be
+# wrong; try once more in current cwd.
+CHANGED_FILES="$(cd "$ROOT" 2>/dev/null && git diff --cached --name-only 2>/dev/null)"
+[[ -z "$CHANGED_FILES" ]] && exit 0
+
+# Match against tier1_path_regexes. Mirror gate-tier1-commit.sh's
+# always-allow filter (test files, docs, pack-internal — exempt from
+# Tier 1 regex evaluation).
+TIER1_REGEXES="$(jq -r '.tier1_path_regexes[]? // empty' "$CONFIG" 2>/dev/null || true)"
+TIER1_PROD=()
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  case "$f" in
+    *_test.go) continue ;;
+    */.tdd/*|*/.claude/*|*.md|*/docs/*|*/specs/*|*/archive/*|*/CHANGELOG.md) continue ;;
+  esac
+  while IFS= read -r pattern; do
+    [[ -z "$pattern" ]] && continue
+    if printf '%s' "$f" | grep -qE "$pattern"; then
+      TIER1_PROD+=("$f")
+      break
+    fi
+  done <<< "$TIER1_REGEXES"
+done <<< "$CHANGED_FILES"
+
+# No Tier 1 staged → allow.
+[[ ${#TIER1_PROD[@]} -eq 0 ]] && exit 0
+
+TIER1_LIST="$(printf '  - %s\n' "${TIER1_PROD[@]}")"
+
+# Plan must exist.
+if [[ ! -f "$PLAN" ]]; then
+  deny "Tier 1 production files staged but .tdd/current-plan.md is missing.
+Staged Tier 1 files:
+$TIER1_LIST"
+fi
+
+# Required edit-time markers (M1+M2+M3 by default).
+required_markers=()
+if command -v jq >/dev/null 2>&1; then
+  while IFS= read -r m; do
+    [[ -n "$m" ]] && required_markers+=("$m")
+  done < <(jq -r '
+    if (.required_markers_edit_time | type) == "array"
+    then .required_markers_edit_time[]?
+    else .required_markers[]? // empty
+    end
+  ' "$CONFIG" 2>/dev/null || true)
+fi
+if [[ ${#required_markers[@]} -eq 0 ]]; then
+  required_markers=("Human approved spec: yes" "Red phase confirmed: yes" "Green phase authorized: yes")
+fi
+
+# Read marker aliases (new -> old) for backwards-compat.
+alias_pairs=""
+if command -v jq >/dev/null 2>&1; then
+  alias_pairs="$(jq -r '.marker_aliases // {} | to_entries[] | "\(.key)\t\(.value)"' "$CONFIG" 2>/dev/null || true)"
+fi
+
+for marker in "${required_markers[@]}"; do
+  grep -qF "$marker" "$PLAN" 2>/dev/null && continue
+  alias=""
+  if [[ -n "$alias_pairs" ]]; then
+    while IFS=$'\t' read -r k v; do
+      [[ "$k" == "$marker" ]] && alias="$v"
+    done <<< "$alias_pairs"
+  fi
+  if [[ -n "$alias" ]] && grep -qF "$alias" "$PLAN" 2>/dev/null; then
+    echo "[git-pre-commit] DEPRECATION: plan uses old marker '$alias' (renamed to '$marker'). Run scripts/migrate-tdd-markers.sh." >&2
+    continue
+  fi
+  deny "Tier 1 production files staged but plan missing required marker: '$marker'.
+Staged Tier 1 files:
+$TIER1_LIST"
+done
+
+# Adjudication must exist AND be fresh (mtime < 60 minutes).
+if [[ ! -f "$ADJUDICATION" ]]; then
+  deny "Tier 1 production files staged but .tdd/second-opinion-completed.md is missing.
+Run /second-opinion on the current diff/plan first.
+Staged Tier 1 files:
+$TIER1_LIST"
+fi
+if [[ -z "$(find "$ADJUDICATION" -mmin -60 -print 2>/dev/null)" ]]; then
+  deny "Tier 1 production files staged but .tdd/second-opinion-completed.md is stale (mtime > 60 minutes).
+Re-run /second-opinion to refresh.
+Staged Tier 1 files:
+$TIER1_LIST"
+fi
+
+# F5: hash binding (Tier 1, opt-in via flag).
+# Codex round 2 P3: portable sha256 helper. Linux ships sha256sum
+# (GNU coreutils); macOS ships shasum -a 256. Both produce
+# `<hex>  <file>` so awk '{print $1}' works on either. Falls through
+# to deny only if NEITHER is present.
+sha256() {
+  if   command -v sha256sum >/dev/null 2>&1; then sha256sum
+  elif command -v shasum    >/dev/null 2>&1; then shasum -a 256
+  else return 127
+  fi
+}
+
+if [[ "${SECOND_OPINION_HASH_DISABLE:-0}" != "1" ]]; then
+  hash_flag="$(jq -r '.second_opinion.require_hash_binding_tier1 // false' "$CONFIG" 2>/dev/null || echo false)"
+  if [[ "$hash_flag" == "true" ]] \
+     && ! command -v sha256sum >/dev/null 2>&1 \
+     && ! command -v shasum    >/dev/null 2>&1; then
+    deny "second_opinion.require_hash_binding_tier1=true but neither sha256sum nor shasum is available.
+Install GNU coreutils (Linux) or BSD shasum (macOS — usually pre-installed).
+Killswitch: SECOND_OPINION_HASH_DISABLE=1 git commit ..."
+  fi
+  if [[ "$hash_flag" == "true" ]]; then
+    recorded_diff="$(awk '/^diff_sha256:/ {print $2; exit}' "$ADJUDICATION" 2>/dev/null || true)"
+    recorded_plan="$(awk '/^plan_sha256:/ {print $2; exit}' "$ADJUDICATION" 2>/dev/null || true)"
+    [[ -n "$recorded_diff" ]] && ! [[ "$recorded_diff" =~ ^[0-9a-f]{64}$ ]] && recorded_diff=""
+    [[ -n "$recorded_plan" ]] && ! [[ "$recorded_plan" =~ ^[0-9a-f]{64}$ ]] && recorded_plan=""
+
+    current_diff="$(git -C "$ROOT" diff HEAD --cached 2>/dev/null | sha256 | awk '{print $1}')"
+    current_plan=""
+    [[ -f "$PLAN" ]] && current_plan="$(sha256 < "$PLAN" 2>/dev/null | awk '{print $1}')"
+
+    if [[ -z "$recorded_diff" || -z "$recorded_plan" ]]; then
+      deny "Adjudication file missing one or both hash fields (diff_sha256/plan_sha256).
+With second_opinion.require_hash_binding_tier1=true, BOTH hashes are required.
+Re-run /second-opinion (the skill records hashes automatically).
+Killswitch: SECOND_OPINION_HASH_DISABLE=1 git commit ..."
+    fi
+    if [[ "$recorded_diff" != "$current_diff" ]]; then
+      deny "Diff has changed since /second-opinion adjudication (recorded: ${recorded_diff:0:12}…, current: ${current_diff:0:12}…).
+The reviewed work isn't the work you're about to commit. Re-run /second-opinion."
+    fi
+    if [[ "$recorded_plan" != "$current_plan" ]]; then
+      deny "Plan has changed since /second-opinion adjudication (recorded: ${recorded_plan:0:12}…, current: ${current_plan:0:12}…).
+Re-run /second-opinion."
+    fi
+  fi
+fi
+
+exit 0

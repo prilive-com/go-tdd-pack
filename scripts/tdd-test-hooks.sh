@@ -3268,6 +3268,249 @@ rm -rf "$TMPROOT_AB"
 echo
 echo "Testing F3 (smoke tests in CI) — CI configs invoke this runner..."
 
+# gate-level-followup cycle: ship scripts/git-hooks/pre-commit as
+# git's-side enforcement that closes the R5 deferred bypass class
+# (transparent-exec wrappers, aliases, interpreters). Git invokes the
+# hook AFTER shell expansion/aliasing/wrapping, so the actual staged
+# set is observable regardless of how `git commit` was invoked.
+echo "Testing gate-level-followup (git pre-commit hook)..."
+
+GH_PRE_COMMIT="$PROJECT_ROOT/scripts/git-hooks/pre-commit"
+
+# AC 1: file exists and is executable.
+if [ -x "$GH_PRE_COMMIT" ]; then
+  pass "gh: scripts/git-hooks/pre-commit exists and is executable"
+else
+  fail "gh: $GH_PRE_COMMIT missing or not executable"
+fi
+
+# Helper: build a fresh fixture repo with the pack config + a Tier 1
+# file. `gh_setup` returns a fresh tmpdir; caller cleans up.
+gh_setup() {
+  local d
+  d=$(mktemp -d)
+  git init -q "$d"
+  ( cd "$d" && git config user.email t@t && git config user.name t )
+  mkdir -p "$d/.tdd" "$d/internal/auth"
+  cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$d/.tdd/"
+  echo "package auth" > "$d/internal/auth/handler.go"
+  ( cd "$d" && git add . && git commit -q -m initial )
+  echo "$d"
+}
+
+# Helper: stage a Tier 1 production change.
+gh_stage_tier1() {
+  echo "// edit" >> "$1/internal/auth/handler.go"
+  ( cd "$1" && git add internal/auth/handler.go )
+}
+
+# Helper: write a plan with all 4 markers (Tier 1 ceremony passes).
+gh_write_plan_full() {
+  cat > "$1/.tdd/current-plan.md" <<'EOF'
+Bug reproduced: yes
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: yes
+Implementation reviewed: yes
+EOF
+}
+
+# Helper: write a fresh adjudication file.
+gh_write_adj_fresh() {
+  cat > "$1/.tdd/second-opinion-completed.md" <<EOF
+date: $(date -u +%FT%TZ)
+adjudicated_by: claude
+EOF
+}
+
+# Helper: invoke the hook in a fixture and capture exit code without
+# tripping `set -e` (the hook may legitimately exit non-zero on deny).
+gh_invoke() {
+  local dir="$1" rc=0
+  ( cd "$dir" && bash "$GH_PRE_COMMIT" >/dev/null 2>&1 ) || rc=$?
+  echo "$rc"
+}
+
+# AC 2: no Tier 1 staged → exit 0 (allow).
+TMP=$(gh_setup)
+echo "non-tier1 file" > "$TMP/notes.md"
+( cd "$TMP" && git add notes.md )
+if [ "$(gh_invoke "$TMP")" -eq 0 ]; then
+  pass "gh: no Tier 1 staged → allow"
+else
+  fail "gh: non-Tier-1 staged should pass through"
+fi
+rm -rf "$TMP"
+
+# AC 3: Tier 1 staged + no plan → exit non-zero.
+TMP=$(gh_setup)
+gh_stage_tier1 "$TMP"
+if [ "$(gh_invoke "$TMP")" -ne 0 ]; then
+  pass "gh: Tier 1 staged + no plan → deny"
+else
+  fail "gh: Tier 1 staged without plan should deny"
+fi
+rm -rf "$TMP"
+
+# AC 3b: Tier 1 staged + plan with M3 missing → deny.
+TMP=$(gh_setup)
+gh_stage_tier1 "$TMP"
+cat > "$TMP/.tdd/current-plan.md" <<'EOF'
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: no
+Implementation reviewed: no
+EOF
+if [ "$(gh_invoke "$TMP")" -ne 0 ]; then
+  pass "gh: Tier 1 staged + M3=no → deny"
+else
+  fail "gh: M3=no should deny"
+fi
+rm -rf "$TMP"
+
+# AC 4: Tier 1 staged + plan complete + no adjudication → deny.
+TMP=$(gh_setup)
+gh_stage_tier1 "$TMP"
+gh_write_plan_full "$TMP"
+if [ "$(gh_invoke "$TMP")" -ne 0 ]; then
+  pass "gh: Tier 1 staged + plan + no adjudication → deny"
+else
+  fail "gh: missing adjudication should deny"
+fi
+rm -rf "$TMP"
+
+# AC 4b: stale adjudication → deny.
+TMP=$(gh_setup)
+gh_stage_tier1 "$TMP"
+gh_write_plan_full "$TMP"
+gh_write_adj_fresh "$TMP"
+touch -d "2 hours ago" "$TMP/.tdd/second-opinion-completed.md"
+if [ "$(gh_invoke "$TMP")" -ne 0 ]; then
+  pass "gh: stale adjudication (>60min) → deny"
+else
+  fail "gh: stale adjudication should deny"
+fi
+rm -rf "$TMP"
+
+# AC regression: clean state (Tier 1 + plan + fresh adjudication) → allow.
+TMP=$(gh_setup)
+gh_stage_tier1 "$TMP"
+gh_write_plan_full "$TMP"
+gh_write_adj_fresh "$TMP"
+if [ "$(gh_invoke "$TMP")" -eq 0 ]; then
+  pass "gh: Tier 1 + plan + fresh adjudication → allow (regression)"
+else
+  fail "gh: clean Tier 1 commit should allow"
+fi
+TMP_HASHES="$TMP"
+
+# AC 5: hash mismatch → deny (when require_hash_binding_tier1=true).
+jq '.second_opinion.require_hash_binding_tier1 = true' \
+  "$TMP_HASHES/.tdd/tdd-config.json" > /tmp/gh-cfg.json && \
+  mv /tmp/gh-cfg.json "$TMP_HASHES/.tdd/tdd-config.json"
+if [ "$(gh_invoke "$TMP_HASHES")" -ne 0 ]; then
+  pass "gh: hash binding on + missing diff_sha256/plan_sha256 → deny"
+else
+  fail "gh: hash binding should require both fields"
+fi
+rm -rf "$TMP_HASHES"
+
+# AC 6 (warn): enforcement_mode=warn for git-pre-commit → exit 0 +
+# stderr advisory.
+TMP=$(gh_setup)
+gh_stage_tier1 "$TMP"
+# No plan → would normally deny, but warn mode allows.
+jq '.enforcement_mode_overrides."git-pre-commit" = "warn"' \
+  "$TMP/.tdd/tdd-config.json" > /tmp/gh-cfg.json && \
+  mv /tmp/gh-cfg.json "$TMP/.tdd/tdd-config.json"
+gh_out=$( ( cd "$TMP" && bash "$GH_PRE_COMMIT" 2>&1 ); echo "exit:$?")
+if [[ "$gh_out" == *"exit:0"* ]] && [[ "$gh_out" == *"WARNING"* ]]; then
+  pass "gh: warn mode → stderr advisory + allow"
+else
+  fail "gh: warn mode should warn-not-deny (got: '$gh_out')"
+fi
+rm -rf "$TMP"
+
+# AC 6 (off): enforcement_mode=off → silent passthrough.
+TMP=$(gh_setup)
+gh_stage_tier1 "$TMP"
+jq '.enforcement_mode_overrides."git-pre-commit" = "off"' \
+  "$TMP/.tdd/tdd-config.json" > /tmp/gh-cfg.json && \
+  mv /tmp/gh-cfg.json "$TMP/.tdd/tdd-config.json"
+gh_out=$( ( cd "$TMP" && bash "$GH_PRE_COMMIT" 2>&1 ); echo "exit:$?")
+if [[ "$gh_out" == *"exit:0"* ]] && [[ "$gh_out" != *"WARNING"* ]] && [[ "$gh_out" != *"BLOCKED"* ]]; then
+  pass "gh: off mode → silent passthrough"
+else
+  fail "gh: off mode should be silent (got: '$gh_out')"
+fi
+rm -rf "$TMP"
+
+# AC 7: TDD_GIT_HOOK_DISABLE=1 killswitch → silent allow.
+TMP=$(gh_setup)
+gh_stage_tier1 "$TMP"
+gh_out=$( ( cd "$TMP" && TDD_GIT_HOOK_DISABLE=1 bash "$GH_PRE_COMMIT" 2>&1 ); echo "exit:$?")
+if [[ "$gh_out" == *"exit:0"* ]] && [[ "$gh_out" != *"BLOCKED"* ]]; then
+  pass "gh: TDD_GIT_HOOK_DISABLE=1 killswitch → silent allow"
+else
+  fail "gh: killswitch should allow silently (got: '$gh_out')"
+fi
+rm -rf "$TMP"
+
+# AC 8: header documents installation.
+if grep -qE "INSTALLATION" "$GH_PRE_COMMIT" \
+   && grep -q "core.hooksPath" "$GH_PRE_COMMIT"; then
+  pass "gh: hook header documents installation paths"
+else
+  fail "gh: hook header missing INSTALLATION docs"
+fi
+
+# AC 9: malformed config → deny with parse-error message (fail-closed,
+# matches require-tdd-state.sh F6 R2 pattern).
+TMP=$(gh_setup)
+gh_stage_tier1 "$TMP"
+echo '{"tier1_path_regexes":' > "$TMP/.tdd/tdd-config.json"
+gh_out=$( ( cd "$TMP" && bash "$GH_PRE_COMMIT" 2>&1 ); echo "exit:$?")
+if [[ "$gh_out" == *"failed to parse"* ]] && [[ "$gh_out" != *"exit:0"* ]]; then
+  pass "gh: malformed config → fail-closed deny with parse-error"
+else
+  fail "gh: malformed config should fail closed (got: '$gh_out')"
+fi
+rm -rf "$TMP"
+
+# Codex round 1 P2 + round 2 P2: drift detector. The pre-commit's
+# inline Tier 1 always-allow filter is duplicated from
+# gate-tier1-commit.sh. Use a FIXED-STRING grep on the full case
+# pattern so partial overlaps don't false-pass (R2 P2).
+GATE_HOOK="$PROJECT_ROOT/.claude/hooks/gate-tier1-commit.sh"
+EXEMPT_LITERAL='*/.tdd/*|*/.claude/*|*.md|*/docs/*|*/specs/*|*/archive/*|*/CHANGELOG.md'
+if grep -qF "$EXEMPT_LITERAL" "$GH_PRE_COMMIT" \
+   && grep -qF "$EXEMPT_LITERAL" "$GATE_HOOK"; then
+  pass "gh-codex: pre-commit + gate-tier1-commit.sh exemption filters match (drift detector; R2 P2 closed)"
+else
+  fail "gh-codex: pre-commit and gate-tier1-commit.sh exemption filters DRIFTED"
+fi
+
+# Codex round 1 P1 (P1 #2): missing jq must fail closed, not silent
+# allow. Test by invoking via env -i (clean PATH) — but that's
+# cross-platform fragile. Instead, simulate by checking the deny
+# message exists in the hook source.
+if grep -q 'jq is required' "$GH_PRE_COMMIT" \
+   && grep -q 'apt-get install jq' "$GH_PRE_COMMIT"; then
+  pass "gh-codex: hook documents jq-missing fail-closed (R1 P1 #2 closed)"
+else
+  fail "gh-codex: hook should fail closed with install hint when jq is missing"
+fi
+
+# Codex round 1 P1 (#1 — known limit): document the --no-verify
+# bypass clearly so future maintainers know it's deferred.
+if grep -q 'no-verify' "$GH_PRE_COMMIT"; then
+  pass "gh-codex: hook header documents --no-verify known limit"
+else
+  fail "gh-codex: --no-verify limitation should be documented"
+fi
+
+echo
+
 # F13 cycle (f13-trivial-paths-consolidation): single config source
 # for "skip second opinion" path lists. require-second-opinion.sh +
 # SKILL.md consume tdd-config.json `trivial_paths` (with inline fallback);
