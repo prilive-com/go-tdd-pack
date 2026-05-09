@@ -201,11 +201,50 @@ glob_to_regex() {
 # class: substantial commits cannot land without cross-model review,
 # regardless of which paths they touch.
 
-SIZE_THRESHOLD="$(jq -r '.second_opinion.size_threshold_lines // 50' "$CONFIG" 2>/dev/null || echo 50)"
+# Validate threshold as a non-negative integer (F3, /second-opinion finding):
+# jq returns config values as-is. Bad config (string "abc", float, null,
+# bool, array) would make `[[ -gt ]]` error and silently skip the layer.
+# Defend: if not a clean integer, fall back to the default 50.
+SIZE_THRESHOLD_RAW="$(jq -r '.second_opinion.size_threshold_lines // 50' "$CONFIG" 2>/dev/null || echo 50)"
+if [[ "$SIZE_THRESHOLD_RAW" =~ ^-?[0-9]+$ ]]; then
+  SIZE_THRESHOLD="$SIZE_THRESHOLD_RAW"
+else
+  echo "[gate-tier1-commit] WARN: second_opinion.size_threshold_lines is not an integer ('$SIZE_THRESHOLD_RAW'); falling back to 50." >&2
+  SIZE_THRESHOLD=50
+fi
 
 if [[ "${SIZE_THRESHOLD:-0}" -gt 0 ]]; then
-  CHURN="$(git diff --cached --numstat 2>/dev/null \
-    | awk '{added+=$1; removed+=$2} END {print added+removed+0}')"
+  # Compute churn. Use the same staged-or-fallback logic as CHANGED_FILES
+  # above (F1, /second-opinion finding): `git commit -a` and pathspec
+  # commit forms (`git commit path/to/file`) update the index AT commit
+  # time, so PreToolUse sees an empty cached diff. Without the fallback,
+  # large unstaged-but-tracked changes bypass the layer entirely.
+  #
+  # Binary files (F2): numstat shows `-\t-` for binary changes. awk's
+  # `$1 + $2` would treat `-` as 0, making binary changes invisible.
+  # Treat any `-` entry as a large change (set churn to threshold+1)
+  # so binary diffs always trigger review. Pure renames (numstat shows
+  # `0\t0`) are NOT detected by line count — documented limitation;
+  # follow-up cycle should add a separate file-count threshold.
+  CHURN="$( {
+    git diff --cached --numstat 2>/dev/null
+    # Fallback for `git commit -a` / pathspec forms — include working-tree
+    # changes so unstaged-at-PreToolUse diffs are still seen.
+    git diff --numstat 2>/dev/null
+  } | awk -v thresh="$SIZE_THRESHOLD" '
+    {
+      if ($1 == "-" || $2 == "-") {
+        # Binary file — count as threshold+1 so layer always triggers.
+        binary_seen = 1
+      } else {
+        added += $1
+        removed += $2
+      }
+    }
+    END {
+      if (binary_seen) print thresh + 1; else print added + removed + 0
+    }
+  ')"
   if [[ "${CHURN:-0}" -gt "$SIZE_THRESHOLD" ]]; then
     adj_fresh=false
     if [[ -f "$ADJUDICATION" ]] \
@@ -378,11 +417,22 @@ fi
 # change touches Tier 1 production paths. Enforces M4 + green-proof +
 # fresh adjudication for the green commit of a Tier 1 cycle.
 
-# No active cycle → no ceremony gate.
-[[ ! -f "$PLAN" ]] && { audit "allow" "no_active_cycle"; exit 0; }
+# Order matters here (combined v1.6.0 review F2, P0 fix):
+# Check TIER1_PROD FIRST — if no Tier 1 staged, ceremony doesn't apply
+# regardless of plan state. If Tier 1 IS staged but no plan exists,
+# DENY (silent allow was the original bypass — a developer who
+# deletes .tdd/current-plan.md previously got Tier 1 commits silently
+# waved through). Plan-missing-with-Tier-1-staged is "ceremony was
+# skipped," which is exactly what the gate exists to catch.
 
 # No Tier 1 staged → ceremony doesn't apply.
 [[ ${#TIER1_PROD[@]} -eq 0 ]] && { audit "allow" "no_tier1_staged"; exit 0; }
+
+# Tier 1 staged but no plan → DENY (was silent allow before F2 fix).
+if [[ ! -f "$PLAN" ]]; then
+  deny "missing .tdd/current-plan.md with Tier 1 staged" \
+    "Tier 1 commit blocked: no .tdd/current-plan.md exists, but staged files include Tier 1 production paths. Tier 1 changes require the full TDD ceremony (spec → red → green-authorized → implementation-reviewed). Run the go-tdd-feature or go-tdd-bugfix skill to start the ceremony."
+fi
 
 # Detect commit-message subject for red()/refactor()/green()/etc. classification.
 SUBJECT="$(printf '%s\n' "$CMD" | awk '

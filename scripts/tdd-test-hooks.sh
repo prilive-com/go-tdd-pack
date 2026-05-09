@@ -1450,13 +1450,17 @@ cp .tdd/tdd-config.json "$TMPROOT_SZ/.tdd/"
 echo "initial" > "$TMPROOT_SZ/README.md"
 ( cd "$TMPROOT_SZ" && git add . && git commit -q -m initial )
 
-# Helper: set the threshold in the fixture's tdd-config.json.
+# Helper: set the threshold in the fixture's tdd-config.json AND commit
+# the config change so it doesn't pollute next test's churn count.
+# (jq reformats the whole JSON; without committing, the working-tree
+# diff vs HEAD can be ~50+ lines just from the config rewrite.)
 sz_set_threshold() {
   local n="$1"
   jq ".second_opinion.size_threshold_lines = ${n}" \
     "$TMPROOT_SZ/.tdd/tdd-config.json" \
     > "$TMPROOT_SZ/.tdd/tdd-config.json.tmp"
   mv "$TMPROOT_SZ/.tdd/tdd-config.json.tmp" "$TMPROOT_SZ/.tdd/tdd-config.json"
+  ( cd "$TMPROOT_SZ" && git add .tdd/tdd-config.json && git commit -q -m "test: set threshold to $n" 2>/dev/null || true )
 }
 
 # Helper: stage a file with N lines added.
@@ -1523,7 +1527,99 @@ else
   fail "size_threshold: 0 should disable (got: '$out')"
 fi
 
+# F1 fix (/second-opinion finding): `git commit -a` doesn't pre-stage
+# files; the index is updated AT commit time. The hook must see working-
+# tree changes too (fallback past empty cached diff). Reset stage,
+# leave file unstaged in working tree, simulate `git commit -a`.
+sz_set_threshold 50
+( cd "$TMPROOT_SZ" && git restore --staged bigfile2.txt 2>/dev/null && git rm -f bigfile2.txt 2>/dev/null && git commit -q -m cleanup 2>/dev/null )
+echo "tracked file" > "$TMPROOT_SZ/tracked.txt"
+( cd "$TMPROOT_SZ" && git add tracked.txt && git commit -q -m "track" )
+# Now modify tracked.txt with 80 lines and DON'T stage.
+: > "$TMPROOT_SZ/tracked.txt"
+for i in $(seq 1 80); do echo "modified line $i" >> "$TMPROOT_SZ/tracked.txt"; done
+# Verify staging is clean.
+out=$(echo '{"tool_input":{"command":"git commit -a -m \"big change\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "size_threshold: git commit -a with large unstaged change → deny (F1 bypass closed)"
+else
+  fail "size_threshold: git commit -a should be caught (got: $out)"
+fi
+
+# F2 fix (/second-opinion finding): binary files report `-\t-` in numstat.
+# Treat any `-` entry as large-change trigger so binary diffs aren't
+# invisible. Use printf to write a binary-looking file (NUL bytes).
+( cd "$TMPROOT_SZ" && git checkout -- tracked.txt && git add -A && git commit -q -m reset 2>/dev/null )
+printf 'binary\0content\0here' > "$TMPROOT_SZ/blob.bin"
+( cd "$TMPROOT_SZ" && git add blob.bin )
+out=$(echo '{"tool_input":{"command":"git commit -m \"chore: add blob\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "size_threshold: binary file (numstat -\\t-) treated as large change → deny (F2 fix)"
+else
+  fail "size_threshold: binary should trigger layer (got: $out)"
+fi
+
+# F3 fix (/second-opinion finding): invalid threshold (non-integer)
+# falls back to default 50, with a stderr warning. Set threshold to
+# a string and verify the warning + correct fallback behavior.
+( cd "$TMPROOT_SZ" && git restore --staged blob.bin 2>/dev/null || true; rm -f blob.bin )
+sz_stage_lines 80 bigfile3.txt
+# Set threshold to invalid string.
+jq '.second_opinion.size_threshold_lines = "abc"' \
+  "$TMPROOT_SZ/.tdd/tdd-config.json" > "$TMPROOT_SZ/.tdd/tdd-config.json.tmp"
+mv "$TMPROOT_SZ/.tdd/tdd-config.json.tmp" "$TMPROOT_SZ/.tdd/tdd-config.json"
+stderr_out=$(echo '{"tool_input":{"command":"git commit -m \"chore: invalid config\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>&1 >/dev/null || true)
+if [[ "$stderr_out" == *"is not an integer"* ]] && [[ "$stderr_out" == *"BLOCKED"* ]]; then
+  pass "size_threshold: invalid config ('abc') falls back to default 50 + warns (F3 fix)"
+else
+  fail "size_threshold: invalid config should warn + use default (got: '$stderr_out')"
+fi
+
 rm -rf "$TMPROOT_SZ"
+
+echo
+echo "Testing F2 fix — Tier 1 commit with no plan denies (cycle f2-fix-tier1-no-plan-bypass)..."
+
+# Combined v1.6.0 review (F2, P0): Layer 2 of gate-tier1-commit.sh
+# previously had `[[ ! -f "$PLAN" ]] && exit 0` BEFORE the TIER1_PROD
+# check, so a Tier 1 file staged without any plan silently allowed.
+# Fix: TIER1_PROD check first; then if Tier 1 staged AND no plan → DENY.
+
+TMPROOT_F2=$(mktemp -d)
+git init -q "$TMPROOT_F2"
+( cd "$TMPROOT_F2" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMPROOT_F2/.tdd" "$TMPROOT_F2/internal/auth"
+cp .tdd/tdd-config.json "$TMPROOT_F2/.tdd/"
+echo "package auth" > "$TMPROOT_F2/internal/auth/handler.go"
+( cd "$TMPROOT_F2" && git add . && git commit -q -m initial )
+# Stage a Tier 1 production change. NO .tdd/current-plan.md exists.
+echo "// modified" >> "$TMPROOT_F2/internal/auth/handler.go"
+( cd "$TMPROOT_F2" && git add internal/auth/handler.go )
+
+# Verify no plan exists in the fixture.
+if [[ -f "$TMPROOT_F2/.tdd/current-plan.md" ]]; then
+  fail "F2 fixture setup error: plan file shouldn't exist"
+fi
+
+out=$(echo '{"tool_input":{"command":"git commit -m \"chore: tier1 no plan\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F2" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "F2: Tier 1 staged + no plan → DENY (silent bypass closed)"
+else
+  fail "F2: Tier 1 staged + no plan should DENY (got: $out)"
+fi
+
+rm -rf "$TMPROOT_F2"
 
 echo
 echo "Testing layer-1 vs layer-2 split (guards fire independent of TDD cycle)..."
