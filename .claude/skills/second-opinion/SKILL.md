@@ -129,17 +129,39 @@ target_kind="diff"
 #   3. upper bound — diffs >2000 lines overwhelm the reviewer (per 2026
 #      AI-review benchmarks; AI quality breaks down ~1000-2000 lines)
 if [ "$target_kind" = "diff" ]; then
-  # 1. Filter out files matching skip_globs. If nothing is left, skip.
+  # 1. Filter out files matching trivial_paths. If nothing is left, skip.
+  # F13: read the canonical list from .tdd/tdd-config.json; fall back
+  # to inline globs if the field is missing/empty OR jq is unavailable.
+  # Mirrors require-second-opinion.sh's is_always_allowed_path() —
+  # single source of truth for "skip second opinion" globs.
   changed_files="$(git diff --name-only HEAD 2>/dev/null)"
+  trivial_globs=()
+  if [ -f .tdd/tdd-config.json ] && command -v jq >/dev/null 2>&1; then
+    while IFS= read -r g; do
+      [ -z "$g" ] && continue
+      trivial_globs+=("$g")
+    done < <(jq -r '.trivial_paths[]? // empty' .tdd/tdd-config.json 2>/dev/null)
+  fi
+  matches_trivial() {
+    local f="$1" g
+    if [ ${#trivial_globs[@]} -gt 0 ]; then
+      for g in "${trivial_globs[@]}"; do
+        # shellcheck disable=SC2053
+        [[ "$f" == $g ]] && return 0
+      done
+      return 1
+    fi
+    # Fallback inline list (preserved verbatim from pre-F13).
+    case "$f" in
+      *.md|*.txt|CHANGELOG*|*/CHANGELOG*|README*|*/README*|LICENSE*|*/LICENSE*|.editorconfig|.gitignore|*/.gitignore|go.sum|*/go.sum|.github/*|*/.github/*|.gitlab-ci.yml) return 0 ;;
+    esac
+    return 1
+  }
   reviewable_files=()
   while IFS= read -r f; do
     [ -z "$f" ] && continue
-    case "$f" in
-      *.md|*.txt|CHANGELOG*|*/CHANGELOG*|README*|*/README*|LICENSE*|*/LICENSE*|.editorconfig|.gitignore|*/.gitignore|go.sum|*/go.sum|.github/*|*/.github/*|.gitlab-ci.yml)
-        continue ;;
-      *)
-        reviewable_files+=("$f") ;;
-    esac
+    if matches_trivial "$f"; then continue; fi
+    reviewable_files+=("$f")
   done <<< "$changed_files"
 
   if [ ${#reviewable_files[@]} -eq 0 ]; then

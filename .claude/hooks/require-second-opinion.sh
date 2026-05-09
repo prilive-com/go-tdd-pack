@@ -220,9 +220,27 @@ mapfile -t paths < <(jq -r '
 command="$(jq -r '.tool_input.command // empty' <<<"$stdin" 2>/dev/null || echo '')"
 
 # Always-allow paths: edits to these never require a second opinion.
-# Mirrors the skill's skip_globs plus our own infrastructure paths.
+# F13: prefer canonical .tdd/tdd-config.json `trivial_paths` field;
+# fall back to the inline list when config missing/empty OR jq
+# unavailable (no regression for environments without jq). Mirrors
+# the /second-opinion skill's Step 3 filter — single source of truth
+# (require-tdd-state.sh intentionally diverges per cycle f4).
 is_always_allowed_path() {
   local p="$1"
+  if [[ -f "$TDD_CONFIG" ]] && command -v jq >/dev/null 2>&1; then
+    local config_list_len
+    config_list_len="$(jq -r '(.trivial_paths // []) | length' "$TDD_CONFIG" 2>/dev/null || echo 0)"
+    if [[ "${config_list_len:-0}" -gt 0 ]]; then
+      local pat
+      while IFS= read -r pat; do
+        [[ -z "$pat" ]] && continue
+        # shellcheck disable=SC2053
+        [[ "$p" == $pat ]] && return 0
+      done < <(jq -r '.trivial_paths[]? // empty' "$TDD_CONFIG" 2>/dev/null)
+      return 1
+    fi
+  fi
+  # Inline fallback (preserved verbatim from pre-F13 behavior).
   case "$p" in
     *.md|*.txt|*CHANGELOG*|*README*|*LICENSE*) return 0 ;;
     .editorconfig|*/.editorconfig|.gitignore|*/.gitignore) return 0 ;;

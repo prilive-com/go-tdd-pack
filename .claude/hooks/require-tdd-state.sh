@@ -184,6 +184,15 @@ while IFS= read -r FILE; do
   # canonical always-allowed filenames; non-canonical .md files fall
   # through to regex evaluation and are allowed by default if no
   # Tier 1 regex matches.
+  #
+  # F13 carve-out (2026-05-09): this hook does NOT consult
+  # `.tdd/tdd-config.json` `trivial_paths`. The require-second-opinion.sh
+  # hook + /second-opinion skill share that list because they implement
+  # the same "skip second opinion on docs/CI/etc" policy. THIS hook
+  # governs Tier 1 production-code edits — including pack-internal
+  # markdown like .claude/skills/second-opinion/SKILL.md. If we used
+  # trivial_paths here, *.md would skip Tier 1 enforcement entirely
+  # (re-opening cycle f4). The list below is intentionally narrower.
   case "$FILE" in
     */.tdd/*|*/.claude/*|*/docs/*|*/specs/*|*/archive/*) continue ;;
     CHANGELOG*|*/CHANGELOG*|README*|*/README*|LICENSE*|*/LICENSE*) continue ;;

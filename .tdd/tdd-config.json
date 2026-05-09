@@ -147,5 +147,30 @@
 
   "_enforcement_mode_doc": "F6: graduated enforcement for the 4 process-discipline gates (gate-tier1-commit, require-second-opinion, require-tdd-state, guard-bash-pipefail). Values: 'strict' (default; deny + exit 2), 'warn' (stderr advisory + allow exit 0), 'off' (silent passthrough). Per-hook override in enforcement_mode_overrides wins over global. Invalid values fall back to 'strict' with a stderr warning (typo can't soften). Security gates (guard-dangerous-bash, guard-protected-files, scan-for-secrets) ignore this — strict-only by design.",
   "enforcement_mode": "strict",
-  "enforcement_mode_overrides": {}
+  "enforcement_mode_overrides": {},
+
+  "_trivial_paths_doc": "F13: canonical 'skip second opinion' glob list. Consumed by require-second-opinion.sh's is_always_allowed_path() AND the /second-opinion skill's Step 3 filter loop. Each consumer falls back to its own inline list if this field is missing/empty OR jq is unavailable (no regression for environments without jq). require-tdd-state.sh INTENTIONALLY does NOT consult this list (per cycle f4 — it must govern pack-internal markdown like .claude/skills/second-opinion/SKILL.md, which would be skipped if *.md was here). Edge case: setting this to [] is treated as 'use fallback'; to truly disable, set to a single placeholder pattern that matches nothing.",
+  "trivial_paths": [
+    "*.md",
+    "*.txt",
+    "*CHANGELOG*",
+    "*README*",
+    "*LICENSE*",
+    ".editorconfig",
+    "*/.editorconfig",
+    ".gitignore",
+    "*/.gitignore",
+    "go.sum",
+    "*/go.sum",
+    ".github/*",
+    "*/.github/*",
+    ".gitlab-ci.yml",
+    "*/.gitlab-ci.yml",
+    ".tdd/*",
+    "*/.tdd/*",
+    ".claude/*",
+    "*/.claude/*",
+    ".second-opinion/*",
+    "*/.second-opinion/*"
+  ]
 }
