@@ -3268,6 +3268,171 @@ rm -rf "$TMPROOT_AB"
 echo
 echo "Testing F3 (smoke tests in CI) — CI configs invoke this runner..."
 
+# F12 cycle (f12-migration-script-audit-warning): migration scripts
+# mutate audit-trail content but don't audit themselves; their output
+# carries placeholder text that the hook accepts as valid adjudication.
+echo "Testing F12 (migration-script audit warning)..."
+
+# AC 1: migrate-tdd-markers.sh writes an audit log entry.
+TMPROOT_F12A=$(mktemp -d)
+mkdir -p "$TMPROOT_F12A/.tdd"
+cat > "$TMPROOT_F12A/.tdd/current-plan.md" <<'EOF'
+# Plan
+Bug reproduced: yes
+Human approved spec: yes
+Red phase confirmed: yes
+Human approved implementation: yes
+EOF
+( cd "$TMPROOT_F12A" && bash "$PROJECT_ROOT/scripts/migrate-tdd-markers.sh" >/dev/null 2>&1 )
+if [ -f "$TMPROOT_F12A/.tdd/migration-audit.log" ] \
+   && grep -q "migrate-tdd-markers" "$TMPROOT_F12A/.tdd/migration-audit.log"; then
+  pass "F12: migrate-tdd-markers.sh writes audit log entry"
+else
+  fail "F12: migrate-tdd-markers.sh did not write .tdd/migration-audit.log"
+fi
+rm -rf "$TMPROOT_F12A"
+
+# AC 2: migrate-rebuttal-to-matrix.sh writes an audit log entry.
+TMPROOT_F12B=$(mktemp -d)
+mkdir -p "$TMPROOT_F12B/.tdd"
+cat > "$TMPROOT_F12B/.tdd/second-opinion-completed.md" <<'EOF'
+date: 2026-05-09T00:00:00Z
+scope: Tier 1
+model: gpt-5.5
+findings_total: 1
+findings:
+  - id: F1
+    severity: P1
+    stance: ACCEPT
+adjudicated_by: claude
+EOF
+( cd "$TMPROOT_F12B" && bash "$PROJECT_ROOT/scripts/migrate-rebuttal-to-matrix.sh" >/dev/null 2>&1 )
+if [ -f "$TMPROOT_F12B/.tdd/migration-audit.log" ] \
+   && grep -q "migrate-rebuttal-to-matrix" "$TMPROOT_F12B/.tdd/migration-audit.log"; then
+  pass "F12: migrate-rebuttal-to-matrix.sh writes audit log entry"
+else
+  fail "F12: migrate-rebuttal-to-matrix.sh did not write .tdd/migration-audit.log"
+fi
+
+# AC 3: migrate-rebuttal-to-matrix.sh emits stderr WARNING when output
+# has unfilled placeholders. Same fixture (which produces placeholders).
+rm -rf "$TMPROOT_F12B/.tdd/codex"
+warn_out=$(cd "$TMPROOT_F12B" && bash "$PROJECT_ROOT/scripts/migrate-rebuttal-to-matrix.sh" 2>&1 >/dev/null)
+if [[ "$warn_out" == *"WARNING"* ]] && [[ "$warn_out" == *"placeholder"* ]]; then
+  pass "F12: migrate-rebuttal-to-matrix.sh warns on placeholder output"
+else
+  fail "F12: migration script did not emit placeholder WARNING (got: '$warn_out')"
+fi
+rm -rf "$TMPROOT_F12B"
+
+# AC 4: hook DENIES on matrix with `<migrated; ` placeholder.
+TMPROOT_F12C=$(mktemp -d)
+git init -q "$TMPROOT_F12C"
+( cd "$TMPROOT_F12C" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMPROOT_F12C/.tdd/codex" "$TMPROOT_F12C/internal/auth"
+cp .tdd/tdd-config.json "$TMPROOT_F12C/.tdd/"
+# Enable matrix requirement
+jq '.second_opinion.require_disposition_matrix_tier1 = true' \
+  "$TMPROOT_F12C/.tdd/tdd-config.json" > /tmp/f12-cfg.json && \
+  mv /tmp/f12-cfg.json "$TMPROOT_F12C/.tdd/tdd-config.json"
+echo "package auth" > "$TMPROOT_F12C/internal/auth/handler.go"
+( cd "$TMPROOT_F12C" && git add . && git commit -q -m initial )
+echo "// edit" >> "$TMPROOT_F12C/internal/auth/handler.go"
+
+# Plan with all markers (so Tier 1 ceremony passes)
+cat > "$TMPROOT_F12C/.tdd/current-plan.md" <<'EOF'
+Bug reproduced: yes
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: yes
+Implementation reviewed: yes
+EOF
+
+# Fresh adjudication
+cat > "$TMPROOT_F12C/.tdd/second-opinion-completed.md" <<'EOF'
+date: 2026-05-09T00:00:00Z
+scope: Tier 1
+model: gpt-5.5
+findings_total: 1
+findings:
+  - id: F1
+    severity: P1
+    stance: ACCEPT
+adjudicated_by: claude
+EOF
+
+# round1.json so the hook can compute findings_count
+cat > "$TMPROOT_F12C/.tdd/codex/round1.json" <<'EOF'
+{"findings":[{"id":"F1","severity":"P1","stance":"ACCEPT"}]}
+EOF
+
+# Matrix WITH placeholder text in Reason
+cat > "$TMPROOT_F12C/.tdd/codex/disposition-matrix.md" <<'EOF'
+# Concern Disposition Matrix
+findings_total: 1
+
+## Findings table
+
+| ID | Source | Severity | Concern (1 line) | Disposition | Reason | Spec change |
+|----|--------|----------|------------------|-------------|--------|-------------|
+| F1 | Codex | P1 | <migrated; fill in 1-line concern> | ACCEPT | <migrated from v1.5.x — fill in concrete reason> | yes |
+EOF
+
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F12C" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "F12: hook denies matrix with '<migrated;' placeholder"
+else
+  fail "F12: matrix with '<migrated;' should deny (got: '$out')"
+fi
+
+# AC 4b: hook DENIES on matrix with `<fill in` placeholder (no <migrated;).
+cat > "$TMPROOT_F12C/.tdd/codex/disposition-matrix.md" <<'EOF'
+# Concern Disposition Matrix
+findings_total: 1
+
+## Findings table
+
+| ID | Source | Severity | Concern (1 line) | Disposition | Reason | Spec change |
+|----|--------|----------|------------------|-------------|--------|-------------|
+| F1 | Codex | P1 | something concrete | ACCEPT | <fill in the actual reason here> | yes |
+EOF
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F12C" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "F12: hook denies matrix with '<fill in' placeholder"
+else
+  fail "F12: matrix with '<fill in' should deny (got: '$out')"
+fi
+
+# AC 4c REGRESSION: matrix WITHOUT placeholders → allowed.
+cat > "$TMPROOT_F12C/.tdd/codex/disposition-matrix.md" <<'EOF'
+# Concern Disposition Matrix
+findings_total: 1
+
+## Findings table
+
+| ID | Source | Severity | Concern (1 line) | Disposition | Reason | Spec change |
+|----|--------|----------|------------------|-------------|--------|-------------|
+| F1 | Codex | P1 | dropped err in lib code | ACCEPT | Why this is correct: the err is stack-frame-relevant; dropping it loses the call site. Two integration tests now exercise the wrap. The wrap is sentinel-typed so callers can errors.Is it. | yes |
+EOF
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F12C" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "F12: matrix without placeholders allowed (regression preserved)"
+else
+  fail "F12: matrix without placeholders should pass (got: '$out')"
+fi
+
+rm -rf "$TMPROOT_F12C"
+
+echo
+
 # F10 cycle (f10-agents-md-update): AGENTS.md + CLAUDE.md missed
 # operator-facing knobs added in v1.6.x cycles (enforcement_mode,
 # hash binding, killswitches, canonical templates) and incorrectly

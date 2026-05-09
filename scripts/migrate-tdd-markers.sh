@@ -26,6 +26,22 @@ if [[ ! -f "$PLAN" ]]; then
   exit 0
 fi
 
+# F12: structured audit-log helper. Migrations mutate audit-trail
+# content; without a log, there's no written record that the destructive
+# operation ran. Append-only; never blocks the migration.
+audit_migration() {
+  local summary="$1"
+  local log_dir log_file
+  log_dir="$(dirname "$PLAN")"
+  log_file="$log_dir/migration-audit.log"
+  # Codex round 1 P2: append `|| true` to mkdir AND printf so the
+  # helper truly never blocks under set -e (e.g., readonly fs).
+  mkdir -p "$log_dir" 2>/dev/null || true
+  printf '%s script=migrate-tdd-markers input=%s summary=%q\n' \
+    "$(date -u +%FT%TZ)" "$PLAN" "$summary" \
+    >> "$log_file" 2>/dev/null || true
+}
+
 # Detect already-migrated state.
 already_has_m3_new=false
 already_has_m4=false
@@ -34,6 +50,7 @@ grep -qE '^Implementation reviewed: '   "$PLAN" && already_has_m4=true
 
 if $already_has_m3_new && $already_has_m4; then
   echo "[migrate-tdd-markers] $PLAN already uses the 4-marker format. No changes."
+  audit_migration "no-op (already migrated)"
   exit 0
 fi
 
@@ -74,3 +91,5 @@ fi
 echo "[migrate-tdd-markers] Migration complete for $PLAN."
 echo "[migrate-tdd-markers] Review the diff:"
 echo "    diff -u ${PLAN}.bak $PLAN"
+
+audit_migration "renamed M3 + inserted M4"

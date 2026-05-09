@@ -649,6 +649,24 @@ if [[ "$is_tier1" == "true" ]]; then
       deny "Tier 1 path ($TARGET) requires .tdd/codex/disposition-matrix.md per second_opinion.require_disposition_matrix_tier1. Write the matrix in Step 6 of /second-opinion — see .tdd/templates/disposition-matrix-template.md." \
            "tier1_matrix_missing" "$TARGET"
     fi
+    # F12: detect unfilled migration placeholders. The migration scripts
+    # (migrate-rebuttal-to-matrix.sh) produce template-shaped Reason
+    # text like `<migrated; fill in 1-line concern>` and `<fill in
+    # the actual reason>`. Without this check, an unedited migrated
+    # matrix passes the existing PARTIAL discipline check (>10 chars,
+    # no anti-pattern keyword match) — operator ships a "complete"
+    # matrix that contains template lies.
+    # Use grep -m1 (max 1 match) so we don't pipe through head — and `|| true`
+    # so a non-matching grep doesn't bubble up as a non-zero exit
+    # under pipefail (Codex round 1 P1).
+    placeholder_hit="$(grep -nEm1 '<migrated;|<migrated from|<fill in' "$matrix" 2>/dev/null || true)"
+    if [[ -n "$placeholder_hit" ]]; then
+      # Audit JSON: don't interpolate the matched line (could contain
+      # backslashes / control chars that break JSON). Codex round 1 P3.
+      audit "matrix_unfilled_placeholder" "{\"matrix\":\"${matrix//\"/\\\"}\"}"
+      deny "Tier 1 path ($TARGET): disposition-matrix.md contains unfilled migration placeholder text (line: ${placeholder_hit}). The migrate-rebuttal-to-matrix.sh script writes <migrated; ...> / <fill in ...> placeholders that need operator action — they're template scaffolding, not real adjudication. Edit the matrix to replace every placeholder with concrete content." \
+           "matrix_unfilled_placeholder" "$TARGET"
+    fi
     # Row count == findings count check (only if round1.json available).
     if [[ -f "$round1" ]] && command -v jq >/dev/null 2>&1; then
       findings_count="$(jq -r '(.findings // []) | length' "$round1" 2>/dev/null)"

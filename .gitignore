@@ -29,6 +29,8 @@ CLAUDE.local.md
 .tdd/second-opinion-completed.md
 # require-second-opinion.sh enforcement audit log (local; contains paths only)
 .tdd/second-opinion-enforcement.log
+# Migration-script audit log (F12; local; contains paths + summary)
+.tdd/migration-audit.log
 
 # TDD per-cycle artifacts: gitignored. The active plan and red/green
 # proofs reflect a specific in-flight cycle and would ship as stale

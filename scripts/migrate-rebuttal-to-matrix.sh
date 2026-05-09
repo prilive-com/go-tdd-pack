@@ -32,8 +32,24 @@ fi
 OUT_DIR="$(dirname "$ADJUDICATION")/codex"
 OUT="$OUT_DIR/disposition-matrix.md"
 
+# F12: structured audit-log helper. Migrations mutate audit-trail
+# content; append-only log records what ran. Never blocks the migration.
+audit_migration() {
+  local summary="$1"
+  local log_dir log_file
+  log_dir="$(dirname "$ADJUDICATION")"
+  log_file="$log_dir/migration-audit.log"
+  # Codex round 1 P2: append `|| true` to mkdir AND printf so the
+  # helper truly never blocks under set -e (e.g., readonly fs).
+  mkdir -p "$log_dir" 2>/dev/null || true
+  printf '%s script=migrate-rebuttal-to-matrix input=%s output=%s summary=%q\n' \
+    "$(date -u +%FT%TZ)" "$ADJUDICATION" "$OUT" "$summary" \
+    >> "$log_file" 2>/dev/null || true
+}
+
 if [[ -f "$OUT" ]]; then
   echo "[migrate-rebuttal-to-matrix] Matrix already exists at $OUT — no-op." >&2
+  audit_migration "no-op (output already exists)"
   exit 0
 fi
 
@@ -135,3 +151,19 @@ echo "  1. Fill in the <migrated; ...> placeholders in the matrix"
 echo "  2. Add cross-cutting observations (or write 'No cross-cutting patterns.')"
 echo "  3. Set review_phase to 'plan' or 'diff' as appropriate"
 echo "  4. Verify findings_total matches the row count"
+
+# F12: prominent placeholder warning. The require-second-opinion.sh
+# hook (extended in F12) denies any matrix that still contains
+# <migrated;|<migrated from|<fill in placeholder text. Surface this
+# loudly so the operator doesn't ship a "complete" matrix that's
+# actually template-shaped.
+if grep -qE '<migrated;|<migrated from|<fill in' "$OUT"; then
+  cat >&2 <<WARN
+[migrate-rebuttal-to-matrix] WARNING: $OUT contains unfilled placeholder text.
+The require-second-opinion.sh hook will DENY edits while these placeholders
+remain. To find them: grep -nE '<migrated;|<migrated from|<fill in' "$OUT"
+WARN
+  audit_migration "wrote matrix with placeholders (operator action required)"
+else
+  audit_migration "wrote matrix (no placeholders detected)"
+fi

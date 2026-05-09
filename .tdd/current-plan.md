@@ -1,9 +1,9 @@
-# Bugfix Plan: f10-agents-md-update — refresh AGENTS.md + CLAUDE.md for v1.6.x state
+# Bugfix Plan: f12-migration-script-audit-warning — log + flag unfilled placeholders
 
 Status: active
-Cycle ID: f10-agents-md-update
-Change type: docs (cleanup)
-Tier: 0 (neither AGENTS.md nor CLAUDE.md matches tier1_path_regexes)
+Cycle ID: f12-migration-script-audit-warning
+Change type: cleanup + bugfix
+Tier: 1 (require-second-opinion.sh modified)
 
 <!-- TDD ceremony markers. Set each ONLY after the matching operator APPROVED reply. -->
 Bug reproduced: yes
@@ -17,143 +17,172 @@ Bug-elsewhere check complete: yes
 
 ## Bug
 
-`AGENTS.md` (Codex-facing) and `CLAUDE.md` (Claude-CLI-facing) both
-describe the pack's behavior, but the v1.6.x cycles added significant
-operator-facing knobs that neither file mentions:
+Two migration scripts mutate audit-trail content but don't audit
+themselves and produce output that LOOKS valid to the hooks while
+carrying unfilled placeholders:
 
-| Feature added | AGENTS.md mentions? | CLAUDE.md mentions? |
-|---|---|---|
-| second-opinion is **enforced** (not advisory) | No (line 222 says "advisory only") | No (similar) |
-| F5: hash binding (`require_hash_binding_tier1`) | No | No |
-| F6: enforcement_mode (strict/warn/off + overrides) | No | No |
-| F8: matrix uses `F-EXAMPLE-N` placeholders | No | No |
-| F9: canonical templates in `.tdd/templates/` | No | No |
-| Killswitches (`TDD_COMMIT_GATE_DISABLE`, `SECOND_OPINION_DISABLE`, `SECOND_OPINION_HASH_DISABLE`) | No | No |
+  scripts/migrate-tdd-markers.sh        — 3-marker plan → 4-marker plan
+  scripts/migrate-rebuttal-to-matrix.sh — v1.5.x adjudication → v1.6.0 matrix
 
-Concrete operator-facing impact:
+**Bug 1 — no audit trail.** Both scripts modify (or create) files
+that the hooks read as authoritative state. If a script bug corrupts
+state or an operator doesn't notice the migration ran, there's no
+written record. This violates the rest of the pack's discipline
+where every gate decision goes to an audit log.
 
-1. **Stale guidance: "second-opinion is advisory only."** Operators reading
-   AGENTS.md think they can skip the skill on Tier 1 work. Then the
-   `require-second-opinion.sh` hook blocks their Edit with exit 2 and
-   they're confused.
+**Bug 2 — placeholder text passes the hook.** `migrate-rebuttal-to-
+matrix.sh` writes rows like:
 
-2. **No discoverable enforcement_mode docs.** Teams adopting the pack
-   want to phase in (warn → strict). The config exists but the docs
-   don't tell them.
+```
+| F1 | Codex | P1 | <migrated; fill in 1-line concern> | ACCEPT | <migrated from v1.5.x — fill in concrete reason> | yes |
+```
 
-3. **No killswitch documentation.** When a hook misfires in an
-   emergency, operators don't know how to bypass cleanly. They might
-   delete the hook file or git commit --no-verify, both worse than
-   the documented env-var killswitch.
+The hook's PARTIAL discipline check looks for empty/n/a/none/blank/
+<10 chars in the Reason column. The placeholder text is "<migrated
+from v1.5.x — fill in concrete reason>" — 50 chars, doesn't match
+anti-patterns → PASSES. The hook accepts a row that is BY DEFINITION
+not real adjudication.
 
-4. **Templates aren't discoverable.** F9 made `.tdd/templates/` the
-   canonical source for the adjudication file and disposition matrix.
-   AGENTS.md never mentions templates exist.
+Same shape: the inserted Concern column ("<migrated; fill in 1-line
+concern>") and the Reason column for non-PARTIAL stances. Operators
+who skip the post-migration edit step would have an audit trail that
+looks complete but contains template-shaped lies.
 
 ## Reproduction
 
 ```
-grep -E "advisory only|enforcement_mode|hash_binding|killswitch|DISABLE|templates/" AGENTS.md
-# Output (current state):
-# - "advisory only" (mislabeling second-opinion)
-# All other terms: no match.
+# Create a v1.5.x adjudication with a generic ACCEPT finding
+cat > /tmp/adj.md <<EOF
+date: 2026-05-09T00:00:00Z
+scope: Tier 1
+model: gpt-5.5
+findings_total: 1
+findings:
+  - id: F1
+    severity: P1
+    stance: ACCEPT
+adjudicated_by: claude
+EOF
+
+scripts/migrate-rebuttal-to-matrix.sh /tmp/adj.md
+# Produces /tmp/codex/disposition-matrix.md with placeholder Reason
+
+# The require-second-opinion.sh PARTIAL discipline check would not
+# flag this — the placeholder text is "substantive" by length but
+# meaningless by content.
+
+# Also: nothing in .tdd/ logs that migration ran.
+ls .tdd/migration-audit.log 2>&1
+# ls: cannot access '.tdd/migration-audit.log': No such file or directory
 ```
 
 ## Acceptance criteria
 
-1. AGENTS.md no longer says second-opinion is "advisory only".
-2. AGENTS.md describes second-opinion as **required by the
-   `require-second-opinion.sh` hook** when `codex` is available.
-3. AGENTS.md has a section listing the 3 killswitches with one-line
-   descriptions of when each is appropriate.
-4. AGENTS.md mentions `enforcement_mode` and the 3 valid values
-   (strict/warn/off) with one-line description of each.
-5. AGENTS.md mentions `require_hash_binding_tier1` (F5) with a
-   one-line description.
-6. AGENTS.md references the `.tdd/templates/` directory as canonical
-   for adjudication-completed.md and disposition-matrix.md.
-7. CLAUDE.md gets the same updates (1-6) — keep parity unless there's
-   a specific reason for divergence.
-8. Smoke tests assert the new text is present in both files.
+1. `scripts/migrate-tdd-markers.sh` writes a structured entry to
+   `.tdd/migration-audit.log` with timestamp + script name + input
+   path + summary of what changed (e.g., "renamed M3", "inserted M4").
+2. `scripts/migrate-rebuttal-to-matrix.sh` writes a structured entry
+   to `.tdd/migration-audit.log` with timestamp + script name +
+   input/output paths + finding count.
+3. `scripts/migrate-rebuttal-to-matrix.sh` emits a prominent stderr
+   warning when the output file contains `<migrated; ` or
+   `<migrated from v1.5.x` placeholders, listing what needs operator
+   action.
+4. `require-second-opinion.sh` denies (during the matrix-row-count
+   check) if any matrix Reason column cell contains a
+   `<migrated; ` / `<migrated from` / `<fill in` placeholder. The
+   PARTIAL discipline check's anti-pattern list is extended to
+   include these placeholder shapes.
+5. Existing smoke tests still pass.
+6. New smoke tests:
+   - migrate-tdd-markers.sh appends the audit log entry
+   - migrate-rebuttal-to-matrix.sh appends the audit log entry
+   - migrate-rebuttal-to-matrix.sh emits placeholder warning when
+     output has `<migrated; ` rows
+   - require-second-opinion.sh denies on matrix with
+     `<migrated; ` / `<fill in` placeholders
 
 ## Non-goals
 
-- Restructuring either file. Surgical edits only.
-- Adding a separate `OPERATOR_CONFIG.md`. Inline in AGENTS.md and
-  CLAUDE.md is more discoverable for the audience that reads them.
-- Generating both files from one source. They're allowed to diverge
-  (per AGENTS.md line 28-30); shared content is currently duplicated
-  by hand.
-- Documenting every detail of every hook. Keep operator-facing
-  surface only.
+- Refusing to run the migration on locked plans/matrices. The scripts
+  remain operator-driven; we just add visibility + post-migration
+  detection.
+- Auto-filling the placeholders. Operator judgment is required.
+- Validating placeholder syntax in arbitrary Markdown — only the
+  matrix Reason column matters for the hook check.
 
 ## Affected code
 
-- `AGENTS.md` — fix line 222, add operator-facing knobs section
-- `CLAUDE.md` — same updates
-- `scripts/tdd-test-hooks.sh` — new self-tests
+- `scripts/migrate-tdd-markers.sh` — add audit log line
+- `scripts/migrate-rebuttal-to-matrix.sh` — add audit log line +
+  placeholder-warning detection
+- `.claude/hooks/require-second-opinion.sh` — extend the matrix's
+  Reason placeholder anti-pattern list to include `<migrated; `,
+  `<migrated from`, `<fill in`
+- `scripts/tdd-test-hooks.sh` — new smoke tests
+- `.gitignore` — add `.tdd/migration-audit.log`
 
 ## Test plan
 
 | Test name | Pins criterion # |
 |---|---|
-| f10_agents_md_no_advisory_only_for_second_opinion | 1 |
-| f10_agents_md_describes_second_opinion_enforcement | 2 |
-| f10_agents_md_mentions_killswitches | 3 |
-| f10_agents_md_mentions_enforcement_mode | 4 |
-| f10_agents_md_mentions_hash_binding | 5 |
-| f10_agents_md_mentions_canonical_templates | 6 |
-| f10_claude_md_no_advisory_only_for_second_opinion | 7 |
-| f10_claude_md_mentions_killswitches | 7 |
-| f10_claude_md_mentions_enforcement_mode | 7 |
+| f12_marker_migration_writes_audit_log | 1 |
+| f12_matrix_migration_writes_audit_log | 2 |
+| f12_matrix_migration_warns_on_placeholders | 3 |
+| f12_hook_denies_matrix_with_migrated_placeholder | 4 |
+| f12_hook_denies_matrix_with_fill_in_placeholder | 4 |
+| f12_hook_allows_matrix_without_placeholders | 4 (regression) |
 
 ## Minimum implementation
 
-Add a new section to both AGENTS.md and CLAUDE.md (after the existing
-"Skills available" or "Verification commands" section):
+### Audit log helper (inlined per script for portability)
 
-```markdown
-## Operator config & killswitches
-
-The `.tdd/tdd-config.json` carries operator-facing knobs that change
-how the deny gates behave. Key fields:
-
-- `enforcement_mode` (strict | warn | off; default strict). Applies
-  to gate-tier1-commit, require-second-opinion, require-tdd-state,
-  guard-bash-pipefail. `warn` emits stderr advisory + allows the
-  tool call. `off` is silent passthrough. Per-hook override via
-  `enforcement_mode_overrides: {hook-name: mode}`.
-
-- `second_opinion.require_hash_binding_tier1` (default false). When
-  true AND target path is Tier 1, require-second-opinion.sh denies
-  if the recorded `diff_sha256` (sha of `git diff HEAD --cached`) or
-  `plan_sha256` (sha of `.tdd/current-plan.md`) doesn't match
-  current. Closes the bypass where a fresh adjudication for one diff
-  silently covers later unrelated work.
-
-Emergency env-var killswitches (document in commit message if used):
-
-- `TDD_COMMIT_GATE_DISABLE=1` — bypass gate-tier1-commit.sh
-- `SECOND_OPINION_DISABLE=1` — bypass require-second-opinion.sh
-- `SECOND_OPINION_HASH_DISABLE=1` — bypass F5 hash binding only
-
-Canonical templates (used by /second-opinion Step 6):
-
-- `.tdd/templates/second-opinion-adjudication-template.md`
-- `.tdd/templates/disposition-matrix-template.md`
-
-The matrix template uses `F-EXAMPLE-N` placeholder rows; real rows
-must use `F1`/`F2`/... — those are counted by the row-count gate
-(F8 invariant).
+```bash
+audit_migration() {
+  local script="$1" summary="$2"
+  local log_dir="$(dirname "${PLAN:-.tdd/x}")"
+  local log="${log_dir}/migration-audit.log"
+  mkdir -p "$log_dir" 2>/dev/null
+  printf '%s script=%s input=%s summary=%q\n' \
+    "$(date -u +%FT%TZ)" "$script" "${INPUT_PATH:-?}" "$summary" \
+    >> "$log" 2>/dev/null || true
+}
 ```
 
-Update line 222 of AGENTS.md from "advisory only" to a description of
-actual enforcement. Same for the corresponding line in CLAUDE.md.
+### Hook anti-pattern extension
+
+In `require-second-opinion.sh` Tier 1 require_matrix branch, add
+a placeholder-detection step after the row-count check:
+
+```bash
+placeholder_row="$(grep -nE '<migrated;|<migrated from|<fill in' "$matrix" | head -1)"
+if [[ -n "$placeholder_row" ]]; then
+  deny "Disposition matrix contains unfilled placeholder text (${placeholder_row}). \
+Migration scripts produce template placeholders that need operator action. \
+Edit the matrix to add concrete content or restore the original artifact." \
+       "matrix_unfilled_placeholder" "$TARGET"
+fi
+```
+
+### Placeholder warning in migrate-rebuttal-to-matrix.sh
+
+After writing `$OUT`, scan and warn:
+
+```bash
+if grep -qE '<migrated;|<migrated from|<fill in' "$OUT"; then
+  cat >&2 <<WARN
+[migrate-rebuttal-to-matrix] WARNING: $OUT contains unfilled placeholders.
+The require-second-opinion.sh hook will DENY edits until you fix them.
+Run: grep -n '<migrated;\|<migrated from\|<fill in' "$OUT"
+WARN
+fi
+```
 
 ## Risk register
 
 | Risk | Mitigation |
 |---|---|
-| Adding text expands files; line count grows | Keep new section ~30 lines per file. Acceptable cost for operator clarity. |
-| AGENTS.md and CLAUDE.md drift further | They already differ; this cycle keeps them in lockstep on the operator-facing knobs. Document that intent. |
-| Operator copies the wrong template | Templates are canonical (single source); SKILL.md instructs to copy them. Lower risk now than the old inline-heredoc world. |
+| Audit log grows unbounded over many migrations | Append-only; operators rarely run migrations more than once per plan/matrix. Acceptable for v1. |
+| Hook denies matrix that legitimately uses `<migrated; ` text in a Reason column (e.g., describing a migration in code) | Vanishingly rare; operator can edit out the literal string. The placeholder phrasing is intentionally distinctive. |
+| Both migration scripts assume `.tdd/` exists | Already true (mkdir guarded). Audit log path uses dirname of input, falls back to `.tdd/`. |
+| Adds another deny path to require-second-opinion.sh; risk of test churn | Existing smoke tests don't write `<migrated; ` text in fixtures; should be neutral. |
