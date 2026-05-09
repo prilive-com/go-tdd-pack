@@ -716,13 +716,34 @@ will be **denied with exit 2**.
 
 #### 6a. Adjudication artifact (always required)
 
+Compute hashes for the diff and plan BEFORE writing the adjudication
+so they're stable and bound to the work you just reviewed. The
+`require-second-opinion.sh` hook compares these against current
+content (when `second_opinion.require_hash_binding_tier1=true`) and
+denies on mismatch — closing the bypass where a stale adjudication
+silently covers later unrelated work.
+
 ```bash
 mkdir -p .tdd
+
+# F5 — hash binding. Both fields are always written; hook only enforces
+# the comparison when the Tier-1 flag is enabled.
+diff_sha=""
+if command -v sha256sum >/dev/null 2>&1; then
+  diff_sha=$(git diff HEAD --cached 2>/dev/null | sha256sum | awk '{print $1}')
+fi
+plan_sha=""
+if [[ -f .tdd/current-plan.md ]] && command -v sha256sum >/dev/null 2>&1; then
+  plan_sha=$(sha256sum .tdd/current-plan.md | awk '{print $1}')
+fi
+
 cat > .tdd/second-opinion-completed.md <<EOF
 # Second opinion adjudication
 date: $(date -u +%FT%TZ)
 scope: <Tier 1 or non-Tier-1, copy the value from the chat header you printed>
 model: <the model name from the chat header>
+diff_sha256: $diff_sha
+plan_sha256: $plan_sha
 files_in_scope:
 $(printf '  - %s\n' "$@")
 findings_total: <N>

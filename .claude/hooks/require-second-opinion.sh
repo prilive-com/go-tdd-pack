@@ -342,6 +342,74 @@ if [[ "$adj_ok" != "true" ]]; then
        "no_second_opinion" "$TARGET"
 fi
 
+# F5 — diff/plan hash binding (Tier 1, opt-in via flag).
+#
+# Closes the gate-bypass where a fresh adjudication for one diff
+# silently covers subsequent unrelated changes (the 60-min freshness
+# window is "tied to current work" only by proxy; the proxy fails
+# when work changes faster than the window).
+#
+# Recorded by the /second-opinion skill in Step 6a:
+#   diff_sha256: <sha of `git diff HEAD --cached`>
+#   plan_sha256: <sha of .tdd/current-plan.md>
+# Hook computes current hashes and denies on mismatch.
+#
+# Killswitch (emergency unblock; document in commit message if used):
+#   SECOND_OPINION_HASH_DISABLE=1 git ...
+#
+# Default: opt-in via .tdd/tdd-config.json
+#   second_opinion.require_hash_binding_tier1 (default false)
+if [[ "$is_tier1" == "true" ]] \
+   && [[ "${SECOND_OPINION_HASH_DISABLE:-0}" != "1" ]] \
+   && [[ -f "$TDD_CONFIG" ]] \
+   && command -v jq >/dev/null 2>&1 \
+   && command -v sha256sum >/dev/null 2>&1; then
+  hash_flag="$(jq -r '.second_opinion.require_hash_binding_tier1 // false' "$TDD_CONFIG" 2>/dev/null)"
+  if [[ "$hash_flag" == "true" ]]; then
+    recorded_diff="$(awk '/^diff_sha256:/ {print $2; exit}' "$ADJUDICATION" 2>/dev/null)"
+    recorded_plan="$(awk '/^plan_sha256:/ {print $2; exit}' "$ADJUDICATION" 2>/dev/null)"
+    # Codex round 2 P3: validate hash format. A non-hex value would
+    # corrupt the audit JSON (which interpolates the value) and could
+    # produce confusing log text. sha256 is exactly 64 lowercase hex
+    # chars; anything else is treated as missing (forces a re-run).
+    if [[ -n "$recorded_diff" ]] && ! [[ "$recorded_diff" =~ ^[0-9a-f]{64}$ ]]; then
+      recorded_diff=""
+    fi
+    if [[ -n "$recorded_plan" ]] && ! [[ "$recorded_plan" =~ ^[0-9a-f]{64}$ ]]; then
+      recorded_plan=""
+    fi
+
+    current_diff="$(git -C "$ROOT" diff HEAD --cached 2>/dev/null | sha256sum | awk '{print $1}')"
+    current_plan=""
+    if [[ -f "$TDD_PLAN" ]]; then
+      current_plan="$(sha256sum "$TDD_PLAN" 2>/dev/null | awk '{print $1}')"
+    fi
+
+    # Codex round 1 P1: a forged or stale adjudication can omit ONE hash
+    # field and the omitted dimension is silently unenforced. With Tier
+    # 1 + flag on, BOTH fields must be present (and non-empty). Even
+    # "no staged diff" produces a non-empty hash (sha of empty stream
+    # is a valid 64-hex value), so empty-string here is always wrong.
+    if [[ -z "$recorded_diff" || -z "$recorded_plan" ]]; then
+      audit "missing_hash_field" "{\"flag\":\"on\",\"diff_present\":\"$([[ -n "$recorded_diff" ]] && echo true || echo false)\",\"plan_present\":\"$([[ -n "$recorded_plan" ]] && echo true || echo false)\"}"
+      deny "Adjudication file is missing one or both hash fields (diff_sha256/plan_sha256). With second_opinion.require_hash_binding_tier1=true, BOTH hashes are required so the gate enforces both diff AND plan content binding. A partial omission would silently disable half the check. Re-run /second-opinion (the skill records both hashes automatically in Step 6a) — or set the flag to false in .tdd/tdd-config.json to opt out. Killswitch: SECOND_OPINION_HASH_DISABLE=1." \
+           "missing_hash_field" "$TARGET"
+    fi
+
+    if [[ -n "$recorded_diff" && "$recorded_diff" != "$current_diff" ]]; then
+      audit "diff_hash_mismatch" "{\"recorded\":\"${recorded_diff:0:12}\",\"current\":\"${current_diff:0:12}\"}"
+      deny "Diff has changed since /second-opinion adjudication (recorded: ${recorded_diff:0:12}…, current: ${current_diff:0:12}…). The reviewed work isn't the work you're about to commit. Re-run /second-opinion on the current diff. Killswitch: SECOND_OPINION_HASH_DISABLE=1." \
+           "diff_hash_mismatch" "$TARGET"
+    fi
+
+    if [[ -n "$recorded_plan" && "$recorded_plan" != "$current_plan" ]]; then
+      audit "plan_hash_mismatch" "{\"recorded\":\"${recorded_plan:0:12}\",\"current\":\"${current_plan:0:12}\"}"
+      deny "Plan has changed since /second-opinion adjudication (recorded: ${recorded_plan:0:12}…, current: ${current_plan:0:12}…). The reviewed plan isn't the current plan. Re-run /second-opinion. Killswitch: SECOND_OPINION_HASH_DISABLE=1." \
+           "plan_hash_mismatch" "$TARGET"
+    fi
+  fi
+fi
+
 # PARTIAL discipline check (trial-feedback hardening): every 'stance: PARTIAL' entry in the
 # adjudication artifact must have a substantive 'rejected:' field. Catches
 # the sycophancy-theatre failure mode where Claude labels a finding

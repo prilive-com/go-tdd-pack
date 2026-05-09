@@ -455,6 +455,208 @@ fi
 
 rm -rf "$TMPROOT_RSO"
 
+# F5 cycle (f5-diff-plan-hash-binding): bind adjudication to specific
+# diff/plan content. Default flag OFF; tests flip it ON to exercise.
+echo "Testing F5 (diff/plan hash binding)..."
+TMPROOT_F5=$(mktemp -d)
+git init -q "$TMPROOT_F5"
+( cd "$TMPROOT_F5" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMPROOT_F5/.tdd" "$TMPROOT_F5/internal/auth" "$TMPROOT_F5/internal/utils"
+cp .tdd/tdd-config.json "$TMPROOT_F5/.tdd/"
+echo "package auth" > "$TMPROOT_F5/internal/auth/handler.go"
+echo "package utils" > "$TMPROOT_F5/internal/utils/helper.go"
+( cd "$TMPROOT_F5" && git add . && git commit -q -m initial )
+
+# Tier 1 plan with all markers — Tier 1 ceremony passes; only hash check
+# decides this cycle's outcome.
+cat > "$TMPROOT_F5/.tdd/current-plan.md" <<'EOF'
+# Plan
+Bug reproduced: yes
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: yes
+Implementation reviewed: yes
+EOF
+
+# Stage a small change (Tier 1 path).
+echo "// fix" >> "$TMPROOT_F5/internal/auth/handler.go"
+( cd "$TMPROOT_F5" && git add internal/auth/handler.go )
+
+# Compute hashes for this state.
+F5_DIFF_SHA=$(cd "$TMPROOT_F5" && git diff HEAD --cached | sha256sum | awk '{print $1}')
+F5_PLAN_SHA=$(sha256sum "$TMPROOT_F5/.tdd/current-plan.md" | awk '{print $1}')
+
+# Helper to flip the flag on/off.
+f5_set_flag() {
+  jq ".second_opinion.require_hash_binding_tier1 = $1" \
+    "$TMPROOT_F5/.tdd/tdd-config.json" > /tmp/f5-cfg.json && \
+    mv /tmp/f5-cfg.json "$TMPROOT_F5/.tdd/tdd-config.json"
+}
+
+# Helper to write an adjudication with given hashes.
+f5_write_adj() {
+  local diff_sha="$1" plan_sha="$2"
+  cat > "$TMPROOT_F5/.tdd/second-opinion-completed.md" <<EOF
+date: 2026-05-09T03:30:00Z
+diff_sha256: $diff_sha
+plan_sha256: $plan_sha
+adjudicated_by: claude
+EOF
+}
+
+# AC 4a: flag on, Tier 1, recorded diff hash != current → DENY
+f5_set_flag true
+f5_write_adj "deadbeef0000000000000000000000000000000000000000000000000000beef" "$F5_PLAN_SHA"
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F5" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "F5: diff hash mismatch → deny (Tier 1, flag on)"
+else
+  fail "F5: diff hash mismatch should deny (got: '$out')"
+fi
+
+# AC 4a positive: matching diff hash → ALLOW
+f5_write_adj "$F5_DIFF_SHA" "$F5_PLAN_SHA"
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F5" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "F5: diff hash match → allow (Tier 1, flag on)"
+else
+  fail "F5: matching diff hash should allow (got: '$out')"
+fi
+
+# AC 4b: flag on, Tier 1, recorded plan hash != current → DENY
+f5_write_adj "$F5_DIFF_SHA" "deadbeef0000000000000000000000000000000000000000000000000000beef"
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F5" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "F5: plan hash mismatch → deny (Tier 1, flag on)"
+else
+  fail "F5: plan hash mismatch should deny (got: '$out')"
+fi
+
+# AC 4b positive: matching plan hash → ALLOW
+f5_write_adj "$F5_DIFF_SHA" "$F5_PLAN_SHA"
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F5" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "F5: plan hash match → allow"
+else
+  fail "F5: matching plan hash should allow (got: '$out')"
+fi
+
+# AC 5: flag OFF → legacy behavior (no hash check), even with mismatched hashes
+f5_set_flag false
+f5_write_adj "deadbeef0000000000000000000000000000000000000000000000000000beef" "deadbeef0000000000000000000000000000000000000000000000000000beef"
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F5" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "F5: flag off → legacy behavior (mismatched hashes ignored)"
+else
+  fail "F5: flag off should not enforce hash (got: '$out')"
+fi
+
+# AC 5b: flag ON but path is NOT Tier 1 → hash NOT enforced (Tier-1-scoped)
+f5_set_flag true
+f5_write_adj "deadbeef0000000000000000000000000000000000000000000000000000beef" "deadbeef0000000000000000000000000000000000000000000000000000beef"
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/utils/helper.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F5" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "F5: non-Tier-1 path ignores hash check (flag is Tier-1-scoped)"
+else
+  fail "F5: non-Tier-1 path should not trip hash check (got: '$out')"
+fi
+
+# AC 6: killswitch SECOND_OPINION_HASH_DISABLE=1 overrides flag.
+f5_set_flag true
+f5_write_adj "deadbeef0000000000000000000000000000000000000000000000000000beef" "deadbeef0000000000000000000000000000000000000000000000000000beef"
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F5" SECOND_OPINION_HASH_DISABLE=1 \
+    timeout "${HOOK_TIMEOUT:-5}" bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "F5: SECOND_OPINION_HASH_DISABLE=1 killswitch overrides flag"
+else
+  fail "F5: killswitch should bypass hash check (got: '$out')"
+fi
+
+# AC 8: legacy adjudication (no diff_sha256 / plan_sha256 fields) AND flag on → DENY
+f5_set_flag true
+cat > "$TMPROOT_F5/.tdd/second-opinion-completed.md" <<'EOF'
+date: 2026-05-09T03:30:00Z
+adjudicated_by: claude
+EOF
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F5" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "F5: legacy adjudication (no hashes) + flag on → deny (force re-run)"
+else
+  fail "F5: missing hash fields should deny when flag on (got: '$out')"
+fi
+
+# Codex round 1 P1: partial-omission bypass. A forged adjudication
+# with only diff_sha256 (matching) would silently skip the plan check.
+# Test both directions.
+cat > "$TMPROOT_F5/.tdd/second-opinion-completed.md" <<EOF
+date: 2026-05-09T03:30:00Z
+diff_sha256: $F5_DIFF_SHA
+adjudicated_by: claude
+EOF
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F5" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "F5-codex: diff hash only (plan hash omitted) → deny (R1 P1 closed)"
+else
+  fail "F5-codex: partial omission of plan_sha256 should deny (got: '$out')"
+fi
+
+cat > "$TMPROOT_F5/.tdd/second-opinion-completed.md" <<EOF
+date: 2026-05-09T03:30:00Z
+plan_sha256: $F5_PLAN_SHA
+adjudicated_by: claude
+EOF
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F5" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "F5-codex: plan hash only (diff hash omitted) → deny (R1 P1 closed)"
+else
+  fail "F5-codex: partial omission of diff_sha256 should deny (got: '$out')"
+fi
+
+# Codex round 2 P3: malformed hash values must be rejected as if
+# missing. A non-hex value (e.g., contains quote, backslash, control
+# chars) could corrupt audit JSON or evade format expectations.
+cat > "$TMPROOT_F5/.tdd/second-opinion-completed.md" <<EOF
+date: 2026-05-09T03:30:00Z
+diff_sha256: not-a-real-hex-hash"injected
+plan_sha256: $F5_PLAN_SHA
+adjudicated_by: claude
+EOF
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_F5" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "F5-codex: malformed (non-hex) diff_sha256 treated as missing → deny (R2 P3 closed)"
+else
+  fail "F5-codex: malformed hash should be rejected as missing (got: '$out')"
+fi
+
+rm -rf "$TMPROOT_F5"
+
 # redact-patterns loader (trial-feedback hardening): extract load_redact_patterns from SKILL.md
 # and run it against fixture files. Catches regression of the comment-
 # filter + regex-validator that protects against silent diff emptying.

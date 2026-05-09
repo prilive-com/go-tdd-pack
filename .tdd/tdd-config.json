@@ -139,6 +139,9 @@
     "require_disposition_matrix_tier1": false,
 
     "_size_threshold_doc": "Layer-0 commit-time check in gate-tier1-commit.sh: any commit with churn (added + removed lines) above size_threshold_lines requires fresh /second-opinion adjudication, regardless of Tier 1/cycle state. Catches large refactors on non-Tier-1 paths that the Tier-1-specific gate misses. Set to 0 (or negative) to disable. Default 50 — calibrated for routine work; bump higher for projects that commit large vendored content or big generated files.",
-    "size_threshold_lines": 50
+    "size_threshold_lines": 50,
+
+    "_require_hash_binding_tier1_doc": "F5: bind /second-opinion adjudication to specific diff/plan content. When true AND path is Tier 1, require-second-opinion.sh denies if recorded diff_sha256 (sha of `git diff HEAD --cached`) or plan_sha256 (sha of .tdd/current-plan.md) doesn't match current. Closes the bypass where a fresh adjudication for one diff silently covers later unrelated work. Killswitch env var: SECOND_OPINION_HASH_DISABLE=1.",
+    "require_hash_binding_tier1": false
   }
 }
