@@ -3511,6 +3511,154 @@ fi
 
 echo
 
+# gate-level-no-verify-closure cycle: prepare-commit-msg closes the
+# --no-verify bypass that's deferred in the pre-commit hook header.
+# git's --no-verify ONLY bypasses pre-commit + commit-msg (per docs);
+# prepare-commit-msg still fires, and a non-zero exit aborts the commit.
+echo "Testing gate-level-no-verify-closure (prepare-commit-msg)..."
+
+NV_HOOK="$PROJECT_ROOT/scripts/git-hooks/prepare-commit-msg"
+
+# AC 1: file exists and is executable.
+if [ -x "$NV_HOOK" ]; then
+  pass "nv: scripts/git-hooks/prepare-commit-msg exists and is executable"
+else
+  fail "nv: $NV_HOOK missing or not executable"
+fi
+
+# Helper: invoke the prepare-commit-msg hook with realistic args
+# (git passes 1-3: msg-file, source, sha). Capture rc without
+# tripping `set -e`.
+nv_invoke() {
+  local dir="$1" rc=0
+  local msgfile
+  msgfile="$(mktemp)"
+  echo "test commit message" > "$msgfile"
+  ( cd "$dir" && bash "$NV_HOOK" "$msgfile" "message" >/dev/null 2>&1 ) || rc=$?
+  rm -f "$msgfile"
+  echo "$rc"
+}
+
+# AC 3a: Tier 1 staged + no plan → deny.
+TMP=$(gh_setup)
+gh_stage_tier1 "$TMP"
+if [ "$(nv_invoke "$TMP")" -ne 0 ]; then
+  pass "nv: Tier 1 staged + no plan → deny (closes --no-verify bypass)"
+else
+  fail "nv: Tier 1 staged without plan should deny via prepare-commit-msg"
+fi
+rm -rf "$TMP"
+
+# AC 3b: Tier 1 staged + missing M3 marker → deny.
+TMP=$(gh_setup)
+gh_stage_tier1 "$TMP"
+cat > "$TMP/.tdd/current-plan.md" <<'EOF'
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: no
+EOF
+if [ "$(nv_invoke "$TMP")" -ne 0 ]; then
+  pass "nv: Tier 1 staged + M3=no → deny"
+else
+  fail "nv: M3=no should deny via prepare-commit-msg"
+fi
+rm -rf "$TMP"
+
+# AC 3c: Tier 1 staged + plan complete + missing adjudication → deny.
+TMP=$(gh_setup)
+gh_stage_tier1 "$TMP"
+gh_write_plan_full "$TMP"
+if [ "$(nv_invoke "$TMP")" -ne 0 ]; then
+  pass "nv: Tier 1 staged + plan + no adjudication → deny"
+else
+  fail "nv: missing adjudication should deny via prepare-commit-msg"
+fi
+rm -rf "$TMP"
+
+# AC regression: clean state → allow.
+TMP=$(gh_setup)
+gh_stage_tier1 "$TMP"
+gh_write_plan_full "$TMP"
+gh_write_adj_fresh "$TMP"
+if [ "$(nv_invoke "$TMP")" -eq 0 ]; then
+  pass "nv: Tier 1 + plan + fresh adjudication → allow (regression)"
+else
+  fail "nv: clean state should allow"
+fi
+rm -rf "$TMP"
+
+# AC 5: TDD_GIT_HOOK_DISABLE=1 killswitch → silent allow even when
+# checks would otherwise deny.
+TMP=$(gh_setup)
+gh_stage_tier1 "$TMP"
+nv_msg=$(mktemp)
+echo "test" > "$nv_msg"
+nv_out=$( ( cd "$TMP" && TDD_GIT_HOOK_DISABLE=1 bash "$NV_HOOK" "$nv_msg" "message" 2>&1 ); echo "exit:$?")
+rm -f "$nv_msg"
+if [[ "$nv_out" == *"exit:0"* ]] && [[ "$nv_out" != *"BLOCKED"* ]]; then
+  pass "nv: TDD_GIT_HOOK_DISABLE=1 killswitch → silent allow"
+else
+  fail "nv: killswitch should allow silently (got: '$nv_out')"
+fi
+rm -rf "$TMP"
+
+# AC 4 (warn): the wrapper exec's pre-commit which uses HOOK_NAME=
+# "git-pre-commit", so the SHARED override key controls both hooks
+# (Codex R1 P2 — documented in both hook headers).
+TMP=$(gh_setup)
+gh_stage_tier1 "$TMP"
+jq '.enforcement_mode_overrides."git-pre-commit" = "warn"' \
+  "$TMP/.tdd/tdd-config.json" > /tmp/nv-cfg.json && \
+  mv /tmp/nv-cfg.json "$TMP/.tdd/tdd-config.json"
+nv_msg=$(mktemp); echo "test" > "$nv_msg"
+nv_out=$( ( cd "$TMP" && bash "$NV_HOOK" "$nv_msg" "message" 2>&1 ); echo "exit:$?")
+rm -f "$nv_msg"
+if [[ "$nv_out" == *"exit:0"* ]] && [[ "$nv_out" == *"WARNING"* ]]; then
+  pass "nv: warn via the SHARED git-pre-commit override key → stderr + allow"
+else
+  fail "nv: warn mode should warn-not-deny via prepare-commit-msg (got: '$nv_out')"
+fi
+rm -rf "$TMP"
+
+# Codex R1 P2 (negative): an override keyed on "git-prepare-commit-msg"
+# has NO effect today (intentional v1 design — single logic path,
+# single knob). Sets that key + leaves global=strict. Should still DENY.
+TMP=$(gh_setup)
+gh_stage_tier1 "$TMP"
+jq '.enforcement_mode_overrides."git-prepare-commit-msg" = "warn"' \
+  "$TMP/.tdd/tdd-config.json" > /tmp/nv-cfg.json && \
+  mv /tmp/nv-cfg.json "$TMP/.tdd/tdd-config.json"
+if [ "$(nv_invoke "$TMP")" -ne 0 ]; then
+  pass "nv-codex: 'git-prepare-commit-msg' override key has no effect today (R1 P2 documented intent)"
+else
+  fail "nv-codex: prepare-commit-msg-keyed override shouldn't soften without git-pre-commit key"
+fi
+rm -rf "$TMP"
+
+# AC 6: hook ignores its 1-3 args from git (msg-file, source, sha).
+# Pass garbage args; behavior should match passing none.
+TMP=$(gh_setup)
+gh_stage_tier1 "$TMP"
+nv_garbage=$( ( cd "$TMP" && bash "$NV_HOOK" "/no/such/file" "merge" "deadbeef" 2>&1 ); echo "exit:$?")
+if [[ "$nv_garbage" == *"BLOCKED"* ]] && [[ "$nv_garbage" != *"exit:0"* ]]; then
+  pass "nv: hook ignores its git args (deny on Tier 1 + no plan, regardless of args)"
+else
+  fail "nv: hook should ignore args and check Tier 1 state (got: '$nv_garbage')"
+fi
+rm -rf "$TMP"
+
+# AC 7: pre-commit header updated — KNOWN LIMITATION → CLOSED IN
+# FOLLOW-UP referencing prepare-commit-msg.
+GH_PRE_COMMIT_HEADER="$PROJECT_ROOT/scripts/git-hooks/pre-commit"
+if grep -q "prepare-commit-msg" "$GH_PRE_COMMIT_HEADER" \
+   && grep -qE "CLOSED|closes? the.*--no-verify|closed in follow-up" "$GH_PRE_COMMIT_HEADER"; then
+  pass "nv: pre-commit header updated — --no-verify limit closed via prepare-commit-msg"
+else
+  fail "nv: pre-commit header should reference prepare-commit-msg as the closure"
+fi
+
+echo
+
 # F13 cycle (f13-trivial-paths-consolidation): single config source
 # for "skip second opinion" path lists. require-second-opinion.sh +
 # SKILL.md consume tdd-config.json `trivial_paths` (with inline fallback);

@@ -39,18 +39,27 @@
 # KILLSWITCH (emergency; document in commit message if used)
 #   TDD_GIT_HOOK_DISABLE=1 git commit ...
 #
-# KNOWN LIMITATION — `git commit --no-verify` (Codex round 1 P1)
+# `git commit --no-verify` — CLOSED IN FOLLOW-UP
 #
-# Git itself skips ALL pre-commit hooks when --no-verify (or -n) is
-# used. That's documented git behavior, not something this hook can
-# override. The PreToolUse layer (.claude/hooks/guard-dangerous-bash.sh)
-# already denies `--no-verify` / `-n` in any Bash command, so Claude
-# can't reach this state via a normal command. The remaining bypass
-# requires an operator-configured alias like
-# `git config alias.ci 'commit --no-verify'` — i.e., a deliberate,
-# conscious circumvention. Closing this requires moving the check to
-# `prepare-commit-msg` (which IS NOT skipped by --no-verify) and is
-# architecturally larger than this cycle. Tracked as follow-up.
+# Git itself skips this pre-commit hook when --no-verify (or -n) is
+# used. That bypass is closed by the SIBLING `prepare-commit-msg`
+# hook (also in scripts/git-hooks/), which fires regardless of
+# --no-verify (per git docs: --no-verify only skips pre-commit and
+# commit-msg). prepare-commit-msg is a thin wrapper that exec's
+# back into THIS script, so the gate logic lives in one place.
+#
+# To close the bypass, install BOTH hooks:
+#   Option A (cp): copy BOTH pre-commit AND prepare-commit-msg
+#   Option B (core.hooksPath scripts/git-hooks): activates both
+#     automatically
+#   Option C (third-party manager): wire BOTH
+#
+# Because prepare-commit-msg exec's this script, BOTH hooks resolve
+# the same HOOK_NAME ("git-pre-commit") and read the same
+# enforcement_mode override key. v1 design: one logic path, one knob.
+# Side effect: a normal `git commit` runs the gate twice (pre-commit
+# then prepare-commit-msg). Cost is sub-second; acceptable for the
+# --no-verify closure.
 #
 # CONFIG (mirrors .claude/hooks/gate-tier1-commit.sh)
 #   .tdd/tdd-config.json

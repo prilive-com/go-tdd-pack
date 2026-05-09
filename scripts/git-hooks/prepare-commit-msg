@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# scripts/git-hooks/prepare-commit-msg
+#
+# Closes the `git commit --no-verify` bypass deferred from cycle
+# gate-level-followup-pre-commit-hook.
+#
+# Per git docs / githooks(5), `--no-verify` (or `-n`) skips ONLY the
+# pre-commit and commit-msg hooks. prepare-commit-msg still fires,
+# and a non-zero exit aborts the commit. So this hook runs the SAME
+# Tier 1 gate as pre-commit, catching cases where:
+#   - operator alias resolves to `commit --no-verify` (e.g.,
+#     `git config alias.ci 'commit --no-verify'`)
+#   - operator runs `git commit --no-verify -m msg` directly
+#   - any other path that bypasses pre-commit
+#
+# This is a thin wrapper that delegates to pre-commit's check logic.
+# Args from git ($1=message-file, $2=source, $3=commit-sha) are
+# ignored — Tier 1 enforcement is independent of message contents.
+#
+# INSTALLATION, KILLSWITCH, CONFIG: see scripts/git-hooks/pre-commit's
+# header. Both hooks share the same env vars and config keys.
+# Activating both is required to close the --no-verify bypass:
+#   - Option A (cp): copy BOTH files to .git/hooks/
+#   - Option B (core.hooksPath scripts/git-hooks): activates both
+#     automatically
+#   - Option C (third-party manager): wire BOTH
+#
+# SHARED enforcement_mode override key (Codex R1 P2)
+#
+# Because this wrapper exec's pre-commit, the resolved HOOK_NAME is
+# "git-pre-commit" for BOTH hooks. The enforcement_mode_overrides
+# entry that controls them is:
+#   "enforcement_mode_overrides": { "git-pre-commit": "warn" }
+# An override keyed on "git-prepare-commit-msg" has NO effect today.
+# This is intentional in v1: one logic path, one knob. If operators
+# need per-hook tuning (warn pre-commit but strict prepare-commit-msg,
+# or vice versa), that's a follow-up cycle.
+#
+# DUPLICATE-RUN COST (Codex R1 P3)
+#
+# On a normal `git commit` (no --no-verify), git fires pre-commit
+# AND prepare-commit-msg. Both run the same gate. Cost: an extra
+# bash exec + jq pass per commit (sub-second). Failed commits still
+# abort at pre-commit; warn-mode commits emit the same advisory
+# twice. Acceptable trade for closing the --no-verify bypass.
+
+exec "$(dirname "$0")/pre-commit" "$@"
