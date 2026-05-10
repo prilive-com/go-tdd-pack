@@ -1,11 +1,10 @@
-# Bugfix Plan: v1.6.1-release-blockers — close 5 P1 + 1 P0 enforcement gaps from combined review
+# Bugfix Plan: v1.6.2-marker-drift-and-pass-a-docs — reduce per-cycle review friction
 
 Status: active
-Cycle ID: v1.6.1-release-blockers
-Change type: bugfix (release-blocking; combined v1.6.1 review identified
-                    5 P1 + 1 P0 + 1 cross-cycle gap)
-Tier: 1 (touches gate-tier1-commit.sh, require-second-opinion.sh,
-         scripts/git-hooks/pre-commit, .tdd/tdd-config.json)
+Cycle ID: v1.6.2-marker-drift-and-pass-a-docs
+Change type: bugfix (operator-friction reduction; no new gates, no
+                    semver-breaking schema changes)
+Tier: 1 (touches `.claude/skills/second-opinion/SKILL.md`)
 
 <!-- TDD ceremony markers. Set each ONLY after the matching operator APPROVED reply. -->
 Bug reproduced: yes
@@ -17,348 +16,429 @@ Fix applied: yes
 Regression tests added: yes
 Bug-elsewhere check complete: yes
 
-## Bug
+## Problem statement
 
-Combined v1.6.1 review (Claude self-review + 2 external consultants)
-identified 5 P1s + 1 P0 + 1 cross-cycle invariant gap that block
-tagging v1.6.1 as a reliable Tier 1 governance release. Each
-verified by direct code reproduction.
+The `parasitoid` developer's 10-cycle trial of v1.6.0 (memo dated
+2026-05-09) reported two operator-friction issues unrelated to the
+v1.6.1 governance bypasses already shipped:
 
-The 5 release-blocker findings (C1-C5 from the review) and the
-new C9-revised + C14:
+1. **Marker-name drift between Codex's training data and the v1.6.0
+   schema.** Codex's pre-v1.6.0 prior holds `Human approved
+   implementation: yes` as the canonical M3 marker; the schema
+   renamed it to `Green phase authorized: yes` and exposed the old
+   name as a `marker_aliases` entry. Codex returns P1 findings of
+   the form "marker name doesn't match required gate vocabulary" in
+   3/5 plan-review Pass B runs. Each finding is incorrect on the
+   facts but requires the operator to write a substantive PUSHBACK
+   adjudication (~3-5 minutes of artifact-rewriting +
+   ~10 lines of audit-trail noise per cycle). Over 10 cycles,
+   ~30-50 minutes of friction on a non-issue.
 
-### C1 (P1) — `require-second-opinion.sh` fails open when codex missing
+2. **Pass A's value framing is undersold.** The v1.6.0 SKILL.md
+   describes Pass A as an independent design generator. The trial
+   showed Pass A's value pattern (3/10 converged with Claude, 4/10
+   stylistic divergence, 3/10 substantive priming of Pass B) is
+   real but the structural property — Pass A is the noise-floor /
+   independence measurement for Pass B's anchoring — is not
+   documented. Operators perceive Pass A's latency cost as
+   unjustified when Pass B fails (network/API issue), even though
+   Pass A's standalone design doc remains a valid peer-review
+   artifact.
 
-`require-second-opinion.sh` lines 195-198: if `codex` binary is
-missing, hook unconditionally calls `allow`. Bypasses all
-enforcement_mode plumbing. In strict mode, removing codex from PATH
-silently disables every Tier 1 check.
+Neither is a gate bug. Both are friction the pack can mechanically
+reduce.
 
-### C2 (P0) — git-side pre-commit enforces strictly weaker policy than gate-tier1-commit.sh
+## Reproduction
 
-`scripts/git-hooks/pre-commit` line 220 reads
-`required_markers_edit_time` (M1+M2+M3) instead of
-`required_markers_commit_time` (M1+M2+M3+**M4**). Hook never
-references `green-proof.md` anywhere. So:
+### Item 1 — marker drift (PR3, PR6, PR7 trial cycles)
 
-- gate-tier1-commit.sh enforces M1+M2+M3+M4 + green-proof + adjudication
-- pre-commit enforces M1+M2+M3 + adjudication
+```text
+Pass B JSON output (verbatim):
+{
+  "id": "F1",
+  "severity": "P1",
+  "title": "Tier 1 implementation approval marker doesn't match required gate vocabulary",
+  "evidence": "Repo instructions require the Tier 1 marker `Human approved implementation: yes`. The plan instead declares `Green phase authorized: no`."
+}
+```
 
-The git-side hook is supposed to be the deterministic floor that
-catches what the leaky PreToolUse layer misses. Instead it enforces
-LESS. The architecture is inverted. Reproducible: M1+M2+M3 set, no
-M4, no green-proof → pre-commit exits 0 silently.
+Local config check:
+```bash
+$ jq '.required_markers_commit_time' .tdd/tdd-config.json
+[
+  "Human approved spec: yes",
+  "Red phase confirmed: yes",
+  "Green phase authorized: yes",
+  "Implementation reviewed: yes"
+]
+$ jq '.marker_aliases' .tdd/tdd-config.json
+{
+  "Green phase authorized: yes": "Human approved implementation: yes",
+  "Implementation reviewed: yes":  "Human approved implementation: yes"
+}
+```
 
-P0 because it's a category error (architecture inversion), not just
-a missed check.
+The local config is canonical (post-v1.6.0); Codex's prior is
+stale. PUSHBACK is the correct adjudication, but it's costly
+per cycle.
 
-### C3 (P1) — Layer 0 mode classifier doesn't drive Tier 1 detection
+### Item 2 — Pass A perception
 
-`gate-tier1-commit.sh` line 364 sets `CHANGED_FILES` from
-`git diff --cached --name-only` (staged-only). Lines 580-690 compute
-`COMMIT_MODE_ALL/PATHSPEC/UNCERTAIN` correctly, but feed it ONLY to
-the size-threshold (CHURN) computation. Tier 1 detection still uses
-staged-only.
+Trial frequency from the developer's memo:
 
-Reproduction: stage non-Tier-1 + leave Tier 1 unstaged-tracked +
-`git commit -am test` → COMMIT_MODE_ALL=true → CHURN counts both
-files → but TIER1_PROD=[] (only checks staged) → exit 0 silently.
+| Pattern | Cycles |
+|---|---|
+| Pass A converged with Claude's design, zero unique catches | 3/10 |
+| Pass A had stylistic divergence Claude overrode | 4/10 |
+| Pass A surfaced substantive concern Pass B then sharpened | 3/10 |
 
-The Layer 0 cycle's stated goal (close `git commit -am` bypasses)
-was achieved for the size threshold but NOT for Tier 1 detection.
+Reproduction: read SKILL.md Step 4 description; note that "Pass A
+generates an independent design" is sold as direct-find-bugs value.
+The trial data shows Pass A's value is mostly indirect (priming Pass
+B). Operators reading the doc expect Pass A to find unique bugs;
+when it doesn't (3/10 converged cases), they question its ROI.
 
-### C4 + A2 (P1) — Trivial filter exempts Tier 1 governance files
+## Expected behavior
 
-`gate-tier1-commit.sh` line 376, `scripts/git-hooks/pre-commit`
-line 191, AND `require-second-opinion.sh` `is_always_allowed_path()`
-all run a trivial-path filter BEFORE the Tier 1 regex check. Files
-matching `*.md` (the broadest pattern) are exempted before they get
-evaluated against `tier1_path_regexes`.
+### Item 1
 
-Verified scope (tested empirically with the actual case patterns):
+When Codex's Pass B output contains a known marker-drift finding
+(matches a documented pattern such as
+`Human approved implementation: yes` referenced as required), the
+hook preprocessor flags the finding with
+`auto_pushback_eligible: true` and a canonical short-form citation
+("v1.6.0 renamed this marker; see .tdd/tdd-config.json
+marker_aliases"). The agent's PUSHBACK rationale can be short-form
+(one line + cite local evidence) instead of full essay.
 
-- `.claude/skills/second-opinion/SKILL.md` (declared Tier 1) →
-  EXEMPTED via `*.md`
-- ANY downstream-consumer `subdir/.claude/*` or `subdir/.tdd/*`
-  paths declared Tier 1 → EXEMPTED via `*/.claude/*` / `*/.tdd/*`
-- Top-level `.claude/hooks/*.sh` and `.tdd/tdd-config.json` →
-  correctly go through Tier 1 (no leading `/` in path means they
-  don't match the `*/.claude/*` pattern; this part of my prior
-  C4 framing was wrong)
+The /second-opinion skill's prompt template includes a
+schema-context block generated from `.tdd/tdd-config.json` so
+Codex sees the canonical markers + deprecated aliases + reviewer
+instruction "prefer local config to model prior" before producing
+findings. This SHOULD reduce drift findings at the source, not
+just make them cheaper to handle.
 
-A2 is the same bug class in the third hook (`require-second-opinion.sh`).
-This is the F4 fix propagated to two more places.
+### Item 2
 
-### C5 (P1) — `check-tdd-state-clean.sh` hardcodes pre-migration M3 marker
+SKILL.md (Pass A description section) reframes Pass A as:
+- Noise-floor measurement for Pass B's anchoring (structural property)
+- Standalone peer-review artifact (independent value when Pass B fails)
 
-Lines 39-43 hardcode `Human approved implementation: yes`. Migration
-script renames this to `Green phase authorized: yes`. Post-migration
-plans use the new name. CI's `tdd-state-clean` job grep's for the
-old name → reports MISSING → fails on every legitimate cycle. Latent
-because the job runs only on PRs and we pushed direct to main.
+`docs/specs/second-opinion-v1.6.0-spec.md` documents the trial's
+Pass A frequency data so operators know what to expect.
 
-### C9-revised (P1, was P3) — Hash binding default-off in strict mode is internally inconsistent
+## Actual behavior
 
-`tdd-config.json` line 145: `require_hash_binding_tier1: false`.
-Mechanism is fully implemented (F5 cycle), but default-off means a
-team in `enforcement_mode: strict` still has the stale-review
-bypass open: run /second-opinion on diff A → modify Tier 1 to diff
-B → gate accepts fresh artifact for unrelated work.
+### Item 1
 
-If "strict" means strict, then strict + hash_binding=off creates a
-documented bypass within the supposedly-strict configuration. Either
-the default must depend on mode (strict → ON), or strict + off must
-be a config error refused at startup.
+Codex returns marker-drift P1 findings → agent must read each →
+verify against `.tdd/tdd-config.json` → write substantive PUSHBACK
+to disposition matrix → carry through to commit message. ~3-5 min
+of friction per cycle.
 
-### C14 (cross-cycle invariant gap) — Diff-driven /second-opinion missed C1-C5
+### Item 2
 
-The /second-opinion cycles caught ~50 within-cycle findings but
-missed C1-C5 because Codex reviews diffs in isolation, not
-cross-hook contracts or cross-cycle invariants. The gaps are real;
-fixing them as one-offs leaves the same class of bug latent for
-the next cycle.
+Operators see Pass A's "trade-offs accepted/rejected" section and
+expect direct catches; trial data shows ~30% direct convergence
+(no unique catches). Cost-benefit feels mispriced. When Pass B
+times out, Pass A's design-doc artifact feels like sunk cost.
 
-Concrete invariants that, if asserted as smoke tests, would have
-caught C1-C5 mechanically:
-- "every commit-time gate reads `required_markers_commit_time`"
-- "every Tier 1 gate honors files declared Tier 1 in config"
-- "every commit-time gate references `green-proof.md`"
-- "no script hardcodes a marker name outside fallback blocks"
+## Business/domain invariant
 
-## Reproduction (for each finding)
+The pack's anti-sycophancy discipline (PUSHBACK requires
+substantive rationale) is correct. We are NOT changing it. We are
+only:
+- Giving Codex more local schema context up-front so drift findings
+  occur less often (preventive fix)
+- Letting agents fast-track PUSHBACK when drift findings DO occur,
+  with mandatory citation of local evidence (curative fix)
+- Documenting what Pass A actually delivers structurally so
+  operators can calibrate expectations correctly
 
-See `.tdd/codex/disposition-matrix.md` from the prior review (and
-the verification record in this conversation). Each of C1-C5 was
-reproduced by direct invocation.
-
-## Acceptance criteria
-
-### Fix 1 — C1 + C8 grouped (codex-missing fail-closed + smoke stub)
-
-1.1 `require-second-opinion.sh`: when `codex` is missing AND
-    `enforcement_mode=strict` AND target is Tier 1 (or non-Tier-1
-    path that requires adjudication) AND adjudication is missing,
-    DENY (not allow). Same for `jq` missing.
-1.2 When codex is missing AND adjudication EXISTS AND is fresh,
-    ALLOW (operator can complete adjudication via Edit/Write
-    without needing codex installed).
-1.3 `enforcement_mode=warn` with codex missing + missing adjudication
-    → stderr WARNING + allow.
-1.4 `enforcement_mode=off` → silent allow (current behavior).
-1.5 Existing `SECOND_OPINION_DISABLE=1` killswitch overrides any
-    codex-missing path (preserved).
-1.6 Smoke tests add a fake `codex` shim in CI (cross-shell PATH
-    prepend) so smoke tests don't depend on real codex binary.
-    Same commit as the C1 fix to avoid broken-CI window.
-1.7 Smoke tests: codex-missing matrix (strict+missing-adj=deny;
-    strict+fresh-adj=allow; warn=allow-with-stderr; off=silent).
-
-### Fix 2 — C2 (pre-commit M4 + green-proof)
-
-2.1 `scripts/git-hooks/pre-commit` reads
-    `.required_markers_commit_time` (default M1+M2+M3+M4 if
-    config field absent), with `marker_aliases` support.
-2.2 New check after marker loop: if `.tdd/green-proof.md` doesn't
-    exist, DENY with "Tier 1 commit requires green-proof.md".
-2.3 Adjudication-existence check fires regardless of
-    `require_hash_binding_tier1` flag (adjudication file MUST
-    exist; hash binding is opt-in additional check on top).
-2.4 Smoke fixtures:
-    - M1+M2+M3 only, no M4 → BLOCK (currently allows)
-    - M1+M2+M3+M4 + adjudication, no green-proof.md → BLOCK
-    - M1+M2+M3+M4 + adjudication + green-proof.md → ALLOW
-2.5 prepare-commit-msg wrapper inherits the new behavior via
-    its `exec` to pre-commit (no separate change needed).
-
-### Fix 3 — C5 (check-tdd-state-clean.sh config-driven markers)
-
-3.1 Script reads `.required_markers_commit_time` from
-    `tdd-config.json` (with fallback to `required_markers` then
-    to hardcoded M1+M2+M3+M4 defaults).
-3.2 `marker_aliases` support: if a plan has the OLD marker name
-    only, treat as present + emit deprecation warning to stderr.
-3.3 Smoke fixtures:
-    - active plan + M1+M2+M3+M4 (new names) → PASS
-    - active plan + old M3 name + M1+M2+M4 (new) → PASS with deprecation warning
-    - active plan + M1+M2+M3 only (missing M4) → FAIL
-    - idle plan → PASS (existing)
-    - missing plan → PASS (existing)
-
-### Fix 4 — C4 + A2 (Tier 1 regex check before trivial filter, in 3 hooks)
-
-4.1 `gate-tier1-commit.sh`: in TIER1_PROD construction loop,
-    Tier 1 regex match runs FIRST. Trivial filter only applies
-    to files that did NOT match Tier 1.
-4.2 `scripts/git-hooks/pre-commit`: same change.
-4.3 `require-second-opinion.sh`: in `is_always_allowed_path()`
-    OR in the path-evaluation block that calls it, ensure Tier 1
-    paths are NEVER short-circuited by the trivial filter. Match
-    the same evaluation order as the commit-time gates.
-4.4 Smoke fixtures:
-    - `.claude/skills/second-opinion/SKILL.md` staged + no plan → BLOCK in all 3 hooks (currently allows)
-    - `subdir/.claude/skills/SKILL.md` declared Tier 1 → BLOCK (downstream-consumer fixture)
-    - `docs/random.md` (NOT Tier 1) → PASS (regression)
-    - `README.md` (NOT Tier 1) → PASS (regression)
-    - `internal/auth/x.go` (Tier 1) → BLOCK (regression)
-
-### Fix 5 — C3 (Layer 0 COMMIT_MODE drives Tier 1 detection)
-
-5.1 `gate-tier1-commit.sh`: refactor so the COMMIT_MODE
-    classification runs BEFORE the TIER1_PROD construction. Then
-    use the classifier to choose the candidate file set:
-    - `PLAIN` → `git diff --cached --name-only` (current; preserve narrow scope)
-    - `ALL`/`PATHSPEC`/`UNCERTAIN` → `git diff HEAD --name-only` plus untracked
-5.2 The size-threshold (CHURN) computation continues to use the
-    same wider set in the matching modes (existing behavior).
-5.3 Smoke fixtures:
-    - PLAIN + only non-Tier-1 staged + Tier-1 WIP unstaged → ALLOW (preserve PLAIN narrow scope)
-    - ALL (`-am`) + non-Tier-1 staged + Tier-1 WIP unstaged → BLOCK (currently allows)
-    - PATHSPEC (`commit foo.go`) + Tier-1 in pathspec → BLOCK
-    - UNCERTAIN (unknown long opt) + Tier-1 unstaged → BLOCK (conservative)
-    - PLAIN + Tier-1 staged + non-Tier-1 WIP unstaged → BLOCK (existing)
-
-### Fix 6 — C9-revised (hash binding mode-based default)
-
-6.1 In `require-second-opinion.sh` AND `scripts/git-hooks/pre-commit`:
-    when `enforcement_mode=strict` (per-hook resolved) AND
-    `require_hash_binding_tier1=false`, EITHER:
-    - (Option A) Auto-promote: treat the flag as `true` for strict
-      mode (with stderr note that strict implies hash binding)
-    - (Option B) Refuse to start: deny with "strict mode requires
-      require_hash_binding_tier1: true; either flip the flag or
-      use enforcement_mode: warn"
-6.2 Default behavior in `warn`/`off` modes preserved (flag is
-    optional; respects whatever's in config).
-6.3 Smoke fixtures:
-    - strict + flag=false → behavior matches strict + flag=true (Option A) OR refuse with clear message (Option B)
-    - warn + flag=false → no change (current behavior)
-    - off + flag=false → no change
-
-### Fix 7 — C14 (cross-contract smoke tests)
-
-7.1 New smoke section "Contract invariant tests" with assertions
-    that span hooks (not within a single hook):
-
-    - **Path coverage invariant**: every Tier 1 regex in
-      `tier1_path_regexes` must produce a deny path through both
-      gate-tier1-commit.sh AND scripts/git-hooks/pre-commit
-      when matched against a synthetic staged file. Generates
-      one fixture per regex.
-    - **Marker source invariant**: grep all production hooks for
-      hardcoded marker strings. Any hook that contains
-      `Human approved spec`, `Red phase confirmed`,
-      `Green phase authorized`, or `Implementation reviewed`
-      OUTSIDE of fallback-defaults blocks must read from config.
-      Smoke asserts grep finds zero unapproved hardcoded uses.
-    - **Commit-time policy invariant**: every commit-time gate
-      script (gate-tier1-commit.sh, scripts/git-hooks/pre-commit)
-      must contain references to BOTH `green-proof` AND
-      `Implementation reviewed: yes` (or read them from config).
-      Smoke asserts via grep.
-    - **Trivial-filter ordering invariant**: in any hook with
-      both Tier 1 regex match AND trivial-path filter, the Tier 1
-      block appears BEFORE the trivial filter. Asserted via
-      line-number comparison in the source.
-
-7.2 Each assertion failure prints: which invariant, which hook,
-    what's missing/wrong. Operator clear-message for diagnosis.
-7.3 These tests run in the same smoke suite (`scripts/tdd-test-hooks.sh`)
-    so CI catches future regressions.
-
-## Non-goals (this cycle)
-
-These are deferred to a SEPARATE cycle (gate-level-v1.6.1-followup-phase2):
-
-- **Phase 2 (Codex context expansion):** invariant-registry.md
-  generator, hook-contract-matrix.md generator, contract-pack.md
-  generator, SKILL.md Step 4 prompt updates. ~3 hours.
-- **Phase 3 (Quality):** C6 (skill review scope alignment), C7
-  (per-row matrix content discipline), C10 partial (SKILL.md
-  frontmatter version + remove "advisory only" text). ~1.5 hours.
-
-These are deferred to v1.7:
-
-- **C10 (full):** SKILL.md size split into smaller files.
-- **C11:** shared library extraction (`scripts/tdd/_lib_commit_gate.sh`).
-- **C12:** pre-commit/gate-tier1-commit consolidation (subset of C11).
-- **Layer B Codex context:** call-sites grep for changed Go files.
-- **Full Context Pack architecture:** deep-second-opinion Codex skill,
-  code_review.md, three-pass workflow.
+The discipline architecture (PUSHBACK, hash binding, M1-M4) stays
+intact. This is friction reduction, not gate weakening.
 
 ## Affected code
 
-- `.claude/hooks/require-second-opinion.sh` — C1, C4+A2
-- `.claude/hooks/gate-tier1-commit.sh` — C2 (already correct), C3, C4
-- `scripts/git-hooks/pre-commit` — C2, C4
-- `scripts/check-tdd-state-clean.sh` — C5
-- `.tdd/tdd-config.json` — C9-revised (mode-based default semantics)
-- `scripts/tdd-test-hooks.sh` — fixtures + C14 contract invariant tests
-- `.github/workflows/ci.yml` + `.gitlab-ci.yml` — C8 codex stub
+- `scripts/tdd/build-second-opinion-context.sh` — NEW. Generates
+  `.tdd/second-opinion/context/schema-context-for-reviewer.md`
+  from `.tdd/tdd-config.json`. ~80 lines bash.
+- `.tdd/second-opinion/context/schema-context-for-reviewer.md` —
+  NEW (generated; gitignored — operator runs the generator on
+  config changes; cycle will regenerate if missing). ~30 lines
+  markdown.
+- `.claude/skills/second-opinion/SKILL.md` — modified (Tier 1):
+  - Step 2 prompt template includes the generated schema-context
+    file (after CLAUDE.md context, before TARGET).
+  - Step 4 description of Pass A reframed as noise-floor +
+    standalone artifact.
+  - New Step 4b documents the hook preprocessor for known-drift
+    findings (see go-tdd.md rules section).
+- `.claude/rules/go-tdd.md` — modified: new "Known reviewer-drift
+  findings" section listing the patterns + canonical short-form
+  PUSHBACK template. Agent uses this when the preprocessor flags
+  `auto_pushback_eligible: true`.
+- `docs/specs/second-opinion-v1.6.0-spec.md` — modified: documents
+  marker drift as a known limitation; cites the parasitoid trial's
+  Pass A frequency data.
+- `scripts/tdd-test-hooks.sh` — fixtures: ~12-15 acceptance tests.
+- `.gitignore` — add `.tdd/second-opinion/context/` so generator
+  output doesn't pollute git history.
+
+The hook preprocessor itself lives INSIDE SKILL.md's Step 5 bash
+code (the existing /second-opinion runner). It runs on Codex's
+JSON response BEFORE the agent reads findings: scans each finding
+for known-drift patterns, adds `auto_pushback_eligible: true` +
+`canonical_citation` fields, then prints the modified JSON. Net
+addition to SKILL.md: ~25 lines of jq + bash.
+
+## Failing tests that capture the bug
+
+| Test | What it pins |
+|---|---|
+| v162-c1: build-second-opinion-context.sh exists + executable | tooling exists |
+| v162-c1: generator produces context with canonical edit-time markers | preventive fix |
+| v162-c1: generator produces context with canonical commit-time markers | preventive fix |
+| v162-c1: generator includes deprecated aliases with explicit "DEPRECATED" tag | preventive fix |
+| v162-c1: generator includes reviewer instruction "prefer local config" | preventive fix |
+| v162-c1: generator handles missing tdd-config.json (warns + emits empty marker section) | error handling |
+| v162-c1: SKILL.md Step 2 prompt references the generated context file | integration |
+| v162-c1: SKILL.md Step 5 includes hook preprocessor for marker drift | integration |
+| v162-c1: preprocessor flags `auto_pushback_eligible:true` on `Human approved implementation` finding | curative fix |
+| v162-c1: preprocessor adds canonical citation pointing at marker_aliases | curative fix |
+| v162-c1: preprocessor leaves unrelated findings unchanged (regression) | curative fix |
+| v162-c1: go-tdd.md includes "Known reviewer-drift findings" section with marker_name_drift_v1.6.0 | docs |
+| v162-c2: SKILL.md Step 4 describes Pass A as noise-floor measurement | docs |
+| v162-c2: SKILL.md Step 4 documents Pass A standalone-artifact value when Pass B fails | docs |
+| v162-c2: docs/specs/second-opinion-v1.6.0-spec.md cites parasitoid trial frequency data | docs |
+
+~15 acceptance tests total. All easy regex/grep style on file contents
+plus one fixture-driven test for the preprocessor.
+
+## Root cause analysis
+
+### Item 1
+
+- Mechanism: the `/second-opinion` skill's prompt template (SKILL.md
+  Step 2) sends the first 200 lines of `CLAUDE.md` as project
+  context. Marker vocabulary lives in `.tdd/tdd-config.json`, not
+  CLAUDE.md. Codex falls back to its training-data prior for marker
+  names. v1.6.0 renamed M3 in the schema; Codex doesn't know.
+- Introduced in: F-cycle (M3 marker rename, ~v1.5.x → v1.6.0 schema
+  migration via `scripts/migrate-tdd-markers.sh`).
+- Why not caught by existing tests: the existing tests verify the
+  PACK's correct behavior (markers, aliases, hooks). They do NOT
+  verify Codex's behavior (out of scope; can't be tested in CI).
+
+### Item 2
+
+- Mechanism: documentation gap. Pass A was added in v1.6.0 with
+  emphasis on "independent design"; the structural property (noise
+  floor for anchoring) wasn't articulated.
+- Introduced in: v1.6.0 SKILL.md Step 4 addition.
+- Why not caught: not a bug; a documentation/framing issue surfaced
+  by trial-feedback only.
+
+## Minimum fix
+
+### Item 1
+
+1. `scripts/tdd/build-second-opinion-context.sh`: reads
+   `tdd-config.json`, emits markdown with markers + aliases +
+   reviewer instruction. ~80 lines.
+2. SKILL.md Step 2 prompt template: source + cat the generated
+   context file. ~5 lines.
+3. SKILL.md Step 5 bash: pipe Codex's response through a jq filter
+   that tags known-drift findings. ~25 lines.
+4. `.claude/rules/go-tdd.md`: new section listing
+   `marker_name_drift_v1.6.0` pattern + short-form PUSHBACK
+   template. ~30 lines markdown.
+
+### Item 2
+
+1. SKILL.md Step 4: rewrite Pass A description block. ~20 lines.
+2. `docs/specs/second-opinion-v1.6.0-spec.md`: appended
+   "Trial-data evidence" section. ~40 lines.
+
+Total net addition: ~200 lines across 6 files. No deletions; no
+schema changes; no hook semantics changes.
+
+## Acceptance criteria
+
+### AC1 — Schema-context generator exists and is correct
+
+1.1 `scripts/tdd/build-second-opinion-context.sh` exists,
+    `chmod +x`, parses with `bash -n`.
+1.2 Run with project's `.tdd/tdd-config.json` produces a markdown
+    file at `.tdd/second-opinion/context/schema-context-for-reviewer.md`.
+1.3 Output contains a "Canonical edit-time markers" section listing
+    each entry from `required_markers_edit_time`.
+1.4 Output contains a "Canonical commit-time markers" section listing
+    each entry from `required_markers_commit_time`.
+1.5 Output contains a "Deprecated aliases" section listing each
+    `marker_aliases` mapping with the form
+    `"OLD" → "NEW" (deprecated)`.
+1.6 Output ends with the reviewer instruction:
+    `If you think a marker is wrong, verify against
+    .tdd/tdd-config.json BEFORE producing a finding. Local config
+    is canonical and beats your training-data prior.`
+1.7 Generator handles missing `tdd-config.json`: emits empty
+    marker sections + a clear "config not found" comment + a
+    warning to stderr; exits 0 (don't break /second-opinion).
+1.8 Generator handles missing `marker_aliases` field: emits the
+    "Deprecated aliases" section with "(none)" body. No crash.
+
+### AC2 — SKILL.md prompt template integration
+
+2.1 SKILL.md Step 2 (prompt building) sources/cats the generated
+    context file (regenerates if missing or older than
+    `tdd-config.json`).
+2.2 The schema-context block appears in the prompt AFTER the
+    `PROJECT CONTEXT (first 200 lines of CLAUDE.md, redacted):`
+    block, BEFORE the `CHANGE SCOPE` line.
+2.3 If the generator fails (jq missing, config malformed),
+    /second-opinion still runs; the prompt just lacks the schema
+    context block. Stderr advisory.
+
+### AC3 — Hook preprocessor for known-drift findings
+
+3.1 SKILL.md Step 5 bash includes a preprocessor that runs on
+    Codex's parsed JSON response BEFORE the agent reads findings.
+3.2 Preprocessor scans each finding's `evidence` + `title` for
+    pattern `Human approved implementation: yes` (case-insensitive)
+    AND simultaneously presence of phrases like "marker", "gate
+    vocabulary", "approval marker", or "required marker" in same
+    finding.
+3.3 When matched, adds two fields to that finding:
+    - `auto_pushback_eligible: true`
+    - `canonical_citation: "v1.6.0 renamed this marker. See
+       .tdd/tdd-config.json marker_aliases:
+       'Human approved implementation: yes' is the deprecated alias
+       for 'Green phase authorized: yes' (gate 2 green-side) AND
+       'Implementation reviewed: yes' (gate 3)."`
+3.4 Preprocessor never DELETES findings, only annotates. Operator
+    still sees the finding and must adjudicate.
+3.5 Findings without the drift pattern pass through unchanged
+    (regression).
+3.6 If Codex's response is not valid JSON (timeout, network error),
+    preprocessor is skipped silently.
+
+### AC4 — go-tdd.md rules update
+
+4.1 New section "Known reviewer-drift findings" added to
+    `.claude/rules/go-tdd.md`.
+4.2 Section includes the pattern key `marker_name_drift_v1.6.0`
+    with description.
+4.3 Section provides a short-form PUSHBACK template that includes
+    BOTH the canonical citation AND a local-evidence requirement
+    ("cite the field name + line number from
+    `.tdd/tdd-config.json`").
+4.4 Section explicitly states: agent uses short-form ONLY when
+    preprocessor flagged `auto_pushback_eligible:true`. Otherwise
+    full PUSHBACK essay is required.
+
+### AC5 — SKILL.md Pass A docs reframe
+
+5.1 SKILL.md Step 4 (Pass A description) reframes Pass A as:
+    > Pass A is the noise-floor / independence measurement for
+    > Pass B's anchoring. When Pass A and Pass B converge on a
+    > finding, you have evidence that two inferential paths reached
+    > the same conclusion → high confidence. When they diverge,
+    > you've learned that Claude's framing was load-bearing for
+    > Pass B's analysis → important brittleness signal.
+5.2 SKILL.md Step 4 also notes: Pass A's design doc has standalone
+    peer-review value if Pass B times out / errors / returns
+    nothing. Not "wasted" if Pass B fails.
+5.3 Pass A's "trade-offs accepted/rejected" structure is preserved
+    (operator workflow unchanged); only the explanatory framing
+    around it is updated.
+
+### AC6 — second-opinion-v1.6.0-spec.md known-limitation note
+
+6.1 New section "Trial-data evidence" appended to
+    `docs/specs/second-opinion-v1.6.0-spec.md`.
+6.2 Section includes the parasitoid trial's Pass A frequency table
+    (3/10 converged, 4/10 stylistic, 3/10 substantive priming).
+6.3 Section documents marker drift as a "known reviewer-drift
+    pattern" and points operators at the schema-context generator
+    + go-tdd.md rules section as the mitigation path.
+6.4 Section is honest: Pass A's value is real but mostly indirect
+    (priming Pass B); not a single-handed bug-finder.
 
 ## Test plan
 
-| Test name | Pins criterion # |
+| Test name | AC# |
 |---|---|
-| v161_c1_codex_missing_strict_no_adj_denies | 1.1 |
-| v161_c1_codex_missing_strict_fresh_adj_allows | 1.2 |
-| v161_c1_codex_missing_warn_emits_stderr_allows | 1.3 |
-| v161_c1_codex_missing_off_silent | 1.4 |
-| v161_c1_killswitch_overrides_codex_missing | 1.5 |
-| v161_c8_smoke_uses_fake_codex_shim | 1.6 |
-| v161_c2_pre_commit_m1m2m3_only_denies | 2.1, 2.4 |
-| v161_c2_pre_commit_no_green_proof_denies | 2.2, 2.4 |
-| v161_c2_pre_commit_full_state_allows | 2.4 |
-| v161_c2_prepare_commit_msg_inherits | 2.5 |
-| v161_c5_check_state_clean_full_markers_passes | 3.3 |
-| v161_c5_check_state_clean_old_marker_warns_passes | 3.2, 3.3 |
-| v161_c5_check_state_clean_missing_m4_fails | 3.3 |
-| v161_c4_skill_md_blocks_in_gate_tier1_commit | 4.1, 4.4 |
-| v161_c4_skill_md_blocks_in_pre_commit | 4.2, 4.4 |
-| v161_c4_skill_md_blocks_in_require_second_opinion | 4.3, 4.4 |
-| v161_c4_docs_md_still_allows | 4.4 (regression) |
-| v161_c4_internal_auth_still_blocks | 4.4 (regression) |
-| v161_c3_plain_no_change | 5.3 (regression) |
-| v161_c3_am_with_unstaged_tier1_blocks | 5.3 |
-| v161_c3_pathspec_tier1_blocks | 5.3 |
-| v161_c3_uncertain_unstaged_tier1_blocks | 5.3 |
-| v161_c9_strict_flag_off_behaves_like_on | 6.3 |
-| v161_c9_warn_flag_off_unchanged | 6.3 |
-| v161_c14_path_coverage_invariant | 7.1 |
-| v161_c14_marker_source_invariant | 7.1 |
-| v161_c14_commit_time_policy_invariant | 7.1 |
-| v161_c14_trivial_filter_ordering_invariant | 7.1 |
+| v162_c1_generator_exists_executable | 1.1 |
+| v162_c1_generator_emits_edit_time_markers | 1.2, 1.3 |
+| v162_c1_generator_emits_commit_time_markers | 1.4 |
+| v162_c1_generator_emits_deprecated_aliases | 1.5 |
+| v162_c1_generator_emits_reviewer_instruction | 1.6 |
+| v162_c1_generator_handles_missing_config | 1.7 |
+| v162_c1_generator_handles_missing_aliases | 1.8 |
+| v162_c1_skill_md_step2_includes_schema_context | 2.1, 2.2 |
+| v162_c1_skill_md_preprocessor_present | 3.1 |
+| v162_c1_preprocessor_flags_known_drift_finding | 3.2, 3.3 |
+| v162_c1_preprocessor_passes_unrelated_findings_unchanged | 3.5 |
+| v162_c1_go_tdd_md_drift_section_present | 4.1, 4.2, 4.3, 4.4 |
+| v162_c2_skill_md_step4_pass_a_noise_floor_framing | 5.1 |
+| v162_c2_skill_md_step4_pass_a_standalone_value | 5.2 |
+| v162_c2_v160_spec_trial_data_section_present | 6.1, 6.2, 6.3, 6.4 |
 
-~28 smoke tests total.
+15 acceptance tests. All run as part of the existing
+`scripts/tdd-test-hooks.sh` suite (no new test runner).
 
 ## Implementation order (dependency-driven)
 
-1. **C1 + C8 first** (must be in same commit). codex-missing
-   fail-closed + smoke shim. Without the shim, all subsequent
-   smoke runs need real codex.
-2. **C2 next** (additive; no refactor). Add markers + green-proof
-   check to pre-commit. Touches different code path than C4.
-3. **C5 next** (independent; trivial). Config-driven markers in CI script.
-4. **C4 + A2** (refactor of Tier 1 evaluation in 3 hooks). Touches
-   the same blocks C3 will touch — do C4 first to keep diffs clean.
-5. **C3 next** (refactor of Tier 1 detection to use COMMIT_MODE).
-   Builds on C4's reorganized evaluation.
-6. **C9-revised** (small; mode interaction with hash binding). Either
-   auto-promote in strict OR refuse-startup. Recommend auto-promote
-   for fewer surprises.
-7. **C14 last** (meta-tests asserting cross-hook invariants).
-   Runs after all other fixes so the asserted invariants are true.
+1. **AC1 first** (build-second-opinion-context.sh + tests).
+   Standalone tool; no other file dependencies.
+2. **AC2** (SKILL.md Step 2 prompt integration). Depends on AC1.
+   Tier 1 file edit — adjudication required for the edit.
+3. **AC3** (SKILL.md Step 5 preprocessor). Depends on SKILL.md
+   already being editable (same Tier 1 cycle).
+4. **AC4** (go-tdd.md rules update). Independent of SKILL.md;
+   not Tier 1.
+5. **AC5** (SKILL.md Step 4 Pass A reframe). Same Tier 1 file as
+   AC2/AC3; batch into the same edit pass.
+6. **AC6** (v1.6.0 spec doc note). Independent; not Tier 1.
+
+Sequence: AC4 → AC1 → AC6 → AC2/AC3/AC5 (one SKILL.md edit pass).
+This minimises Tier 1 edit ceremony to a single round.
+
+## Non-goals (this cycle)
+
+- Typed test-edit exceptions (Item 1 from the parasitoid memo) —
+  deferred to v1.7.0. That's a 16-22h cycle with new schema, new
+  hook, new library; doesn't fit a v1.6.x patch.
+- AST-level assertion detection — deferred to v1.8.0.
+- Removing `allow_after_red_confirmed` boolean — deferred to v2.0.0.
+- Codex's training data update — out of scope (we don't control
+  OpenAI's release schedule).
 
 ## Risk register
 
 | Risk | Mitigation |
 |---|---|
-| C2 + C4 + C3 all touch the same evaluation block; refactor risk | Implement in sequence with smoke after each step. /second-opinion will catch interaction bugs. |
-| C1 fail-closed could break legitimate workflows where codex is genuinely unavailable (no API key, offline) | Operator can use enforcement_mode=warn or SECOND_OPINION_DISABLE killswitch. Document in commit message. |
-| C9-revised auto-promote in strict surprises operators who set flag=false intentionally | Stderr note explains. If operators object, switch to refuse-startup (Option B). |
-| C14 contract tests are parsing source files (grep, line-number compare) — fragile to formatting | Tests check semantically meaningful patterns (e.g., `green-proof` substring), not exact line content. Format changes still pass. |
-| 28 smoke tests = bigger /second-opinion review surface | Expected. Previous cycles with similar scope (Layer-0-rescue, gate-level) ran 8+ Codex rounds. Budget for 4-6 rounds here. |
-| C9-revised changes config semantics mid-cycle for users with strict + flag=false | Document as breaking change in commit message. Major-version-style note: "if you have strict + hash_binding=false, expect new behavior." |
+| Schema-context generator drift if `tdd-config.json` changes after generation | Generator runs on every /second-opinion invocation if context file is older than config file (mtime check). Cheap; cures staleness without operator action. |
+| Preprocessor's regex matches false positives (legitimate findings about marker names get incorrectly flagged) | AC3.4 says preprocessor never DELETES findings, only annotates. Operator still sees + adjudicates. False positive cost: agent gets fast-track option they didn't need; agent still must cite local evidence. |
+| Schema-context block leaks redacted patterns to Codex | The context block is markdown built FROM tdd-config.json — already on disk; not a new disclosure. The markers themselves are not secrets. |
+| Codex's training data updates and stops emitting drift findings | Best case: preprocessor never fires; the schema-context block becomes harmless overhead. No regression. |
+| Pass A reframing accidentally suggests Pass A is now optional | AC5.3 explicitly preserves the operator workflow. The reframe is explanatory, not behavioural. |
+| The hook preprocessor lives inside SKILL.md (Tier 1 file) — every change to it requires Tier 1 ceremony | Accepted cost. Alternatives (separate script sourced by SKILL.md) add file-resolution complexity without major benefit for a 25-line snippet. v1.7.0+ may extract if it grows. |
 
 ## Smoke test growth target
 
-304 baseline (post install-script cycle) + ~28 new = **~332 passing, 0 failing**.
+365 baseline (post v1.6.1) + 15 new = **~380 passing, 0 failing**.
+
+## Effort estimate (honest)
+
+| Phase | Time |
+|---|---|
+| Cycle plan (this draft) | ~30 min (done) |
+| Red phase: write 15 RED tests | 1.5h |
+| Green phase: implement AC1-AC6 | 3h |
+| /second-opinion review (4-6 rounds expected) | 4-6h |
+| Adjudication artifacts | 1h |
+| Total elapsed | **~10-11h** |
+
+Realistic; matches the v1.6.2 budget agreed in the prior turn.

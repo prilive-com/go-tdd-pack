@@ -505,3 +505,87 @@ The design decisions in this spec rest on the following research directions, all
 - **Sparsification:** limiting which agents see which outputs reduces tokens substantially with minimal accuracy loss.
 
 The consultant's specific paper citations (arXiv 2603.18740, 2406.12708, Choi et al. Aug 2025, NAACL 2025) instantiate these directions. The spec's design decisions stand on the directions, not paper-by-paper.
+
+---
+
+## 13. Trial-data evidence (v1.6.2 update from parasitoid trial)
+
+The first 10 production Tier 1 cycles ran on the parasitoid project
+(Go cryptocurrency trading bot, 2026-04-23 through 2026-05-09) with
+all three v1.6.0 flags flipped on. Two operationally relevant
+data sets, both fed back to inform v1.6.2 / v1.7.0.
+
+### Pass A frequency by value pattern
+
+Across 10 Tier 1 cycles with `require_pass_a_tier1: true`:
+
+| Pattern | Frequency |
+|---|---|
+| Pass A converged with Claude's design — zero unique catches | 3/10 |
+| Pass A had stylistic divergence Claude overrode | 4/10 |
+| Pass A surfaced a substantive concern Pass B then sharpened | 3/10 |
+
+**Interpretation.** Pass A's value is real but mostly indirect: it
+primes Pass B with independent framing rather than single-handedly
+finding bugs Pass B would have missed. PR7's F1 finding (Telegram
+failure permanently silences alert) is the canonical example —
+Pass A's "rows are still marked seen ONLY AFTER a successful send"
+framing in the trade-off section gave Pass B the lens that produced
+the F1 finding.
+
+The structural property that justifies Pass A: it's the noise-floor
+/ independence measurement for Pass B's anchoring. When Pass A and
+Pass B converge → high-confidence finding (two inferential paths
+reached the same conclusion). When they diverge → important
+brittleness signal about how framing-sensitive Pass B is. Pass A's
+design doc also has standalone peer-review value when Pass B times
+out / errors / returns nothing — not "wasted latency" if Pass B
+fails.
+
+**Recommendation.** Keep `require_pass_a_tier1: true` for Tier 1
+work where the eval harness shows value. Don't expect Pass A to
+single-handedly find correctness gaps Pass B would have missed.
+
+### Marker-name drift (known reviewer-drift pattern)
+
+In 3 of 5 plan-review Pass B runs across the trial, Codex returned
+P1 findings of the form "the plan declares the wrong marker
+vocabulary; the v1.5.x marker name `Human approved implementation:
+yes` is required." This is incorrect on the facts — v1.6.0 renamed
+the marker to `Green phase authorized: yes` and recorded the old
+name in `marker_aliases` for backwards compatibility. But Codex's
+training data is pre-v1.6.0 and the marker rename is invisible to
+the model.
+
+The PUSHBACK adjudication discipline correctly handled this (the
+agent verified against `.tdd/tdd-config.json` and pushed back), but
+each cycle paid ~3-5 minutes of artifact-rewriting + ~10 lines of
+audit-trail noise. Over 10 cycles, ~30-50 minutes of friction on a
+non-issue.
+
+**Mitigation shipped in v1.6.2:**
+
+1. `scripts/tdd/build-second-opinion-context.sh` generates a
+   schema-context block from `.tdd/tdd-config.json`. The
+   `/second-opinion` skill's prompt template embeds the block AFTER
+   `CLAUDE.md` context, BEFORE the TARGET section. Codex sees the
+   canonical markers + deprecated aliases + reviewer instruction
+   "prefer local config to model prior" before producing findings.
+   This SHOULD reduce drift findings at the source.
+
+2. `scripts/tdd/_lib_marker_drift_preprocessor.sh` runs on Codex's
+   JSON response before the agent reads findings. Findings matching
+   the `marker_name_drift_v1.6.0` pattern gain
+   `auto_pushback_eligible: true` + a `canonical_citation` string.
+   The agent uses the short-form PUSHBACK template
+   (see `.claude/rules/go-tdd.md` "Known reviewer-drift findings"
+   section) instead of writing a full essay each time.
+
+3. The agent MUST still cite local evidence (field name + line
+   number from `tdd-config.json`) even when using short-form
+   PUSHBACK. The discipline (PUSHBACK requires substantive
+   rationale) is preserved; only the writing volume drops.
+
+The pack itself cannot change Codex's training data. These changes
+make the drift cheap to handle when it happens, and reduce its
+frequency at the source.

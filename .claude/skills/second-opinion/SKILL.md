@@ -392,13 +392,32 @@ fi
 # context for Pass B (the comparison review), so Codex's critique is
 # anchored on its own thinking, not on Claude's framing.
 #
+# Pass A's structural value (parasitoid trial 2026-04-23 → 2026-05-09):
+#   Pass A is the noise-floor / independence measurement for Pass B's
+#   anchoring. When Pass A and Pass B converge on a finding → high
+#   confidence (two inferential paths reached the same conclusion).
+#   When they diverge → important brittleness signal about how
+#   framing-sensitive Pass B is. Trial frequency: 3/10 converged with
+#   Claude (no unique catches), 4/10 stylistic divergence Claude
+#   overrode, 3/10 Pass A surfaced a substantive concern Pass B then
+#   sharpened. Don't expect Pass A to single-handedly find correctness
+#   gaps Pass B would have missed — its value is mostly indirect
+#   (priming Pass B with independent framing).
+#
+# Standalone-artifact value: Pass A's design doc has peer-review value
+# even when Pass B times out / errors / returns nothing. The
+# independent design itself is reviewable by the operator. Not
+# "wasted latency" if Pass B fails.
+#
 # Skipped when: not Tier 1, killswitch SECOND_OPINION_PASS_A_DISABLE=1
 # is set, target_kind != "plan" (only plans have the high-level problem
 # statement Pass A needs), or .tdd/research-packet.md is missing (Pass A
 # anchors against the same evidence the implementer consulted).
 #
 # Failure mode: Pass A is best-effort. If Codex returns nothing, the
-# skill still proceeds with Pass B as a v1.5.x-style direct review.
+# skill still proceeds with Pass B as a v1.5.x-style direct review;
+# any Pass A output written before the failure remains as a standalone
+# peer-review artifact.
 mkdir -p .tdd/codex 2>/dev/null
 pass_a_anchor=""
 if [ "${tier_label#Tier 1}" != "$tier_label" ] \
@@ -600,6 +619,39 @@ OUTPUT — JSON only, no prose around it:
 PROJECT CONTEXT (first 200 lines of CLAUDE.md, redacted):
 $(head -n 200 CLAUDE.md 2>/dev/null | red_full)
 
+PROJECT-LOCAL TDD MARKER VOCABULARY (regenerated from .tdd/tdd-config.json):
+$(
+  # v1.6.2 (parasitoid trial feedback): inject the canonical TDD
+  # marker vocabulary + deprecated aliases so Codex doesn't fall
+  # back to its training-data prior. The schema-context block lives
+  # in .tdd/second-opinion/context/schema-context-for-reviewer.md;
+  # regenerate if missing or older than tdd-config.json.
+  _ctx_dir=".tdd/second-opinion/context"
+  _ctx_file="$_ctx_dir/schema-context-for-reviewer.md"
+  _gen="scripts/tdd/build-second-opinion-context.sh"
+  # v1.6.2 round-3 F2: NEVER cat a stale cached context file when the
+  # generator is absent (degraded install / branch switch). The
+  # cached file alone is not trustworthy.
+  if [ -f "$_gen" ] && [ -x "$_gen" ]; then
+    if [ ! -f "$_ctx_file" ] || [ "$_gen" -nt "$_ctx_file" ] \
+       || [ ".tdd/tdd-config.json" -nt "$_ctx_file" ]; then
+      bash "$_gen" --output "$_ctx_file" 2>/dev/null || true
+    fi
+  fi
+  # v1.6.2 round-4 F2: config must also be present. Without it the
+  # cached context can't be trusted as current.
+  # v1.6.2 round-8 F1: also require cached context's mtime to be NEWER
+  # than both the generator AND the config. If regen failed (crashed
+  # mid-write), the cached file mtime is older than inputs → fallback
+  # fires instead of serving stale content.
+  if [ -f "$_gen" ] && [ -x "$_gen" ] && [ -f "$_ctx_file" ] && [ -f ".tdd/tdd-config.json" ] \
+     && [ "$_ctx_file" -nt "$_gen" ] && [ "$_ctx_file" -nt ".tdd/tdd-config.json" ]; then
+    cat "$_ctx_file"
+  else
+    echo "(schema-context generator not available or context stale; falling back to skill defaults)"
+  fi
+)
+
 CHANGE SCOPE: $tier_label
 TARGET UNDER REVIEW (kind: $target_kind):
 $redacted_target
@@ -645,6 +697,72 @@ if [ -z "$response" ]; then
   echo "Codex returned no output (timeout, network, or auth issue)."
   echo "Skipping second opinion. Diagnostic log: $DEBUG_LOG"
   exit 0
+fi
+
+# v1.6.2 round-7 F1 + round-9 F1 + round-13 F1: sanitize caller-
+# supplied reserved fields from Codex's response so a model- or
+# prompt-injected response can't pre-populate auto_pushback_eligible
+# + canonical_citation. The preprocessor (run after) re-adds them
+# only for verified-against-local-config matches. Defense-in-depth:
+#   - jq present + sanitizer succeeds → use sanitized response
+#   - jq present + sanitizer fails (e.g., .findings is not an array)
+#     AND raw response contains reserved fields → fail-closed
+#     (forged fields would otherwise survive into the artifact)
+#   - jq absent + raw has reserved fields → fail-closed
+#   - jq absent + raw clean → warn + forward (no metadata to forge)
+# v1.6.2 round-22 F1: split jq-present-invalid-JSON (pass through
+# per the preprocessor contract) from jq-missing (hard-fail per
+# round-20). Round-20's collapse of the two cases incorrectly
+# blocked malformed responses.
+if command -v jq >/dev/null 2>&1; then
+  if printf '%s' "$response" | jq -e . >/dev/null 2>&1; then
+    # jq present + valid JSON: sanitize.
+    _sanitized="$(printf '%s' "$response" \
+                   | jq '.findings |= map(del(.auto_pushback_eligible, .canonical_citation))' \
+                   2>/dev/null || true)"
+    if [ -n "$_sanitized" ] && printf '%s' "$_sanitized" | jq -e . >/dev/null 2>&1; then
+      response="$_sanitized"
+    elif printf '%s' "$response" | grep -qE '(^|[{,])[[:space:]]*"(auto[_\\]+u?0?0?5?[fF]?pushback[_\\]+u?0?0?5?[fF]?eligible|auto_pushback_eligible|canonical[_\\]+u?0?0?5?[fF]?citation|canonical_citation)"[[:space:]]*:'; then
+      echo "[second-opinion] BLOCKED: sanitizer (jq filter) failed on Codex response AND raw response contains reserved field KEYS at JSON-key positions. The pack cannot verify whether those fields are pack-emitted or model-supplied. Inspect the response shape (.findings may not be an array) before re-running." >&2
+      exit 1
+    fi
+  fi
+  # jq present + invalid JSON falls through here: pass response
+  # unchanged. Per preprocessor contract, malformed responses are
+  # forwarded; the agent decides what to do with them.
+else
+  # v1.6.2 round-20 F2: jq unavailable means we CANNOT reliably
+  # sanitize. JSON escape variants (e.g. `auto_pushback_eligible`)
+  # bypass any grep-based check; only a real JSON parser decodes them.
+  # Hard-fail unconditionally on non-empty responses. This is more
+  # aggressive than a "warn-if-clean-fail-if-suspicious" branch but
+  # is the only provably-safe contract: install jq for /second-opinion
+  # to work. Earlier rounds tried grep-based detection (rounds 9, 10,
+  # 13, 16, 19); each round Codex found a new escape variant that
+  # bypassed. Conservative-by-design fail-closed is the architectural
+  # answer.
+  if [ -n "$response" ]; then
+    echo "[second-opinion] BLOCKED: jq unavailable on PATH — sanitizer cannot run. The pack cannot verify provenance of auto_pushback_eligible / canonical_citation fields against JSON escape bypasses. Install jq (apt-get install jq / brew install jq / apk add jq) and re-run /second-opinion." >&2
+    exit 1
+  fi
+fi
+
+# v1.6.2: marker-drift preprocessor. Annotates known reviewer-drift
+# findings (Codex's pre-v1.6.0 prior on the M3 marker name) with
+# auto_pushback_eligible:true + canonical_citation. Findings without
+# the drift pattern pass through unchanged. The agent uses the
+# short-form PUSHBACK template from .claude/rules/go-tdd.md "Known
+# reviewer-drift findings" only when auto_pushback_eligible is true,
+# AND must still cite local evidence (field name + line number from
+# tdd-config.json). The discipline (PUSHBACK requires substantive
+# rationale) is preserved; only the writing volume drops.
+_drift_pre="scripts/tdd/_lib_marker_drift_preprocessor.sh"
+if [ -f "$_drift_pre" ] && command -v jq >/dev/null 2>&1 \
+   && printf '%s' "$response" | jq -e . >/dev/null 2>&1; then
+  _annotated="$(printf '%s' "$response" | bash "$_drift_pre" 2>/dev/null || true)"
+  if [ -n "$_annotated" ] && printf '%s' "$_annotated" | jq -e . >/dev/null 2>&1; then
+    response="$_annotated"
+  fi
 fi
 
 printf '## Second opinion (scope: %s, model: %s)\n\n' "$tier_label" "$used_model"

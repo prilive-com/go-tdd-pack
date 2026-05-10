@@ -189,6 +189,129 @@ Pass A last (highest-value if the eval shows it works).
 
 See [`docs/specs/second-opinion-v1.6.0-spec.md`](../../docs/specs/second-opinion-v1.6.0-spec.md).
 
+## Known reviewer-drift findings
+
+Codex's training data lags the pack's schema. Pre-v1.6.0 plans used
+the marker name `Human approved implementation: yes` for the M3 gate.
+v1.6.0 renamed it to `Green phase authorized: yes` (the operator's
+APPROVED GREEN reply) and added `Implementation reviewed: yes` (the
+operator's APPROVED IMPLEMENTATION reply). Both old-name uses are
+recorded in `.tdd/tdd-config.json` `marker_aliases` for backwards
+compatibility. Codex doesn't know about the rename and routinely
+returns P1 findings of the form "the plan declares the wrong marker
+vocabulary" when reviewing v1.6.0+ plans.
+
+This section catalogs known drift patterns that the
+`/second-opinion` skill's preprocessor flags with
+`auto_pushback_eligible: true` + a `canonical_citation`. The agent
+may use the short-form PUSHBACK template below for these specific
+cases ONLY; full PUSHBACK essay is required for any finding the
+preprocessor did not flag.
+
+### Pattern: `marker_name_drift_v1.6.0`
+
+Codex returns a finding asserting the plan's M3 marker should be
+`Human approved implementation: yes` (or any phrasing that treats
+the v1.5.x marker name as authoritative). The schema-context block
+in the prompt template (generated from
+`.tdd/tdd-config.json` by `scripts/tdd/build-second-opinion-context.sh`)
+should reduce these findings at the source; when one slips through,
+this short-form PUSHBACK is sufficient.
+
+### Short-form PUSHBACK template
+
+When the preprocessor flagged `auto_pushback_eligible: true` AND the
+finding matches `marker_name_drift_v1.6.0`, the disposition matrix
+"Reason" column may be:
+
+```
+PUSHBACK on training-data drift. v1.6.0 renamed this marker.
+See .tdd/tdd-config.json field <field-name> at line <N>:
+"Green phase authorized: yes" is the canonical M3 marker.
+"Human approved implementation: yes" is recorded in marker_aliases
+as the deprecated alias only. The plan is correct as written.
+```
+
+The agent MUST cite local evidence: the field name AND the line
+number from `.tdd/tdd-config.json`. The auto-flag is permission to
+SKIP the multi-paragraph essay justifying the PUSHBACK; it is NOT
+permission to skip evidence. Adjudication discipline (PUSHBACK
+requires substantive rationale) is preserved by the
+local-evidence requirement.
+
+### Hook-file verification (when the finding cites a path)
+
+The matcher cannot reliably distinguish a real reviewer-drift
+finding ("Repo instructions require Human approved implementation:
+yes") from a real hook implementation defect ("Repo instructions
+require Human approved implementation: yes in
+scripts/git-hooks/pre-commit"). Both phrasings match the same
+auto-flag pattern. When the finding's `evidence` or `location`
+field cites ANY hook/script/file path (regex: matches a
+`scripts/`, `.claude/hooks/`, `internal/`, or `cmd/` path), the
+agent MUST inspect the cited path before using short-form PUSHBACK:
+
+```
+agent verification (mandatory when finding cites a path):
+  1. Read the cited file at the cited line range.
+  2. Confirm the file does NOT actually require the deprecated
+     marker (i.e., the finding's claim about the file is wrong).
+  3. ONLY THEN use short-form PUSHBACK with the citation pointing
+     at .tdd/tdd-config.json AND noting the cited file was checked.
+```
+
+If step 2 fails (the file DOES require the deprecated marker —
+real governance defect), the agent must NOT use short-form
+PUSHBACK. The finding is real; write a full ACCEPT or full
+PUSHBACK essay as appropriate. The auto-flag was a false positive.
+
+### When the preprocessor does NOT fire
+
+Findings about marker names that don't match the documented drift
+patterns require full PUSHBACK essay as before. Examples:
+- "M2 marker is missing" — could be a real issue, full essay required.
+- "Plan markers are not in the order specified" — Codex sees an
+  ordering bug, not a vocabulary drift; full essay required.
+
+The preprocessor is conservative by design: better to write a
+slightly longer PUSHBACK on a marker-related finding the
+preprocessor didn't recognise than to silently fast-track a real
+finding.
+
+### Narrow-matching philosophy (operator awareness)
+
+The preprocessor is intentionally narrow. The implementation
+matches a much smaller set of phrasings than the documented trigger
+("old marker + marker vocabulary") would suggest. This is a
+deliberate design choice surfaced across 14 rounds of /second-opinion
+review on v1.6.2 itself — each round Codex found a slightly
+different drift-adjacent finding the preprocessor was wrongly
+fast-tracking. The accumulated exclusions narrow the matcher until
+ONLY the canonical "gate-as-subject demands old marker, new marker
+not present in the demand context, no compatibility/deprecation/
+plan-as-subject vocabulary" pattern matches.
+
+Practical consequence: **many real drift findings will still
+require full PUSHBACK essay.** The agent should not expect every
+finding mentioning `Human approved implementation` to receive
+`auto_pushback_eligible: true`. Examples that the preprocessor
+DOES NOT fast-track (intentionally — false negatives are acceptable;
+false positives that suppress real signal are NOT):
+
+- "Wrong marker: Green phase authorized should be Human approved
+  implementation" — uses `should be` which is too generic.
+- "the plan uses Green phase authorized; required marker is Human
+  approved implementation" — new-before-old phrasing.
+- "Hook scripts/git-hooks/pre-commit requires Human approved
+  implementation: yes" — could be a real hook implementation defect.
+- "Stale doc reference to Human approved implementation in
+  README" — could be real documentation drift.
+
+For these, the agent writes a full PUSHBACK essay (or ACCEPT, if
+on inspection the finding is actually correct). The
+short-form template is permission to skip the multi-paragraph
+rationale ONLY when the preprocessor's narrow matcher fired.
+
 ## Bypass procedure
 
 For an emergency hotfix where the operator vouches for the change:
