@@ -24,11 +24,34 @@
   ],
   "allow_docs_and_claude_edits_without_gate": true,
 
-  "_test_file_policy_doc": "Phase-aware test-file policy. Replaces the older allow_test_file_edits_without_gate flag. Test edits are allowed during spec/red phases (writing failing tests), denied after red is confirmed (the documented 'don't edit tests in green phase' rule). Set allow_after_red_confirmed: true only when the operator explicitly authorizes return to red — document reason in commit message.",
+  "_test_file_policy_doc": "Phase-aware test-file policy. Replaces the older allow_test_file_edits_without_gate flag. Test edits are allowed during spec/red phases (writing failing tests), denied after red is confirmed (the documented 'don't edit tests in green phase' rule). The legacy allow_after_red_confirmed boolean is DEPRECATED in v1.7.x (use post_red_mechanical_update typed exceptions instead) and will be removed in v2.0.0. The hook emits a stderr deprecation warning each invocation when the boolean is consulted.",
   "test_file_policy": {
     "allow_before_spec_approved": true,
     "allow_in_red_phase": true,
-    "allow_after_red_confirmed": false
+    "allow_after_red_confirmed": false,
+    "post_red_mechanical_update": {
+      "_doc": "v1.7.0 typed-exception system. Replaces the all-or-nothing boolean above with operator-authorized, mechanically-validated, auditable per-cycle exceptions for post-red test-edit work (e.g., signature widening that breaks 12 pre-existing call sites). Default enabled:false — opt-in for safe rollout.",
+      "enabled": false,
+      "require_operator_approval": true,
+      "exception_artifact": ".tdd/exceptions/post-red-test-edits.json",
+      "audit_log_dir": ".tdd/audit",
+      "expires_after_next_green": true,
+      "exception_types": [
+        "mechanical_signature_propagation",
+        "compile_fix_only",
+        "import_only"
+      ],
+      "validators": {
+        "default_level": "regex_structural",
+        "active_profiles": ["stdlib", "testify"],
+        "assertion_helper_patterns": [],
+        "no_skip_added": true,
+        "no_test_deletion": true,
+        "no_empty_t_run": true,
+        "forbid_assertion_changes_for_existing_tests": true,
+        "require_assertions_for_new_tests": true
+      }
+    }
   },
 
   "_markers_doc": "Four-marker TDD ceremony. Edit-time hooks (require-tdd-state, require-second-opinion Tier-1 leg) require the first three; commit-time hook (gate-tier1-commit) additionally requires the fourth. Setting any marker without the matching operator APPROVED reply is self-approval and is forbidden.",

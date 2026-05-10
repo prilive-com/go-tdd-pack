@@ -6518,6 +6518,1546 @@ fi
 
 echo
 
+echo "Testing v1.7.0-typed-test-edit-exceptions..."
+
+# v1.7.0 replaces the boolean test_file_policy.allow_after_red_confirmed
+# with typed, operator-authorized, mechanically-validated, auditable
+# exceptions. ~22 acceptance tests across AC1-AC8.
+
+CONFIG_V17="$PROJECT_ROOT/.tdd/tdd-config.json"
+TDDSTATE_V17="$PROJECT_ROOT/.claude/hooks/require-tdd-state.sh"
+GO_TDD_V17="$PROJECT_ROOT/.claude/rules/go-tdd.md"
+LIB_V17="$PROJECT_ROOT/scripts/tdd/_lib_test_edit_exception.sh"
+GRANT_V17="$PROJECT_ROOT/scripts/tdd/grant-test-edit-exception.sh"
+SPEC_V17="$PROJECT_ROOT/docs/specs/typed-test-edit-exceptions-v1.7.0-spec.md"
+
+# AC1.1 — schema present.
+if jq -e '.test_file_policy.post_red_mechanical_update' "$CONFIG_V17" >/dev/null 2>&1; then
+  pass "v17_schema_post_red_mechanical_update_present"
+else
+  fail "v17_schema_post_red_mechanical_update_present: tdd-config.json must declare post_red_mechanical_update block"
+fi
+
+# AC1.2 — enabled defaults false. (jq's // operator treats false as
+# falsy, so we check the field's existence + literal value separately.)
+if jq -e '.test_file_policy.post_red_mechanical_update | has("enabled") and .enabled == false' \
+     "$CONFIG_V17" >/dev/null 2>&1; then
+  pass "v17_schema_enabled_defaults_false"
+else
+  fail "v17_schema_enabled_defaults_false: post_red_mechanical_update.enabled must default to false (opt-in)"
+fi
+
+# AC1.3 — schema_predicate_correction NOT in exception_types.
+if ! jq -r '.test_file_policy.post_red_mechanical_update.exception_types[]?' "$CONFIG_V17" 2>/dev/null \
+     | grep -q '^schema_predicate_correction$'; then
+  pass "v17_schema_predicate_correction_absent"
+else
+  fail "v17_schema_predicate_correction_absent: schema_predicate_correction must NOT be in exception_types (deferred to v1.8)"
+fi
+
+# AC1.4 — three accepted exception types present.
+if jq -r '.test_file_policy.post_red_mechanical_update.exception_types[]?' "$CONFIG_V17" 2>/dev/null \
+     | sort -u | tr '\n' ',' | grep -q '^compile_fix_only,import_only,mechanical_signature_propagation,$'; then
+  pass "v17_schema_exception_types_match"
+else
+  fail "v17_schema_exception_types_match: exception_types must include exactly mechanical_signature_propagation, compile_fix_only, import_only"
+fi
+
+# AC2 — exception artifact schema validates against declared shape.
+TMP_V17_ART=$(mktemp -d)
+mkdir -p "$TMP_V17_ART/.tdd/exceptions"
+cat > "$TMP_V17_ART/.tdd/exceptions/post-red-test-edits.json" <<'EOF'
+{
+  "version": 1,
+  "cycle_id": "test",
+  "phase": "red_confirmed",
+  "expires": "next_green_commit",
+  "exceptions": [
+    {
+      "id": "E-001",
+      "type": "mechanical_signature_propagation",
+      "status": "approved",
+      "approved_by": "operator",
+      "approved_at": "2026-05-10T12:00:00Z",
+      "operations": ["edit_existing_tests"],
+      "scope": {"paths": ["internal/auth/*_test.go"], "symbols": ["X"]},
+      "reason": "test",
+      "binding": {"cycle_id": "test", "plan_hash": "x", "red_proof_hash": "x", "change_intent_hash": "x"}
+    }
+  ]
+}
+EOF
+if jq -e '.version == 1 and (.exceptions | length) == 1 and .exceptions[0].id == "E-001"' \
+     "$TMP_V17_ART/.tdd/exceptions/post-red-test-edits.json" >/dev/null 2>&1; then
+  pass "v17_artifact_schema_validates"
+else
+  fail "v17_artifact_schema_validates: artifact does not validate against declared shape"
+fi
+rm -rf "$TMP_V17_ART"
+
+# AC3.1 — validator library exists, executable, syntactically valid.
+if [ -x "$LIB_V17" ] && bash -n "$LIB_V17" 2>/dev/null; then
+  pass "v17_validator_lib_exists_and_executable"
+else
+  fail "v17_validator_lib_exists_and_executable: $LIB_V17 missing or not executable/parseable"
+fi
+
+# AC3.3 — edit-existing operation blocks assertion-change diffs (testify form).
+TMP_V17_LIB=$(mktemp -d)
+cat > "$TMP_V17_LIB/before_test.go" <<'EOF'
+package x
+import "github.com/stretchr/testify/require"
+import "testing"
+func TestX(t *testing.T) { require.Equal(t, 1, 1) }
+EOF
+cat > "$TMP_V17_LIB/after_test.go" <<'EOF'
+package x
+import "github.com/stretchr/testify/require"
+import "testing"
+func TestX(t *testing.T) { require.NotNil(t, 1) }
+EOF
+# Full unified diff (with --- /+++ headers) so per-file scoping works.
+diff_input="$(diff -u "$TMP_V17_LIB/before_test.go" "$TMP_V17_LIB/after_test.go" || true)"
+exception_json='{"id":"E-001","type":"mechanical_signature_propagation","operations":["edit_existing_tests"]}'
+out=$( ( bash "$LIB_V17" validate_exception_diff "$exception_json" "$TMP_V17_LIB/after_test.go" \
+         <<<"$diff_input" 2>&1 ); echo "exit:$?")
+if printf '%s' "$out" | grep -qE 'exit:[12]' \
+   && printf '%s' "$out" | grep -qE 'assertion change|forbid_assertion'; then
+  pass "v17_validator_edit_existing_blocks_assertion_change"
+else
+  fail "v17_validator_edit_existing_blocks_assertion_change: must reject testify assertion-change diff (got: '$out')"
+fi
+rm -rf "$TMP_V17_LIB"
+
+# AC3.4 — create-new operation requires assertions in new test files.
+TMP_V17_CN=$(mktemp -d)
+cat > "$TMP_V17_CN/empty_test.go" <<'EOF'
+package x
+import "testing"
+func TestX(t *testing.T) {}
+EOF
+exception_json='{"id":"E-002","type":"mechanical_signature_propagation","operations":["create_new_tests"]}'
+out=$( ( bash "$LIB_V17" validate_exception_diff "$exception_json" "$TMP_V17_CN/empty_test.go" \
+         </dev/null 2>&1 ); echo "exit:$?")
+if printf '%s' "$out" | grep -qE 'exit:[12]' \
+   && printf '%s' "$out" | grep -qE 'no assertions|require_assertions|missing assertion'; then
+  pass "v17_validator_create_new_requires_assertions"
+else
+  fail "v17_validator_create_new_requires_assertions: must reject empty new-test file (got: '$out')"
+fi
+rm -rf "$TMP_V17_CN"
+
+# AC3.7 — per-file failure UX: report names the offending file.
+TMP_V17_PF=$(mktemp -d)
+cat > "$TMP_V17_PF/a_test.go" <<'EOF'
+package x
+import "github.com/stretchr/testify/require"
+import "testing"
+func TestA(t *testing.T) { require.Equal(t, 1, 1) }
+EOF
+cat > "$TMP_V17_PF/b_test.go" <<'EOF'
+package x
+import "github.com/stretchr/testify/require"
+import "testing"
+func TestB(t *testing.T) { require.Equal(t, 2, 2) }
+EOF
+# Mutate a_test.go to weaken assertion; b_test.go stays clean.
+cp "$TMP_V17_PF/a_test.go" "$TMP_V17_PF/a_test.go.before"
+sed -i 's/require\.Equal/require.NotNil/' "$TMP_V17_PF/a_test.go"
+# Full unified diff with headers (per-file scoping needs --- a/file +++ b/file markers).
+diff_input="$(diff -u "$TMP_V17_PF/a_test.go.before" "$TMP_V17_PF/a_test.go" 2>/dev/null || true)"
+exception_json='{"id":"E-003","type":"mechanical_signature_propagation","operations":["edit_existing_tests"]}'
+out=$( ( bash "$LIB_V17" validate_exception_diff "$exception_json" "$TMP_V17_PF/a_test.go" "$TMP_V17_PF/b_test.go" \
+         <<<"$diff_input" 2>&1 ); echo "exit:$?")
+if printf '%s' "$out" | grep -qE 'a_test\.go.*fail|status.*fail.*a_test\.go'; then
+  pass "v17_validator_per_file_failure_ux"
+else
+  fail "v17_validator_per_file_failure_ux: must name offending file in failure output (got: '$out')"
+fi
+rm -rf "$TMP_V17_PF"
+
+# AC3.5 — validator default profiles include stdlib + testify.
+if jq -r '.test_file_policy.post_red_mechanical_update.validators.active_profiles[]?' "$CONFIG_V17" 2>/dev/null \
+     | sort -u | tr '\n' ',' | grep -qE '^stdlib,testify,$'; then
+  pass "v17_validator_active_profiles_default_stdlib_testify"
+else
+  fail "v17_validator_active_profiles_default_stdlib_testify: validators.active_profiles must default to [stdlib, testify]"
+fi
+
+# AC3.6 — assertion_helper_patterns is a configurable array.
+if jq -e '.test_file_policy.post_red_mechanical_update.validators.assertion_helper_patterns | type == "array"' \
+     "$CONFIG_V17" >/dev/null 2>&1; then
+  pass "v17_validator_assertion_helper_patterns_configurable"
+else
+  fail "v17_validator_assertion_helper_patterns_configurable: validators.assertion_helper_patterns must be an array (project-defined)"
+fi
+
+# AC4.1+4.2 — hook integrates typed-exception lookup before the legacy block.
+if grep -qE 'post_red_mechanical_update|typed.exception|exceptions/post-red-test-edits' "$TDDSTATE_V17"; then
+  pass "v17_hook_typed_exception_path_when_enabled"
+else
+  fail "v17_hook_typed_exception_path_when_enabled: require-tdd-state.sh must reference post_red_mechanical_update"
+fi
+
+# AC4.3 — TEST_EDIT_EXCEPTION_DISABLE killswitch present.
+if grep -qE 'TEST_EDIT_EXCEPTION_DISABLE' "$TDDSTATE_V17"; then
+  pass "v17_hook_typed_exception_killswitch"
+else
+  fail "v17_hook_typed_exception_killswitch: require-tdd-state.sh must honor TEST_EDIT_EXCEPTION_DISABLE=1"
+fi
+
+# AC4.4 — when enabled:false, typed-exception path is silently skipped
+# (legacy boolean still controls behavior).
+if grep -qE 'enabled.*false|enabled.*true.*then|enabled.*!=.*true' "$TDDSTATE_V17"; then
+  pass "v17_hook_typed_exception_skipped_when_enabled_false"
+else
+  fail "v17_hook_typed_exception_skipped_when_enabled_false: require-tdd-state.sh must skip typed-exception lookup when enabled:false"
+fi
+
+# AC5.1 — grant helper exists, executable, parseable.
+if [ -x "$GRANT_V17" ] && bash -n "$GRANT_V17" 2>/dev/null; then
+  pass "v17_grant_helper_exists"
+else
+  fail "v17_grant_helper_exists: $GRANT_V17 missing or not executable/parseable"
+fi
+
+# AC5.2 — grant helper creates pending entry from CLI args.
+TMP_V17_GR=$(mktemp -d)
+mkdir -p "$TMP_V17_GR/.tdd"
+echo '{"required_markers_edit_time":["x"]}' > "$TMP_V17_GR/.tdd/tdd-config.json"
+( cd "$TMP_V17_GR" && bash "$GRANT_V17" \
+    --type mechanical_signature_propagation \
+    --paths "internal/auth/*_test.go" \
+    --symbol X --operations edit_existing_tests \
+    --reason "test reason" \
+    --cycle-id testcycle 2>/dev/null ) || true
+ARTIFACT="$TMP_V17_GR/.tdd/exceptions/post-red-test-edits.json"
+if [ -f "$ARTIFACT" ] \
+   && jq -e '.exceptions[0].status == "pending" and .exceptions[0].type == "mechanical_signature_propagation"' \
+        "$ARTIFACT" >/dev/null 2>&1; then
+  pass "v17_grant_helper_creates_pending_entry"
+else
+  fail "v17_grant_helper_creates_pending_entry: grant helper must write pending entry"
+fi
+
+# AC5.3 — --approve <ID> bumps status to approved.
+( cd "$TMP_V17_GR" && bash "$GRANT_V17" --approve E-001 2>/dev/null ) || true
+if [ -f "$ARTIFACT" ] \
+   && jq -e '.exceptions[0].status == "approved" and (.exceptions[0].approved_by | length) > 0' \
+        "$ARTIFACT" >/dev/null 2>&1; then
+  pass "v17_grant_helper_approve_bumps_status"
+else
+  fail "v17_grant_helper_approve_bumps_status: --approve must bump status to approved + set approved_by/at"
+fi
+
+# AC5.3 batch — APPROVED EXCEPTIONS E-001, E-002 syntax.
+# Reset artifact to two pending entries (E-001 was already approved
+# by the test above; preflight rejects re-approval per round-1 F3).
+TMP_V17_GR2=$(mktemp -d)
+mkdir -p "$TMP_V17_GR2/.tdd"
+echo '{"required_markers_edit_time":["x"]}' > "$TMP_V17_GR2/.tdd/tdd-config.json"
+( cd "$TMP_V17_GR2" && bash "$GRANT_V17" \
+    --type mechanical_signature_propagation --paths "internal/x/*_test.go" --symbol A \
+    --operations edit_existing_tests --reason "first" \
+    --cycle-id testcycle 2>/dev/null ) || true
+( cd "$TMP_V17_GR2" && bash "$GRANT_V17" \
+    --type compile_fix_only --paths "x" --symbol Y \
+    --operations edit_existing_tests --reason "second" \
+    --cycle-id testcycle 2>/dev/null ) || true
+( cd "$TMP_V17_GR2" && bash "$GRANT_V17" --approve "E-001,E-002" 2>/dev/null ) || true
+ARTIFACT2="$TMP_V17_GR2/.tdd/exceptions/post-red-test-edits.json"
+if [ -f "$ARTIFACT2" ] \
+   && jq -e '[.exceptions[] | .status] == ["approved","approved"]' \
+        "$ARTIFACT2" >/dev/null 2>&1; then
+  pass "v17_grant_helper_batch_approve"
+else
+  fail "v17_grant_helper_batch_approve: --approve must accept comma-separated batch"
+fi
+rm -rf "$TMP_V17_GR" "$TMP_V17_GR2"
+
+# AC6 — audit log records grant + use events.
+TMP_V17_AU=$(mktemp -d)
+mkdir -p "$TMP_V17_AU/.tdd"
+echo '{"required_markers_edit_time":["x"]}' > "$TMP_V17_AU/.tdd/tdd-config.json"
+( cd "$TMP_V17_AU" && bash "$GRANT_V17" \
+    --type mechanical_signature_propagation \
+    --paths "x" --symbol Z --operations edit_existing_tests \
+    --reason "audit-test" --cycle-id auditcycle 2>/dev/null ) || true
+( cd "$TMP_V17_AU" && bash "$GRANT_V17" --approve E-001 2>/dev/null ) || true
+AUDITLOG="$TMP_V17_AU/.tdd/audit/auditcycle.jsonl"
+if [ -f "$AUDITLOG" ] \
+   && grep -qE '"event"[[:space:]]*:[[:space:]]*"granted"' "$AUDITLOG"; then
+  pass "v17_audit_log_records_grant_use_deny_expire"
+else
+  fail "v17_audit_log_records_grant_use_deny_expire: audit log must record at least 'granted' event ($AUDITLOG)"
+fi
+rm -rf "$TMP_V17_AU"
+
+# AC7 — legacy boolean emits stderr deprecation warning.
+TMP_V17_DEP=$(mktemp -d)
+git init -q "$TMP_V17_DEP"
+( cd "$TMP_V17_DEP" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_V17_DEP/.tdd" "$TMP_V17_DEP/internal/auth"
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_V17_DEP/.tdd/"
+echo "package auth" > "$TMP_V17_DEP/internal/auth/handler_test.go"
+( cd "$TMP_V17_DEP" && git add . && git commit -q -m initial )
+cat > "$TMP_V17_DEP/.tdd/current-plan.md" <<'EOF'
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+out=$( ( echo '{"tool_input":{"file_path":"internal/auth/handler_test.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_V17_DEP" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$TDDSTATE_V17" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'DEPRECATED.*allow_after_red_confirmed.*post_red_mechanical_update'; then
+  pass "v17_legacy_boolean_emits_deprecation_warning"
+else
+  fail "v17_legacy_boolean_emits_deprecation_warning: hook must emit DEPRECATED warning when boolean is consulted"
+fi
+rm -rf "$TMP_V17_DEP"
+
+# AC8 — TEST_EDIT_EXCEPTION_DISABLE=1 bypasses typed-exception lookup.
+if grep -qE 'TEST_EDIT_EXCEPTION_DISABLE.*1.*skip|skip.*TEST_EDIT_EXCEPTION_DISABLE|TEST_EDIT_EXCEPTION_DISABLE.*killswitch' "$TDDSTATE_V17"; then
+  pass "v17_test_edit_exception_disable_killswitch"
+else
+  fail "v17_test_edit_exception_disable_killswitch: TEST_EDIT_EXCEPTION_DISABLE must be a documented killswitch"
+fi
+
+# AC1 + docs — go-tdd.md documents the typed-exception workflow.
+if grep -qE 'Typed test-edit exceptions|post_red_mechanical_update' "$GO_TDD_V17"; then
+  pass "v17_go_tdd_md_documents_typed_exceptions"
+else
+  fail "v17_go_tdd_md_documents_typed_exceptions: go-tdd.md must document typed-exception workflow"
+fi
+
+# spec doc — design doc captures the consultant-synthesized analysis.
+if [ -f "$SPEC_V17" ] \
+   && grep -qE 'typed.test.edit.exceptions|change_intent_hash|active_profiles' "$SPEC_V17"; then
+  pass "v17_design_spec_present"
+else
+  fail "v17_design_spec_present: docs/specs/typed-test-edit-exceptions-v1.7.0-spec.md must capture design"
+fi
+
+# .gitignore — exceptions/ + audit/ directories ignored.
+if grep -qE '\.tdd/exceptions/|\.tdd/audit/' "$PROJECT_ROOT/.gitignore"; then
+  pass "v17_gitignore_per_cycle_artifacts"
+else
+  fail "v17_gitignore_per_cycle_artifacts: .gitignore must list .tdd/exceptions/ and .tdd/audit/"
+fi
+
+# v17-r1-F1: hook MUST source + invoke validate_exception_diff,
+# not just check that the lib file exists.
+if grep -qE 'validate_exception_diff|\.\\s+["\x27]\\?\\$LIB_TYPED_EXC' "$TDDSTATE_V17"; then
+  pass "v17_r1_hook_actually_invokes_validator"
+else
+  fail "v17_r1_hook_actually_invokes_validator: hook must source the lib AND call validate_exception_diff (not just file-exist check)"
+fi
+
+# v17-r1-F2: glob direction. scope.paths "internal/auth/*_test.go"
+# MUST cover internal/auth/handler_test.go.
+TMP_R1F2=$(mktemp -d)
+git init -q "$TMP_R1F2"
+( cd "$TMP_R1F2" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_R1F2/.tdd/exceptions" "$TMP_R1F2/internal/auth"
+jq '.test_file_policy.post_red_mechanical_update.enabled = true' \
+  "$PROJECT_ROOT/.tdd/tdd-config.json" > "$TMP_R1F2/.tdd/tdd-config.json"
+echo "package auth" > "$TMP_R1F2/internal/auth/handler_test.go"
+cat > "$TMP_R1F2/.tdd/current-plan.md" <<'EOF'
+Cycle ID: test
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+echo "red proof" > "$TMP_R1F2/.tdd/red-proof.md"
+plan_h=$(sha256sum "$TMP_R1F2/.tdd/current-plan.md" | awk '{print $1}')
+red_h=$(sha256sum "$TMP_R1F2/.tdd/red-proof.md" | awk '{print $1}')
+# v1.7.0 round-4 F3 extended format: cycle|symbols|type|reason|paths|operations
+intent_h=$(printf 'test|X|mechanical_signature_propagation|test|internal/auth/*_test.go|edit_existing_tests' | sha256sum | awk '{print $1}')
+( cd "$TMP_R1F2" && git add . && git commit -q -m initial )
+# v1.7.0 round-7 F4: capture HEAD AFTER initial commit so the
+# head_at_approval matches the current HEAD at hook-time.
+head_at_approval=$( cd "$TMP_R1F2" && git rev-parse HEAD )
+cat > "$TMP_R1F2/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{
+  "version": 1, "cycle_id": "test", "phase": "red_confirmed", "expires": "next_green_commit",
+  "exceptions": [{
+    "id": "E-001", "type": "mechanical_signature_propagation",
+    "status": "approved", "approved_by": "operator", "approved_at": "2026-05-10T12:00:00Z",
+    "operations": ["edit_existing_tests"],
+    "scope": {"paths": ["internal/auth/*_test.go"], "symbols": ["X"]},
+    "reason": "test",
+    "binding": {"cycle_id": "test", "plan_hash": "$plan_h", "red_proof_hash": "$red_h", "change_intent_hash": "$intent_h", "head_at_approval": "$head_at_approval"}
+  }]
+}
+EOF
+# v1.7.0 round-6 F1: the hook now requires a non-empty proposed_diff,
+# so send a real Edit payload (touching declared symbol X to satisfy
+# mechanical_signature_propagation rules).
+PAYLOAD_R1F2=$(jq -n --arg p "internal/auth/handler_test.go" \
+  --arg o "package auth" --arg n "package auth
+func Foo() { _ = X() }" \
+  '{tool_name:"Edit", tool_input:{file_path:$p, old_string:$o, new_string:$n}}')
+out=$( ( printf '%s' "$PAYLOAD_R1F2" \
+  | CLAUDE_PROJECT_DIR="$TMP_R1F2" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$TDDSTATE_V17" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'BLOCKED.*after red phase confirmed'; then
+  fail "v17_r1_glob_match_direction_correct: scope 'internal/auth/*_test.go' should match handler_test.go (got blocked: '$out')"
+else
+  pass "v17_r1_glob_match_direction_correct"
+fi
+rm -rf "$TMP_R1F2"
+
+# v17-r1-F3: --approve must check current status is 'pending'.
+# Re-approving an expired entry must fail without modifying audit/artifact.
+TMP_R1F3=$(mktemp -d)
+mkdir -p "$TMP_R1F3/.tdd/exceptions"
+echo '{}' > "$TMP_R1F3/.tdd/tdd-config.json"
+cat > "$TMP_R1F3/.tdd/exceptions/post-red-test-edits.json" <<'EOF'
+{
+  "version": 1, "cycle_id": "test", "phase": "red_confirmed", "expires": "next_green_commit",
+  "exceptions": [{"id":"E-001","type":"compile_fix_only","status":"expired","approved_by":"","approved_at":"","operations":["edit_existing_tests"],"scope":{"paths":["x"],"symbols":[]},"reason":"old","binding":{"cycle_id":"old","plan_hash":"","red_proof_hash":"","change_intent_hash":""}}]
+}
+EOF
+( cd "$TMP_R1F3" && bash "$GRANT_V17" --approve E-001 2>/dev/null ) || true
+status_after=$(jq -r '.exceptions[0].status' "$TMP_R1F3/.tdd/exceptions/post-red-test-edits.json")
+if [ "$status_after" = "expired" ]; then
+  pass "v17_r1_approve_rejects_non_pending"
+else
+  fail "v17_r1_approve_rejects_non_pending: --approve on 'expired' entry must NOT bump to approved (got: $status_after)"
+fi
+rm -rf "$TMP_R1F3"
+
+# v17-r1-F4: hook must enforce binding.cycle_id (not just plan_hash).
+# An exception with stale binding.cycle_id (different from current cycle)
+# must NOT be honored even if plan_hash matches.
+TMP_R1F4=$(mktemp -d)
+git init -q "$TMP_R1F4"
+( cd "$TMP_R1F4" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_R1F4/.tdd/exceptions" "$TMP_R1F4/internal/auth"
+jq '.test_file_policy.post_red_mechanical_update.enabled = true' \
+  "$PROJECT_ROOT/.tdd/tdd-config.json" > "$TMP_R1F4/.tdd/tdd-config.json"
+echo "package auth" > "$TMP_R1F4/internal/auth/handler_test.go"
+cat > "$TMP_R1F4/.tdd/current-plan.md" <<'EOF'
+Cycle ID: current-cycle
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+plan_h=$(sha256sum "$TMP_R1F4/.tdd/current-plan.md" | awk '{print $1}')
+cat > "$TMP_R1F4/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{
+  "version": 1, "cycle_id": "different-cycle", "phase": "red_confirmed", "expires": "next_green_commit",
+  "exceptions": [{
+    "id": "E-001", "type": "mechanical_signature_propagation",
+    "status": "approved", "approved_by": "operator", "approved_at": "2026-05-10T12:00:00Z",
+    "operations": ["edit_existing_tests"],
+    "scope": {"paths": ["internal/auth/handler_test.go"], "symbols": ["X"]},
+    "reason": "test",
+    "binding": {"cycle_id": "different-cycle", "plan_hash": "$plan_h", "red_proof_hash": "", "change_intent_hash": ""}
+  }]
+}
+EOF
+( cd "$TMP_R1F4" && git add . && git commit -q -m initial )
+out=$( ( echo '{"tool_input":{"file_path":"internal/auth/handler_test.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R1F4" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$TDDSTATE_V17" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'BLOCKED.*after red phase confirmed'; then
+  pass "v17_r1_hook_enforces_binding_cycle_id"
+else
+  fail "v17_r1_hook_enforces_binding_cycle_id: stale binding.cycle_id must NOT honor exception (got: '$out')"
+fi
+rm -rf "$TMP_R1F4"
+
+# v17-r1-F5: validator must scope diff to per-file. An assertion change
+# in a_test.go must NOT mark b_test.go as failed.
+TMP_R1F5=$(mktemp -d)
+cat > "$TMP_R1F5/a_test.go" <<'EOF'
+package x
+import "github.com/stretchr/testify/require"
+import "testing"
+func TestA(t *testing.T) { require.Equal(t, 1, 1) }
+EOF
+cat > "$TMP_R1F5/b_test.go" <<'EOF'
+package x
+import "github.com/stretchr/testify/require"
+import "testing"
+func TestB(t *testing.T) { require.Equal(t, 2, 2) }
+EOF
+# Diff format: per-file headers (--- / +++) followed by hunks.
+diff_input="$(cat <<'DIFF'
+--- a/a_test.go
++++ b/a_test.go
+-func TestA(t *testing.T) { require.Equal(t, 1, 1) }
++func TestA(t *testing.T) { require.NotNil(t, 1) }
+DIFF
+)"
+out=$( ( bash "$LIB_V17" validate_exception_diff '{"id":"E-001","type":"mechanical_signature_propagation","operations":["edit_existing_tests"]}' \
+       "$TMP_R1F5/a_test.go" "$TMP_R1F5/b_test.go" \
+       <<<"$diff_input" 2>&1 ) || true)
+# Extract the JSON report line (first line that's valid JSON).
+report_json="$(printf '%s\n' "$out" | grep -E '^\{' | head -1)"
+if printf '%s' "$report_json" | jq -e '
+  (.files[] | select(.path | endswith("a_test.go")) | .status == "failed") and
+  (.files[] | select(.path | endswith("b_test.go")) | .status == "passed")
+' >/dev/null 2>&1; then
+  pass "v17_r1_validator_diff_scoped_per_file"
+else
+  fail "v17_r1_validator_diff_scoped_per_file: per-file diff scoping required (a fails; b passes; got: '$out')"
+fi
+rm -rf "$TMP_R1F5"
+
+# v17-r2-F1: hook MUST validate the proposed Edit payload, not the
+# pre-existing worktree diff. Construct a fixture where the worktree
+# diff is empty (file matches HEAD) but the Edit payload would
+# weaken assertions — must DENY.
+TMP_R2F1=$(mktemp -d)
+git init -q "$TMP_R2F1"
+( cd "$TMP_R2F1" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_R2F1/.tdd/exceptions" "$TMP_R2F1/internal/auth"
+jq '.test_file_policy.post_red_mechanical_update.enabled = true' \
+  "$PROJECT_ROOT/.tdd/tdd-config.json" > "$TMP_R2F1/.tdd/tdd-config.json"
+cat > "$TMP_R2F1/internal/auth/handler_test.go" <<'EOF'
+package auth
+import "github.com/stretchr/testify/require"
+import "testing"
+func TestX(t *testing.T) { require.Equal(t, 1, 1) }
+EOF
+cat > "$TMP_R2F1/.tdd/current-plan.md" <<'EOF'
+Cycle ID: testcycle
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+plan_h=$(sha256sum "$TMP_R2F1/.tdd/current-plan.md" | awk '{print $1}')
+cat > "$TMP_R2F1/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{
+  "version":1,"cycle_id":"testcycle","phase":"red_confirmed","expires":"next_green_commit",
+  "exceptions":[{"id":"E-001","type":"mechanical_signature_propagation","status":"approved",
+   "approved_by":"operator","approved_at":"2026-05-10T12:00:00Z",
+   "operations":["edit_existing_tests"],
+   "scope":{"paths":["internal/auth/*_test.go"],"symbols":["X"]},
+   "reason":"test","binding":{"cycle_id":"testcycle","plan_hash":"$plan_h","red_proof_hash":"x","change_intent_hash":"x"}}]
+}
+EOF
+( cd "$TMP_R2F1" && git add . && git commit -q -m initial )
+# Edit payload that weakens assertion. Hook MUST validate THIS, not the
+# (currently empty) worktree diff.
+out=$( ( echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler_test.go","old_string":"require.Equal(t, 1, 1)","new_string":"require.NotNil(t, 1)"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R2F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$TDDSTATE_V17" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'BLOCKED|DENIED|forbid_assertion'; then
+  pass "v17_r2_hook_validates_proposed_edit_payload"
+else
+  fail "v17_r2_hook_validates_proposed_edit_payload: hook must reject Edit payload that weakens assertions, not just check worktree diff (got: '$out')"
+fi
+rm -rf "$TMP_R2F1"
+
+# v17-r2-F2: per-file exception matching. Two files matched to two
+# different exception types; each must validate against its OWN
+# exception, not the last-matched one.
+# This tests the structural invariant: the hook must NOT collapse
+# per-file matches to a single exception.
+if grep -qE '_matched_exception_for_file|per.file.*exception|matched_per_file' "$TDDSTATE_V17"; then
+  pass "v17_r2_hook_per_file_exception_tracking"
+else
+  fail "v17_r2_hook_per_file_exception_tracking: hook must track matched exception per file, not collapse to one"
+fi
+
+# v17-r2-F3: type-specific validators.
+# import_only on a file with non-import assertion change must FAIL.
+TMP_R2F3=$(mktemp -d)
+cat > "$TMP_R2F3/before.go" <<'EOF'
+package x
+import "testing"
+import "github.com/stretchr/testify/require"
+func TestX(t *testing.T) { require.Equal(t, 1, 1) }
+EOF
+cat > "$TMP_R2F3/after.go" <<'EOF'
+package x
+import "testing"
+import "github.com/stretchr/testify/require"
+import "fmt"
+func TestX(t *testing.T) { require.NotNil(t, 1); fmt.Println("x") }
+EOF
+diff_input="$(diff -u "$TMP_R2F3/before.go" "$TMP_R2F3/after.go" || true)"
+out=$( ( bash "$LIB_V17" validate_exception_diff '{"id":"E-001","type":"import_only","operations":["edit_existing_tests"]}' \
+       "$TMP_R2F3/after.go" <<<"$diff_input" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'import_only.*non.import|import_only.*forbid|non.import.*import_only'; then
+  pass "v17_r2_validator_import_only_rejects_non_import"
+else
+  fail "v17_r2_validator_import_only_rejects_non_import: import_only type must reject non-import hunks (got: '$out')"
+fi
+rm -rf "$TMP_R2F3"
+
+# v17-r2-F4: hook must REQUIRE non-empty + matching cycle_id + plan_hash.
+# Currently `or $cid == ""` lets blank-binding artifacts match.
+TMP_R2F4=$(mktemp -d)
+git init -q "$TMP_R2F4"
+( cd "$TMP_R2F4" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_R2F4/.tdd/exceptions" "$TMP_R2F4/internal/auth"
+jq '.test_file_policy.post_red_mechanical_update.enabled = true' \
+  "$PROJECT_ROOT/.tdd/tdd-config.json" > "$TMP_R2F4/.tdd/tdd-config.json"
+echo "package auth" > "$TMP_R2F4/internal/auth/handler_test.go"
+# Plan WITHOUT Cycle ID line — current_cycle_id is empty.
+cat > "$TMP_R2F4/.tdd/current-plan.md" <<'EOF'
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+# Approved exception with EMPTY binding.cycle_id — must NOT be honored.
+cat > "$TMP_R2F4/.tdd/exceptions/post-red-test-edits.json" <<'EOF'
+{
+  "version":1,"cycle_id":"x","phase":"red_confirmed","expires":"next_green_commit",
+  "exceptions":[{"id":"E-001","type":"mechanical_signature_propagation","status":"approved",
+   "approved_by":"operator","approved_at":"2026-05-10T12:00:00Z",
+   "operations":["edit_existing_tests"],
+   "scope":{"paths":["internal/auth/*_test.go"],"symbols":[]},
+   "reason":"test","binding":{"cycle_id":"","plan_hash":"","red_proof_hash":"","change_intent_hash":""}}]
+}
+EOF
+( cd "$TMP_R2F4" && git add . && git commit -q -m initial )
+out=$( ( echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler_test.go","old_string":"package auth","new_string":"package authx"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R2F4" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$TDDSTATE_V17" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'BLOCKED.*after red phase confirmed'; then
+  pass "v17_r2_hook_rejects_blank_binding_fields"
+else
+  fail "v17_r2_hook_rejects_blank_binding_fields: blank binding.cycle_id/plan_hash must NOT honor exception (got: '$out')"
+fi
+rm -rf "$TMP_R2F4"
+
+# v17-r2-F5: hook must surface validator stderr (per-file report) in
+# deny diagnostic, not 2>/dev/null it.
+if grep -qE '_validator_report|validator_stderr|VALIDATOR.*REPORT|emit.*validator.*stderr|2>&1.*validate_exception_diff' "$TDDSTATE_V17"; then
+  pass "v17_r2_hook_surfaces_validator_report"
+else
+  fail "v17_r2_hook_surfaces_validator_report: hook must capture + surface validator stderr per-file report"
+fi
+
+# v17-r3-F1: MultiEdit payload with top-level file_path + per-edit
+# old_string/new_string. Diff construction must check .edits before
+# the scalar Edit branch (or in the same branch).
+TMP_R3F1=$(mktemp -d)
+git init -q "$TMP_R3F1"
+( cd "$TMP_R3F1" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_R3F1/.tdd/exceptions" "$TMP_R3F1/internal/auth"
+jq '.test_file_policy.post_red_mechanical_update.enabled = true' \
+  "$PROJECT_ROOT/.tdd/tdd-config.json" > "$TMP_R3F1/.tdd/tdd-config.json"
+cat > "$TMP_R3F1/internal/auth/handler_test.go" <<'EOF'
+package auth
+import "github.com/stretchr/testify/require"
+import "testing"
+func TestX(t *testing.T) { require.Equal(t, 1, 1) }
+EOF
+cat > "$TMP_R3F1/.tdd/current-plan.md" <<'EOF'
+Cycle ID: testcycle
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+plan_h=$(sha256sum "$TMP_R3F1/.tdd/current-plan.md" | awk '{print $1}')
+cat > "$TMP_R3F1/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{"version":1,"cycle_id":"testcycle","phase":"red_confirmed","expires":"next_green_commit","exceptions":[{"id":"E-001","type":"mechanical_signature_propagation","status":"approved","approved_by":"o","approved_at":"x","operations":["edit_existing_tests"],"scope":{"paths":["internal/auth/*_test.go"],"symbols":["X"]},"reason":"t","binding":{"cycle_id":"testcycle","plan_hash":"$plan_h","red_proof_hash":"x","change_intent_hash":""}}]}
+EOF
+( cd "$TMP_R3F1" && git add . && git commit -q -m initial )
+out=$( ( echo '{"tool_name":"MultiEdit","tool_input":{"file_path":"internal/auth/handler_test.go","edits":[{"old_string":"require.Equal(t, 1, 1)","new_string":"require.NotNil(t, 1)"}]}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R3F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$TDDSTATE_V17" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'BLOCKED|forbid_assertion|VALIDATOR REPORT'; then
+  pass "v17_r3_hook_validates_multiedit_payload"
+else
+  fail "v17_r3_hook_validates_multiedit_payload: MultiEdit assertion change must be blocked (got: '$out')"
+fi
+rm -rf "$TMP_R3F1"
+
+# v17-r3-F2: create_new_tests must validate the PROPOSED Write content,
+# not whatever's on disk (file may not exist or has stale content).
+TMP_R3F2=$(mktemp -d)
+git init -q "$TMP_R3F2"
+( cd "$TMP_R3F2" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_R3F2/.tdd/exceptions" "$TMP_R3F2/internal/auth"
+jq '.test_file_policy.post_red_mechanical_update.enabled = true' \
+  "$PROJECT_ROOT/.tdd/tdd-config.json" > "$TMP_R3F2/.tdd/tdd-config.json"
+cat > "$TMP_R3F2/.tdd/current-plan.md" <<'EOF'
+Cycle ID: testcycle
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+plan_h=$(sha256sum "$TMP_R3F2/.tdd/current-plan.md" | awk '{print $1}')
+cat > "$TMP_R3F2/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{"version":1,"cycle_id":"testcycle","phase":"red_confirmed","expires":"next_green_commit","exceptions":[{"id":"E-001","type":"mechanical_signature_propagation","status":"approved","approved_by":"o","approved_at":"x","operations":["create_new_tests"],"scope":{"paths":["internal/auth/*_test.go"],"symbols":["X"]},"reason":"t","binding":{"cycle_id":"testcycle","plan_hash":"$plan_h","red_proof_hash":"x","change_intent_hash":""}}]}
+EOF
+( cd "$TMP_R3F2" && git add . && git commit -q -m initial )
+# Write proposed content with NO assertions (empty TestX) — must DENY.
+out=$( ( echo '{"tool_name":"Write","tool_input":{"file_path":"internal/auth/handler_test.go","content":"package auth\nimport \"testing\"\nfunc TestX(t *testing.T) {}\n"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R3F2" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$TDDSTATE_V17" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'BLOCKED|require_assertions|missing assertion|VALIDATOR REPORT'; then
+  pass "v17_r3_validator_create_new_uses_proposed_content"
+else
+  fail "v17_r3_validator_create_new_uses_proposed_content: must validate PROPOSED Write content, not on-disk (got: '$out')"
+fi
+rm -rf "$TMP_R3F2"
+
+# v17-r3-F3: hook must recompute + verify change_intent_hash. An
+# exception with mutated scope.paths after approval must NOT match.
+TMP_R3F3=$(mktemp -d)
+git init -q "$TMP_R3F3"
+( cd "$TMP_R3F3" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_R3F3/.tdd/exceptions" "$TMP_R3F3/internal/auth"
+jq '.test_file_policy.post_red_mechanical_update.enabled = true' \
+  "$PROJECT_ROOT/.tdd/tdd-config.json" > "$TMP_R3F3/.tdd/tdd-config.json"
+echo "package auth" > "$TMP_R3F3/internal/auth/handler_test.go"
+cat > "$TMP_R3F3/.tdd/current-plan.md" <<'EOF'
+Cycle ID: testcycle
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+plan_h=$(sha256sum "$TMP_R3F3/.tdd/current-plan.md" | awk '{print $1}')
+# Approved with a STALE change_intent_hash. Hook must recompute current
+# intent hash from cycle+symbols+type+reason and reject if mismatch.
+# Stale value: pretend the original symbol was "Y" but now the entry shows X.
+cat > "$TMP_R3F3/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{"version":1,"cycle_id":"testcycle","phase":"red_confirmed","expires":"next_green_commit","exceptions":[{"id":"E-001","type":"mechanical_signature_propagation","status":"approved","approved_by":"o","approved_at":"x","operations":["edit_existing_tests"],"scope":{"paths":["internal/auth/*_test.go"],"symbols":["X"]},"reason":"current","binding":{"cycle_id":"testcycle","plan_hash":"$plan_h","red_proof_hash":"x","change_intent_hash":"deadbeef000000000000000000000000000000000000000000000000deadbeef"}}]}
+EOF
+( cd "$TMP_R3F3" && git add . && git commit -q -m initial )
+out=$( ( echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler_test.go","old_string":"package auth","new_string":"package authx"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R3F3" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$TDDSTATE_V17" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'BLOCKED.*after red phase confirmed'; then
+  pass "v17_r3_hook_verifies_change_intent_hash"
+else
+  fail "v17_r3_hook_verifies_change_intent_hash: stale change_intent_hash must reject exception (got: '$out')"
+fi
+rm -rf "$TMP_R3F3"
+
+# v17-r3-F4: unknown exception type or operation must be rejected by
+# the validator (and grant helper).
+TMP_R3F4=$(mktemp -d)
+echo "package x" > "$TMP_R3F4/file.go"
+out=$( ( bash "$LIB_V17" validate_exception_diff \
+       '{"id":"E-001","type":"bogus_unknown_type","operations":["edit_existing_tests"]}' \
+       "$TMP_R3F4/file.go" </dev/null 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'unknown.*type|invalid.*type|exception type.*not allowed'; then
+  pass "v17_r3_validator_rejects_unknown_type"
+else
+  fail "v17_r3_validator_rejects_unknown_type: unknown type must be rejected (got: '$out')"
+fi
+out=$( ( bash "$LIB_V17" validate_exception_diff \
+       '{"id":"E-001","type":"mechanical_signature_propagation","operations":["bogus_operation"]}' \
+       "$TMP_R3F4/file.go" </dev/null 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'unknown.*operation|invalid.*operation|operation.*not allowed'; then
+  pass "v17_r3_validator_rejects_unknown_operation"
+else
+  fail "v17_r3_validator_rejects_unknown_operation: unknown operation must be rejected (got: '$out')"
+fi
+rm -rf "$TMP_R3F4"
+
+echo
+
+# ─────────────────────────────────────────────────────────────────────
+# v1.7.0 round-4 fixes: tests for codex round-4 P0/P1 findings.
+# F1 (P0): edit_existing_tests must not allow Write to non-existent test files.
+# F2 (P0): hook synthetic diff must not flag unchanged context lines as +/-.
+# F3 (P0): change_intent_hash must bind scope.paths and operations.
+# F4 (P1): tests must assert validator-specific output, not generic BLOCKED.
+# ─────────────────────────────────────────────────────────────────────
+
+# v17-r4-F1: hook with Write tool to a non-existent test file under an
+# edit_existing_tests-only exception must REJECT (not silently approve).
+HOOK="$PROJECT_ROOT/.claude/hooks/require-tdd-state.sh"
+LIB_V17="$PROJECT_ROOT/scripts/tdd/_lib_test_edit_exception.sh"
+TMP_R4F1=$(mktemp -d)
+mkdir -p "$TMP_R4F1/internal/m" "$TMP_R4F1/.tdd/exceptions" "$TMP_R4F1/.tdd/audit"
+cat > "$TMP_R4F1/.tdd/tdd-config.json" <<'EOF'
+{
+  "tier1_path_regexes": ["^internal/"],
+  "test_file_policy": {
+    "allow_after_red_confirmed": false,
+    "post_red_mechanical_update": {
+      "enabled": true,
+      "exception_types": ["mechanical_signature_propagation","compile_fix_only","import_only"],
+      "validators": {"active_profiles": ["stdlib","testify"]}
+    }
+  }
+}
+EOF
+cat > "$TMP_R4F1/.tdd/current-plan.md" <<'EOF'
+Cycle ID: r4f1
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+echo "red proof" > "$TMP_R4F1/.tdd/red-proof.md"
+plan_h=$(sha256sum "$TMP_R4F1/.tdd/current-plan.md" | awk '{print $1}')
+red_h=$(sha256sum "$TMP_R4F1/.tdd/red-proof.md" | awk '{print $1}')
+# Extended-format hash: cycle|symbols|type|reason|paths|operations
+intent_h=$(printf 'r4f1|X|mechanical_signature_propagation|test|internal/m/*_test.go|edit_existing_tests' | sha256sum | awk '{print $1}')
+cat > "$TMP_R4F1/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{
+  "version": 1, "cycle_id": "r4f1", "phase": "red_confirmed", "expires": "next_green_commit",
+  "exceptions": [{
+    "id": "E-001", "type": "mechanical_signature_propagation",
+    "status": "approved", "approved_by": "operator", "approved_at": "2026-05-10T12:00:00Z",
+    "operations": ["edit_existing_tests"],
+    "scope": {"paths": ["internal/m/*_test.go"], "symbols": ["X"]},
+    "reason": "test",
+    "binding": {"cycle_id": "r4f1", "plan_hash": "$plan_h", "red_proof_hash": "$red_h", "change_intent_hash": "$intent_h"}
+  }]
+}
+EOF
+PAYLOAD=$(jq -n --arg p "internal/m/new_test.go" \
+  --arg c "package m
+func TestX(t *testing.T) { require.Equal(t, 1, 1) }" \
+  '{tool_name:"Write", tool_input:{file_path:$p, content:$c}}')
+out=$( ( cd "$TMP_R4F1" && printf '%s' "$PAYLOAD" | bash "$HOOK" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'create_new_tests|new test file.*not.*permitted|operation.*create_new'; then
+  pass "v17_r4_write_to_new_test_under_edit_existing_only_rejected"
+else
+  fail "v17_r4_write_to_new_test_under_edit_existing_only_rejected: Write to non-existent test under edit_existing_tests-only exception must be rejected (got: '$out')"
+fi
+rm -rf "$TMP_R4F1"
+
+# v17-r4-F2: Edit whose old_string and new_string both contain an
+# unchanged assertion-helper line MUST be allowed; only the actually-
+# changed line should be considered. Synthetic diff must not flag
+# unchanged context as a +/- assertion change.
+TMP_R4F2=$(mktemp -d)
+mkdir -p "$TMP_R4F2/internal/m" "$TMP_R4F2/.tdd/exceptions" "$TMP_R4F2/.tdd/audit"
+cat > "$TMP_R4F2/.tdd/tdd-config.json" <<'EOF'
+{
+  "tier1_path_regexes": ["^internal/"],
+  "test_file_policy": {
+    "allow_after_red_confirmed": false,
+    "post_red_mechanical_update": {
+      "enabled": true,
+      "exception_types": ["mechanical_signature_propagation","compile_fix_only","import_only"],
+      "validators": {"active_profiles": ["stdlib","testify"]}
+    }
+  }
+}
+EOF
+cat > "$TMP_R4F2/.tdd/current-plan.md" <<'EOF'
+Cycle ID: r4f2
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+echo "red proof" > "$TMP_R4F2/.tdd/red-proof.md"
+cat > "$TMP_R4F2/internal/m/x_test.go" <<'EOF'
+package m
+func TestX(t *testing.T) {
+    x := Old(1)
+    require.Equal(t, 1, x)
+}
+EOF
+plan_h=$(sha256sum "$TMP_R4F2/.tdd/current-plan.md" | awk '{print $1}')
+red_h=$(sha256sum "$TMP_R4F2/.tdd/red-proof.md" | awk '{print $1}')
+intent_h=$(printf 'r4f2|Old|mechanical_signature_propagation|widen Old() signature|internal/m/*_test.go|edit_existing_tests' | sha256sum | awk '{print $1}')
+cat > "$TMP_R4F2/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{
+  "version": 1, "cycle_id": "r4f2", "phase": "red_confirmed", "expires": "next_green_commit",
+  "exceptions": [{
+    "id": "E-001", "type": "mechanical_signature_propagation",
+    "status": "approved", "approved_by": "operator", "approved_at": "2026-05-10T12:00:00Z",
+    "operations": ["edit_existing_tests"],
+    "scope": {"paths": ["internal/m/*_test.go"], "symbols": ["Old"]},
+    "reason": "widen Old() signature",
+    "binding": {"cycle_id": "r4f2", "plan_hash": "$plan_h", "red_proof_hash": "$red_h", "change_intent_hash": "$intent_h"}
+  }]
+}
+EOF
+# Edit changes only the call-site argument; surrounding require.Equal stays.
+PAYLOAD=$(jq -n --arg p "internal/m/x_test.go" \
+  --arg o "    x := Old(1)
+    require.Equal(t, 1, x)" \
+  --arg n "    x := Old(1, ctx)
+    require.Equal(t, 1, x)" \
+  '{tool_name:"Edit", tool_input:{file_path:$p, old_string:$o, new_string:$n}}')
+out=$( ( cd "$TMP_R4F2" && printf '%s' "$PAYLOAD" | bash "$HOOK" 2>&1 ) || true)
+# Hook must NOT block on assertion-line drift since require.Equal was unchanged.
+# It either prints nothing (allow) or returns allow JSON. It must not print
+# 'forbid_assertion' or 'BLOCKED'.
+if printf '%s' "$out" | grep -qE 'forbid_assertion|BLOCKED'; then
+  fail "v17_r4_synthetic_diff_ignores_unchanged_context: unchanged require.Equal line was treated as a +/- change (got: '$out')"
+else
+  pass "v17_r4_synthetic_diff_ignores_unchanged_context"
+fi
+rm -rf "$TMP_R4F2"
+
+# v17-r4-F3: change_intent_hash must bind scope.paths AND operations.
+# Mutating either field after approval must invalidate the hash and
+# cause the hook to reject.
+TMP_R4F3=$(mktemp -d)
+mkdir -p "$TMP_R4F3/internal/m" "$TMP_R4F3/.tdd/exceptions" "$TMP_R4F3/.tdd/audit"
+cat > "$TMP_R4F3/.tdd/tdd-config.json" <<'EOF'
+{
+  "tier1_path_regexes": ["^internal/"],
+  "test_file_policy": {
+    "allow_after_red_confirmed": false,
+    "post_red_mechanical_update": {
+      "enabled": true,
+      "exception_types": ["mechanical_signature_propagation","compile_fix_only","import_only"],
+      "validators": {"active_profiles": ["stdlib","testify"]}
+    }
+  }
+}
+EOF
+cat > "$TMP_R4F3/.tdd/current-plan.md" <<'EOF'
+Cycle ID: r4f3
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+cat > "$TMP_R4F3/internal/m/x_test.go" <<'EOF'
+package m
+func TestX(t *testing.T) { _ = X(1) }
+EOF
+plan_h=$(sha256sum "$TMP_R4F3/.tdd/current-plan.md" | awk '{print $1}')
+# Weak-format hash (omits scope.paths and operations) — what current
+# hook computes. After F3 fix, hook will compute an extended hash
+# (cycle|symbols|type|reason|paths|operations) and reject this artifact.
+weak_intent="$(printf 'r4f3|X|mechanical_signature_propagation|narrow' | sha256sum | awk '{print $1}')"
+cat > "$TMP_R4F3/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{
+  "version": 1, "cycle_id": "r4f3", "phase": "red_confirmed", "expires": "next_green_commit",
+  "exceptions": [{
+    "id": "E-001", "type": "mechanical_signature_propagation",
+    "status": "approved", "approved_by": "operator", "approved_at": "2026-05-10T12:00:00Z",
+    "operations": ["edit_existing_tests"],
+    "scope": {"paths": ["internal/m/*_test.go"], "symbols": ["X"]},
+    "reason": "narrow",
+    "binding": {"cycle_id": "r4f3", "plan_hash": "$plan_h", "red_proof_hash": "x", "change_intent_hash": "$weak_intent"}
+  }]
+}
+EOF
+PAYLOAD=$(jq -n --arg p "internal/m/x_test.go" \
+  --arg o '_ = X(1)' --arg n '_ = X(1, 2)' \
+  '{tool_name:"Edit", tool_input:{file_path:$p, old_string:$o, new_string:$n}}')
+out=$( ( cd "$TMP_R4F3" && printf '%s' "$PAYLOAD" | bash "$HOOK" 2>&1 ) || true)
+# Must reject due to hash mismatch (bound to narrow but artifact widened).
+if printf '%s' "$out" | grep -qE 'BLOCKED|change_intent_hash|hash mismatch'; then
+  pass "v17_r4_intent_hash_binds_paths_and_operations"
+else
+  fail "v17_r4_intent_hash_binds_paths_and_operations: tampered scope.paths/operations should fail hash verification (got: '$out')"
+fi
+rm -rf "$TMP_R4F3"
+
+# v17-r4-F4: validator dispatch evidence — at least one passing test
+# must include 'VALIDATOR REPORT' in its block-reason output (proves
+# the hook actually CALLED the validator, not just rejected via legacy
+# path). This is a meta-test enforcing test-quality.
+TMP_R4F4=$(mktemp -d)
+mkdir -p "$TMP_R4F4/internal/m" "$TMP_R4F4/.tdd/exceptions" "$TMP_R4F4/.tdd/audit"
+cat > "$TMP_R4F4/.tdd/tdd-config.json" <<'EOF'
+{
+  "tier1_path_regexes": ["^internal/"],
+  "test_file_policy": {
+    "allow_after_red_confirmed": false,
+    "post_red_mechanical_update": {
+      "enabled": true,
+      "exception_types": ["mechanical_signature_propagation","compile_fix_only","import_only"],
+      "validators": {"active_profiles": ["stdlib","testify"]}
+    }
+  }
+}
+EOF
+cat > "$TMP_R4F4/.tdd/current-plan.md" <<'EOF'
+Cycle ID: r4f4
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+cat > "$TMP_R4F4/internal/m/x_test.go" <<'EOF'
+package m
+func TestX(t *testing.T) { _ = X() }
+EOF
+echo "red proof" > "$TMP_R4F4/.tdd/red-proof.md"
+plan_h=$(sha256sum "$TMP_R4F4/.tdd/current-plan.md" | awk '{print $1}')
+red_h=$(sha256sum "$TMP_R4F4/.tdd/red-proof.md" | awk '{print $1}')
+# F3-correct: hash bound to paths + operations.
+ihash="$(printf 'r4f4|X|mechanical_signature_propagation|change|internal/m/*_test.go|edit_existing_tests' | sha256sum | awk '{print $1}')"
+cat > "$TMP_R4F4/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{
+  "version": 1, "cycle_id": "r4f4", "phase": "red_confirmed", "expires": "next_green_commit",
+  "exceptions": [{
+    "id": "E-001", "type": "mechanical_signature_propagation",
+    "status": "approved", "approved_by": "operator", "approved_at": "2026-05-10T12:00:00Z",
+    "operations": ["edit_existing_tests"],
+    "scope": {"paths": ["internal/m/*_test.go"], "symbols": ["X"]},
+    "reason": "change",
+    "binding": {"cycle_id": "r4f4", "plan_hash": "$plan_h", "red_proof_hash": "$red_h", "change_intent_hash": "$ihash"}
+  }]
+}
+EOF
+# Edit that adds a new assertion line — should be denied by validator,
+# producing a VALIDATOR REPORT in the output (not just a legacy
+# pre-validator BLOCKED message).
+PAYLOAD=$(jq -n --arg p "internal/m/x_test.go" \
+  --arg o '_ = X()' \
+  --arg n '_ = X()
+    require.Equal(t, 1, 2)' \
+  '{tool_name:"Edit", tool_input:{file_path:$p, old_string:$o, new_string:$n}}')
+out=$( ( cd "$TMP_R4F4" && printf '%s' "$PAYLOAD" | bash "$HOOK" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'VALIDATOR REPORT|forbid_assertion'; then
+  pass "v17_r4_validator_dispatch_emits_validator_report"
+else
+  fail "v17_r4_validator_dispatch_emits_validator_report: hook must surface VALIDATOR REPORT for validator-rejected edits (got: '$out')"
+fi
+rm -rf "$TMP_R4F4"
+
+echo
+
+# ─────────────────────────────────────────────────────────────────────
+# v1.7.0 round-5 fixes: tests for codex round-5 P0/P1 findings.
+# F1 (P0): expires + red_proof_hash binding must be enforced.
+# F2 (P0): create_new_tests must fail closed when content can't be
+#          materialized (validator path missing).
+# F3 (P0): compile_fix_only must restrict to declared symbol changes,
+#          not allow arbitrary non-assertion edits.
+# F4 (P1): import_only must accept aliased/dot/blank imports.
+# ─────────────────────────────────────────────────────────────────────
+
+# v17-r5-F1: hook must reject when red_proof_hash in artifact does NOT
+# match current .tdd/red-proof.md hash (governance: stale exception
+# from a previous red phase must not unlock current edits).
+TMP_R5F1=$(mktemp -d)
+mkdir -p "$TMP_R5F1/internal/m" "$TMP_R5F1/.tdd/exceptions" "$TMP_R5F1/.tdd/audit"
+cat > "$TMP_R5F1/.tdd/tdd-config.json" <<'EOF'
+{
+  "tier1_path_regexes": ["^internal/"],
+  "test_file_policy": {
+    "allow_after_red_confirmed": false,
+    "post_red_mechanical_update": {
+      "enabled": true,
+      "exception_types": ["mechanical_signature_propagation","compile_fix_only","import_only"],
+      "validators": {"active_profiles": ["stdlib","testify"]}
+    }
+  }
+}
+EOF
+cat > "$TMP_R5F1/.tdd/current-plan.md" <<'EOF'
+Cycle ID: r5f1
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+cat > "$TMP_R5F1/.tdd/red-proof.md" <<'EOF'
+This is the CURRENT red proof.
+EOF
+cat > "$TMP_R5F1/internal/m/x_test.go" <<'EOF'
+package m
+func TestX(t *testing.T) { _ = X() }
+EOF
+plan_h=$(sha256sum "$TMP_R5F1/.tdd/current-plan.md" | awk '{print $1}')
+intent_h=$(printf 'r5f1|X|mechanical_signature_propagation|test|internal/m/*_test.go|edit_existing_tests' | sha256sum | awk '{print $1}')
+# Stored red_proof_hash bound to a STALE proof (different from current).
+stale_red_h=$(printf 'STALE PROOF' | sha256sum | awk '{print $1}')
+cat > "$TMP_R5F1/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{
+  "version": 1, "cycle_id": "r5f1", "phase": "red_confirmed", "expires": "next_green_commit",
+  "exceptions": [{
+    "id": "E-001", "type": "mechanical_signature_propagation",
+    "status": "approved", "approved_by": "operator", "approved_at": "2026-05-10T12:00:00Z",
+    "operations": ["edit_existing_tests"],
+    "scope": {"paths": ["internal/m/*_test.go"], "symbols": ["X"]},
+    "reason": "test",
+    "binding": {"cycle_id": "r5f1", "plan_hash": "$plan_h", "red_proof_hash": "$stale_red_h", "change_intent_hash": "$intent_h"}
+  }]
+}
+EOF
+PAYLOAD=$(jq -n --arg p "internal/m/x_test.go" \
+  --arg o '_ = X()' --arg n '_ = X(1)' \
+  '{tool_name:"Edit", tool_input:{file_path:$p, old_string:$o, new_string:$n}}')
+out=$( ( cd "$TMP_R5F1" && printf '%s' "$PAYLOAD" | bash "$HOOK" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'red_proof_hash|stale.*red.*proof|red proof.*mismatch|BLOCKED'; then
+  pass "v17_r5_red_proof_hash_mismatch_rejected"
+else
+  fail "v17_r5_red_proof_hash_mismatch_rejected: stale red_proof_hash must reject (got: '$out')"
+fi
+rm -rf "$TMP_R5F1"
+
+# v17-r5-F2: validator's create_new_tests branch must NOT silently
+# pass when the validator path doesn't exist (failure to materialize).
+TMP_R5F2=$(mktemp -d)
+exc_json='{"id":"E-001","type":"mechanical_signature_propagation","operations":["create_new_tests"],"scope":{"paths":["x_test.go"],"symbols":["X"]}}'
+out=$( ( bash "$LIB_V17" validate_exception_diff "$exc_json" "$TMP_R5F2/does_not_exist_test.go" </dev/null 2>&1 ) || true)
+rc=$?
+if printf '%s' "$out" | grep -qE 'create_new_tests.*missing|cannot validate.*content|file does not exist|materialize'; then
+  pass "v17_r5_create_new_fails_closed_on_missing_path"
+else
+  fail "v17_r5_create_new_fails_closed_on_missing_path: validator must fail when create_new_tests target doesn't exist (got rc=$rc, out='$out')"
+fi
+rm -rf "$TMP_R5F2"
+
+# v17-r5-F3: compile_fix_only must restrict to declared scope.symbols.
+# A diff that touches a non-declared symbol must be rejected even
+# without an assertion change.
+TMP_R5F3=$(mktemp -d)
+echo "package m" > "$TMP_R5F3/file_test.go"
+exc_json='{"id":"E-001","type":"compile_fix_only","operations":["edit_existing_tests"],"scope":{"paths":["file_test.go"],"symbols":["NarrowSymbol"]}}'
+diff_input='--- a/file_test.go
++++ b/file_test.go
+@@ -1,1 +1,2 @@
+ package m
++_ = OtherSymbolNotInScope()'
+out=$( ( printf '%s' "$diff_input" | bash "$LIB_V17" validate_exception_diff "$exc_json" "$TMP_R5F3/file_test.go" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'compile_fix_only.*symbol|out_of_scope_symbol|forbid.*non_symbol|symbol.*not.*in.*scope'; then
+  pass "v17_r5_compile_fix_only_restricts_to_scope_symbols"
+else
+  fail "v17_r5_compile_fix_only_restricts_to_scope_symbols: compile_fix_only must reject edits touching non-declared symbols (got: '$out')"
+fi
+rm -rf "$TMP_R5F3"
+
+# v17-r5-F4: import_only must accept aliased / dot / blank Go imports
+# inside a parenthesised import block.
+TMP_R5F4=$(mktemp -d)
+echo "package m" > "$TMP_R5F4/file_test.go"
+exc_json='{"id":"E-001","type":"import_only","operations":["edit_existing_tests"],"scope":{"paths":["file_test.go"],"symbols":[]}}'
+diff_input='--- a/file_test.go
++++ b/file_test.go
+@@ -1,2 +1,7 @@
+ package m
++import (
++    _ "blank/import"
++    . "dot/import"
++    alias "aliased/import"
++)'
+if printf '%s' "$diff_input" | bash "$LIB_V17" validate_exception_diff "$exc_json" "$TMP_R5F4/file_test.go" >/dev/null 2>&1; then
+  pass "v17_r5_import_only_accepts_alias_dot_blank"
+else
+  out=$( ( printf '%s' "$diff_input" | bash "$LIB_V17" validate_exception_diff "$exc_json" "$TMP_R5F4/file_test.go" 2>&1 ) || true)
+  fail "v17_r5_import_only_accepts_alias_dot_blank: import_only must accept aliased/dot/blank imports (out='$out')"
+fi
+rm -rf "$TMP_R5F4"
+
+echo
+
+# ─────────────────────────────────────────────────────────────────────
+# v1.7.0 round-6 fixes: tests for codex round-6 P0/P1 findings.
+# F1 (P0): empty proposed_diff under typed-exception path must
+#          fail closed (path normalization + empty-diff guard).
+# F2 (P0): mechanical_signature_propagation must allow call-site
+#          changes inside assertion lines when the change touches a
+#          declared scope.symbols symbol and the assertion shape
+#          (helper, comparator) is preserved.
+# F3 (P0): ISO8601 expires that fails to parse must fail closed.
+# F4 (P1): no_test_deletion + no_empty_t_run must be enforced.
+# ─────────────────────────────────────────────────────────────────────
+
+# v17-r6-F1: hook must reject when proposed_diff cannot be reconstructed
+# (path mismatch / empty diff for an edit_existing_tests covered file).
+TMP_R6F1=$(mktemp -d)
+mkdir -p "$TMP_R6F1/internal/m" "$TMP_R6F1/.tdd/exceptions" "$TMP_R6F1/.tdd/audit"
+cat > "$TMP_R6F1/.tdd/tdd-config.json" <<'EOF'
+{
+  "tier1_path_regexes": ["^internal/"],
+  "test_file_policy": {
+    "allow_after_red_confirmed": false,
+    "post_red_mechanical_update": {
+      "enabled": true,
+      "exception_types": ["mechanical_signature_propagation","compile_fix_only","import_only"],
+      "validators": {"active_profiles": ["stdlib","testify"]}
+    }
+  }
+}
+EOF
+cat > "$TMP_R6F1/.tdd/current-plan.md" <<'EOF'
+Cycle ID: r6f1
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+echo "red proof" > "$TMP_R6F1/.tdd/red-proof.md"
+cat > "$TMP_R6F1/internal/m/x_test.go" <<'EOF'
+package m
+func TestX(t *testing.T) { _ = X(1) }
+EOF
+plan_h=$(sha256sum "$TMP_R6F1/.tdd/current-plan.md" | awk '{print $1}')
+red_h=$(sha256sum "$TMP_R6F1/.tdd/red-proof.md" | awk '{print $1}')
+intent_h=$(printf 'r6f1|X|mechanical_signature_propagation|test|internal/m/*_test.go|edit_existing_tests' | sha256sum | awk '{print $1}')
+cat > "$TMP_R6F1/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{
+  "version": 1, "cycle_id": "r6f1", "phase": "red_confirmed", "expires": "next_green_commit",
+  "exceptions": [{
+    "id": "E-001", "type": "mechanical_signature_propagation",
+    "status": "approved", "approved_by": "operator", "approved_at": "2026-05-10T12:00:00Z",
+    "operations": ["edit_existing_tests"],
+    "scope": {"paths": ["internal/m/*_test.go"], "symbols": ["X"]},
+    "reason": "test",
+    "binding": {"cycle_id": "r6f1", "plan_hash": "$plan_h", "red_proof_hash": "$red_h", "change_intent_hash": "$intent_h"}
+  }]
+}
+EOF
+# Edit with an absolute-prefixed file_path that doesn't match the
+# project-relative TIER1_TESTS entry exactly. _proposed_diff stays
+# empty, but the validator currently treats empty diff as success.
+# The PATHS extractor sees the absolute path and would tier-1 match
+# only if the regex allows; we use a path that matches via './'
+# normalization edge case.
+PAYLOAD=$(jq -n --arg p "./internal/m/x_test.go" \
+  --arg o '_ = X(1)' --arg n '_ = X(1, 2)' \
+  '{tool_name:"Edit", tool_input:{file_path:$p, old_string:$o, new_string:$n}}')
+out=$( ( cd "$TMP_R6F1" && printf '%s' "$PAYLOAD" | bash "$HOOK" 2>&1 ) || true)
+# After fix, the hook either matches the path correctly (allow valid
+# mechanical edit because diff has the call-site change touching X)
+# OR fail-closes when it cannot reconstruct. EITHER way the validator
+# must run — we assert that something proves dispatch happened. The
+# bug is silent allow with empty diff, which gives us empty stdout
+# AND no validator activity. Negative assertion: hook output must be
+# either rejected (BLOCKED) OR allowed-with-validator-run (no output).
+# To distinguish, we test the empty-diff bug specifically: build a
+# payload whose Edit shape Path-extractor catches but jq-diff-builder
+# doesn't (use .tool_input.path instead of .file_path with absolute).
+# Build a payload whose file_path is the TIER1 covered file but with
+# Edit old==new (empty effective diff). Without my F1 fix, validator
+# silently passes empty-diff. With fix, hook fails closed with
+# empty_proposed_diff reason.
+PAYLOAD2=$(jq -n --arg p "internal/m/x_test.go" \
+  '{tool_name:"Edit", tool_input:{file_path:$p, old_string:"unchanged content", new_string:"unchanged content"}}')
+out2=$( ( cd "$TMP_R6F1" && printf '%s' "$PAYLOAD2" | bash "$HOOK" 2>&1 ) || true)
+# With absolute path in `.path`, the diff builder's _file_field == _tf
+# check fails (since _tf is the project-relative form post-PATHS-extract).
+# Currently empty proposed_diff passes validator silently. After fix:
+# either path is normalized AND validator runs OR fail closed.
+if printf '%s' "$out2" | grep -qE 'BLOCKED|cannot.*reconstruct|empty.*diff|path.*mismatch|VALIDATOR REPORT'; then
+  pass "v17_r6_empty_proposed_diff_fails_closed"
+else
+  fail "v17_r6_empty_proposed_diff_fails_closed: empty proposed_diff under typed-exception path must fail closed (got: '$out2')"
+fi
+rm -rf "$TMP_R6F1"
+
+# v17-r6-F2: mechanical_signature_propagation must ALLOW a call-site
+# change INSIDE an assertion line when the change touches a declared
+# scope.symbols symbol and the assertion helper is unchanged.
+TMP_R6F2=$(mktemp -d)
+mkdir -p "$TMP_R6F2/internal/m" "$TMP_R6F2/.tdd/exceptions" "$TMP_R6F2/.tdd/audit"
+cat > "$TMP_R6F2/.tdd/tdd-config.json" <<'EOF'
+{
+  "tier1_path_regexes": ["^internal/"],
+  "test_file_policy": {
+    "allow_after_red_confirmed": false,
+    "post_red_mechanical_update": {
+      "enabled": true,
+      "exception_types": ["mechanical_signature_propagation","compile_fix_only","import_only"],
+      "validators": {"active_profiles": ["stdlib","testify"]}
+    }
+  }
+}
+EOF
+cat > "$TMP_R6F2/.tdd/current-plan.md" <<'EOF'
+Cycle ID: r6f2
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+echo "red proof" > "$TMP_R6F2/.tdd/red-proof.md"
+cat > "$TMP_R6F2/internal/m/x_test.go" <<'EOF'
+package m
+func TestX(t *testing.T) {
+    require.NoError(t, Do(ctx))
+}
+EOF
+plan_h=$(sha256sum "$TMP_R6F2/.tdd/current-plan.md" | awk '{print $1}')
+red_h=$(sha256sum "$TMP_R6F2/.tdd/red-proof.md" | awk '{print $1}')
+intent_h=$(printf 'r6f2|Do|mechanical_signature_propagation|widen Do() with opts|internal/m/*_test.go|edit_existing_tests' | sha256sum | awk '{print $1}')
+cat > "$TMP_R6F2/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{
+  "version": 1, "cycle_id": "r6f2", "phase": "red_confirmed", "expires": "next_green_commit",
+  "exceptions": [{
+    "id": "E-001", "type": "mechanical_signature_propagation",
+    "status": "approved", "approved_by": "operator", "approved_at": "2026-05-10T12:00:00Z",
+    "operations": ["edit_existing_tests"],
+    "scope": {"paths": ["internal/m/*_test.go"], "symbols": ["Do"]},
+    "reason": "widen Do() with opts",
+    "binding": {"cycle_id": "r6f2", "plan_hash": "$plan_h", "red_proof_hash": "$red_h", "change_intent_hash": "$intent_h"}
+  }]
+}
+EOF
+PAYLOAD=$(jq -n --arg p "internal/m/x_test.go" \
+  --arg o "    require.NoError(t, Do(ctx))" \
+  --arg n "    require.NoError(t, Do(ctx, opts))" \
+  '{tool_name:"Edit", tool_input:{file_path:$p, old_string:$o, new_string:$n}}')
+out=$( ( cd "$TMP_R6F2" && printf '%s' "$PAYLOAD" | bash "$HOOK" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'forbid_assertion|BLOCKED'; then
+  fail "v17_r6_signature_propagation_allows_call_site_in_assertion: legitimate mechanical call-site widening inside require.NoError must NOT be blocked (got: '$out')"
+else
+  pass "v17_r6_signature_propagation_allows_call_site_in_assertion"
+fi
+rm -rf "$TMP_R6F2"
+
+# v17-r6-F3: ISO8601 expires that fails to parse must fail CLOSED.
+TMP_R6F3=$(mktemp -d)
+mkdir -p "$TMP_R6F3/internal/m" "$TMP_R6F3/.tdd/exceptions" "$TMP_R6F3/.tdd/audit"
+cat > "$TMP_R6F3/.tdd/tdd-config.json" <<'EOF'
+{
+  "tier1_path_regexes": ["^internal/"],
+  "test_file_policy": {
+    "allow_after_red_confirmed": false,
+    "post_red_mechanical_update": {
+      "enabled": true,
+      "exception_types": ["mechanical_signature_propagation","compile_fix_only","import_only"],
+      "validators": {"active_profiles": ["stdlib","testify"]}
+    }
+  }
+}
+EOF
+cat > "$TMP_R6F3/.tdd/current-plan.md" <<'EOF'
+Cycle ID: r6f3
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+echo "red proof" > "$TMP_R6F3/.tdd/red-proof.md"
+cat > "$TMP_R6F3/internal/m/x_test.go" <<'EOF'
+package m
+func TestX(t *testing.T) { _ = X(1) }
+EOF
+plan_h=$(sha256sum "$TMP_R6F3/.tdd/current-plan.md" | awk '{print $1}')
+red_h=$(sha256sum "$TMP_R6F3/.tdd/red-proof.md" | awk '{print $1}')
+intent_h=$(printf 'r6f3|X|mechanical_signature_propagation|test|internal/m/*_test.go|edit_existing_tests' | sha256sum | awk '{print $1}')
+# Unparseable expires value.
+cat > "$TMP_R6F3/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{
+  "version": 1, "cycle_id": "r6f3", "phase": "red_confirmed", "expires": "garbage_not_a_date",
+  "exceptions": [{
+    "id": "E-001", "type": "mechanical_signature_propagation",
+    "status": "approved", "approved_by": "operator", "approved_at": "2026-05-10T12:00:00Z",
+    "operations": ["edit_existing_tests"],
+    "scope": {"paths": ["internal/m/*_test.go"], "symbols": ["X"]},
+    "reason": "test",
+    "expires": "totally_unparseable_value",
+    "binding": {"cycle_id": "r6f3", "plan_hash": "$plan_h", "red_proof_hash": "$red_h", "change_intent_hash": "$intent_h"}
+  }]
+}
+EOF
+PAYLOAD=$(jq -n --arg p "internal/m/x_test.go" \
+  --arg o '_ = X(1)' --arg n '_ = X(1, 2)' \
+  '{tool_name:"Edit", tool_input:{file_path:$p, old_string:$o, new_string:$n}}')
+out=$( ( cd "$TMP_R6F3" && printf '%s' "$PAYLOAD" | bash "$HOOK" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'BLOCKED|expires.*unparseable|cannot.*parse.*expires'; then
+  pass "v17_r6_unparseable_expires_fails_closed"
+else
+  fail "v17_r6_unparseable_expires_fails_closed: unparseable expires must fail closed (got: '$out')"
+fi
+rm -rf "$TMP_R6F3"
+
+# v17-r6-F4: no_test_deletion / no_empty_t_run rules must be enforced.
+TMP_R6F4=$(mktemp -d)
+echo "package m" > "$TMP_R6F4/x_test.go"
+exc_json='{"id":"E-001","type":"mechanical_signature_propagation","operations":["edit_existing_tests"],"scope":{"paths":["x_test.go"],"symbols":["Y"]}}'
+# Diff that DELETES a Test function.
+diff_input='--- a/x_test.go
++++ b/x_test.go
+@@ -1,5 +1,1 @@
+ package m
+-func TestOldThing(t *testing.T) {
+-    require.Equal(t, 1, 1)
+-}
+-'
+out=$( ( printf '%s' "$diff_input" | bash "$LIB_V17" validate_exception_diff "$exc_json" "$TMP_R6F4/x_test.go" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'no_test_deletion|deleted.*Test.*func|test.*deletion.*not.*permitted'; then
+  pass "v17_r6_no_test_deletion_enforced"
+else
+  fail "v17_r6_no_test_deletion_enforced: deleting a TestXxx function must be rejected (got: '$out')"
+fi
+# Diff that adds an empty t.Run.
+diff_input2='--- a/x_test.go
++++ b/x_test.go
+@@ -1,1 +1,4 @@
+ package m
++func TestY(t *testing.T) {
++    t.Run("subtest", func(t *testing.T) {})
++}'
+out2=$( ( printf '%s' "$diff_input2" | bash "$LIB_V17" validate_exception_diff "$exc_json" "$TMP_R6F4/x_test.go" 2>&1 ) || true)
+if printf '%s' "$out2" | grep -qE 'no_empty_t_run|empty.*t\.Run|t\.Run.*empty'; then
+  pass "v17_r6_no_empty_t_run_enforced"
+else
+  fail "v17_r6_no_empty_t_run_enforced: adding an empty t.Run must be rejected (got: '$out2')"
+fi
+rm -rf "$TMP_R6F4"
+
+echo
+
+# ─────────────────────────────────────────────────────────────────────
+# v1.7.0 round-7 fixes: tests for codex round-7 P0/P1 findings.
+# F1 (P0): mech_sig_prop must preserve assertion-helper/comparator shape.
+# F2 (P0): mech_sig_prop must scope ALL +/- non-import lines to symbols.
+# F3 (P0): import_only must restrict to lines inside an import block.
+# F4 (P0): next_green_commit expiry must use git HEAD, not mtime.
+# F5 (P1): create_new_tests content extraction must use normalized path.
+# ─────────────────────────────────────────────────────────────────────
+
+# v17-r7-F1: changing assertion helper (require.Equal -> require.NoError)
+# while preserving a declared symbol must be REJECTED.
+TMP_R7F1=$(mktemp -d)
+echo "package m" > "$TMP_R7F1/x_test.go"
+exc_json='{"id":"E-001","type":"mechanical_signature_propagation","operations":["edit_existing_tests"],"scope":{"paths":["x_test.go"],"symbols":["Do"]}}'
+diff_input='--- a/x_test.go
++++ b/x_test.go
+@@ -1,2 +1,2 @@
+ package m
+-    require.Equal(t, want, Do())
++    require.NoError(t, Do())'
+out=$( ( printf '%s' "$diff_input" | bash "$LIB_V17" validate_exception_diff "$exc_json" "$TMP_R7F1/x_test.go" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'assertion.*shape|helper.*changed|forbid_helper_change|forbid_assertion'; then
+  pass "v17_r7_mech_sig_prop_rejects_helper_change"
+else
+  fail "v17_r7_mech_sig_prop_rejects_helper_change: assertion-helper change must be rejected (got: '$out')"
+fi
+rm -rf "$TMP_R7F1"
+
+# v17-r7-F2: mech_sig_prop must reject NON-assertion +/- lines that
+# don't touch a declared symbol (e.g., changing setup data).
+TMP_R7F2=$(mktemp -d)
+echo "package m" > "$TMP_R7F2/x_test.go"
+exc_json='{"id":"E-001","type":"mechanical_signature_propagation","operations":["edit_existing_tests"],"scope":{"paths":["x_test.go"],"symbols":["Do"]}}'
+# Edit changes a setup data literal that has nothing to do with Do.
+diff_input='--- a/x_test.go
++++ b/x_test.go
+@@ -1,3 +1,3 @@
+ package m
+-    name := "alice"
++    name := "looser"'
+out=$( ( printf '%s' "$diff_input" | bash "$LIB_V17" validate_exception_diff "$exc_json" "$TMP_R7F2/x_test.go" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'mech_sig_prop.*off_scope|off_scope|forbid_off_scope|symbol.*not.*in.*scope'; then
+  pass "v17_r7_mech_sig_prop_rejects_off_scope_non_assertion"
+else
+  fail "v17_r7_mech_sig_prop_rejects_off_scope_non_assertion: non-assertion edits must touch declared symbols (got: '$out')"
+fi
+rm -rf "$TMP_R7F2"
+
+# v17-r7-F3: import_only must reject changes outside an import block,
+# even if the line shape resembles an import (quoted string).
+TMP_R7F3=$(mktemp -d)
+echo "package m" > "$TMP_R7F3/x_test.go"
+exc_json='{"id":"E-001","type":"import_only","operations":["edit_existing_tests"],"scope":{"paths":["x_test.go"],"symbols":[]}}'
+# Diff modifies a string literal in a TABLE TEST (not in an import block).
+diff_input='--- a/x_test.go
++++ b/x_test.go
+@@ -10,3 +10,3 @@
+ cases := []string{
+-    "strict",
++    "looser",
+ }'
+out=$( ( printf '%s' "$diff_input" | bash "$LIB_V17" validate_exception_diff "$exc_json" "$TMP_R7F3/x_test.go" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'import_only.*forbid|outside_import_block|not.*in.*import|forbid_non_import'; then
+  pass "v17_r7_import_only_restricts_to_import_block"
+else
+  fail "v17_r7_import_only_restricts_to_import_block: import_only must reject string-literal changes outside import blocks (got: '$out')"
+fi
+rm -rf "$TMP_R7F3"
+
+# v17-r7-F4: expiry must use git HEAD, not mtime. After a commit lands
+# AND the operator touches red-proof.md (mtime now > commit time), the
+# exception MUST still be expired.
+TMP_R7F4=$(mktemp -d)
+mkdir -p "$TMP_R7F4/internal/m" "$TMP_R7F4/.tdd/exceptions" "$TMP_R7F4/.tdd/audit"
+( cd "$TMP_R7F4" && git init -q && git config user.email t@t && git config user.name t )
+cat > "$TMP_R7F4/.tdd/tdd-config.json" <<'EOF'
+{
+  "tier1_path_regexes": ["^internal/"],
+  "test_file_policy": {
+    "allow_after_red_confirmed": false,
+    "post_red_mechanical_update": {
+      "enabled": true,
+      "exception_types": ["mechanical_signature_propagation","compile_fix_only","import_only"],
+      "validators": {"active_profiles": ["stdlib","testify"]}
+    }
+  }
+}
+EOF
+cat > "$TMP_R7F4/.tdd/current-plan.md" <<'EOF'
+Cycle ID: r7f4
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+echo "red proof" > "$TMP_R7F4/.tdd/red-proof.md"
+cat > "$TMP_R7F4/internal/m/x_test.go" <<'EOF'
+package m
+func TestX(t *testing.T) { _ = X(1) }
+EOF
+plan_h=$(sha256sum "$TMP_R7F4/.tdd/current-plan.md" | awk '{print $1}')
+red_h=$(sha256sum "$TMP_R7F4/.tdd/red-proof.md" | awk '{print $1}')
+intent_h=$(printf 'r7f4|X|mechanical_signature_propagation|test|internal/m/*_test.go|edit_existing_tests' | sha256sum | awk '{print $1}')
+( cd "$TMP_R7F4" && git add . && git commit -q -m "approval HEAD" )
+head_at_approval=$( cd "$TMP_R7F4" && git rev-parse HEAD )
+cat > "$TMP_R7F4/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{
+  "version": 1, "cycle_id": "r7f4", "phase": "red_confirmed", "expires": "next_green_commit",
+  "exceptions": [{
+    "id": "E-001", "type": "mechanical_signature_propagation",
+    "status": "approved", "approved_by": "operator", "approved_at": "2026-05-10T12:00:00Z",
+    "operations": ["edit_existing_tests"],
+    "scope": {"paths": ["internal/m/*_test.go"], "symbols": ["X"]},
+    "reason": "test",
+    "binding": {"cycle_id": "r7f4", "plan_hash": "$plan_h", "red_proof_hash": "$red_h", "change_intent_hash": "$intent_h", "head_at_approval": "$head_at_approval"}
+  }]
+}
+EOF
+# A new commit lands (the green commit).
+( cd "$TMP_R7F4" && echo green > newfile.go && git add newfile.go && git commit -q -m "green" )
+# Operator touches red-proof.md (mtime now > green commit time).
+sleep 1 && touch "$TMP_R7F4/.tdd/red-proof.md"
+# Re-compute red_h since mtime changed... no, content unchanged so hash stable.
+PAYLOAD=$(jq -n --arg p "internal/m/x_test.go" \
+  --arg o '_ = X(1)' --arg n '_ = X(1, 2)' \
+  '{tool_name:"Edit", tool_input:{file_path:$p, old_string:$o, new_string:$n}}')
+out=$( ( cd "$TMP_R7F4" && printf '%s' "$PAYLOAD" | bash "$HOOK" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'BLOCKED|expired|HEAD.*advanced|next_green_commit'; then
+  pass "v17_r7_expiry_uses_git_head_not_mtime"
+else
+  fail "v17_r7_expiry_uses_git_head_not_mtime: HEAD advanced past head_at_approval — exception must be expired (got: '$out')"
+fi
+rm -rf "$TMP_R7F4"
+
+# v17-r7-F5: create_new_tests content extraction must use normalized
+# path. A Write with `./internal/x/new_test.go` must materialize content
+# correctly for the validator.
+TMP_R7F5=$(mktemp -d)
+mkdir -p "$TMP_R7F5/internal/x" "$TMP_R7F5/.tdd/exceptions" "$TMP_R7F5/.tdd/audit"
+cat > "$TMP_R7F5/.tdd/tdd-config.json" <<'EOF'
+{
+  "tier1_path_regexes": ["^internal/"],
+  "test_file_policy": {
+    "allow_after_red_confirmed": false,
+    "post_red_mechanical_update": {
+      "enabled": true,
+      "exception_types": ["mechanical_signature_propagation","compile_fix_only","import_only"],
+      "validators": {"active_profiles": ["stdlib","testify"]}
+    }
+  }
+}
+EOF
+cat > "$TMP_R7F5/.tdd/current-plan.md" <<'EOF'
+Cycle ID: r7f5
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+echo "red proof" > "$TMP_R7F5/.tdd/red-proof.md"
+plan_h=$(sha256sum "$TMP_R7F5/.tdd/current-plan.md" | awk '{print $1}')
+red_h=$(sha256sum "$TMP_R7F5/.tdd/red-proof.md" | awk '{print $1}')
+intent_h=$(printf 'r7f5|X|mechanical_signature_propagation|test|internal/x/*_test.go|create_new_tests' | sha256sum | awk '{print $1}')
+( cd "$TMP_R7F5" && git init -q && git config user.email t@t && git config user.name t && git add . && git commit -q -m i )
+head_at_approval=$( cd "$TMP_R7F5" && git rev-parse HEAD )
+cat > "$TMP_R7F5/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{
+  "version": 1, "cycle_id": "r7f5", "phase": "red_confirmed", "expires": "next_green_commit",
+  "exceptions": [{
+    "id": "E-001", "type": "mechanical_signature_propagation",
+    "status": "approved", "approved_by": "operator", "approved_at": "2026-05-10T12:00:00Z",
+    "operations": ["create_new_tests"],
+    "scope": {"paths": ["internal/x/*_test.go"], "symbols": ["X"]},
+    "reason": "test",
+    "binding": {"cycle_id": "r7f5", "plan_hash": "$plan_h", "red_proof_hash": "$red_h", "change_intent_hash": "$intent_h", "head_at_approval": "$head_at_approval"}
+  }]
+}
+EOF
+# Write with `./` prefix.
+PAYLOAD=$(jq -n --arg p "./internal/x/new_test.go" \
+  --arg c "package x
+import \"testing\"
+func TestX(t *testing.T) { require.Equal(t, X(), 1) }" \
+  '{tool_name:"Write", tool_input:{file_path:$p, content:$c}}')
+out=$( ( cd "$TMP_R7F5" && printf '%s' "$PAYLOAD" | bash "$HOOK" 2>&1 ) || true)
+# After fix: hook normalizes the path, materializes content correctly,
+# validator runs on a real file with TestXxx + assertion → allow.
+# Bug currently: content extraction compares raw file_path vs $_tf
+# (relative) and fails to materialize → create_new_tests check fires
+# "file does not exist" → fail closed.
+if printf '%s' "$out" | grep -qE 'create_new_tests.*cannot|file does not exist|materialize'; then
+  fail "v17_r7_create_new_uses_normalized_path: legitimate Write with ./ prefix must materialize content (got: '$out')"
+else
+  pass "v17_r7_create_new_uses_normalized_path"
+fi
+rm -rf "$TMP_R7F5"
+
 echo
 echo "Self-test: timeout wrapper kills a hanging hook within budget..."
 TMPHOOK="$(mktemp)"

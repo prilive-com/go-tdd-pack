@@ -1,0 +1,43 @@
+## Second opinion (scope: Tier 1 (cycle modifies .tdd/tdd-config.json + .claude/hooks/require-tdd-state.sh), model: gpt-5.5)
+
+{
+  "summary": "The typed-exception path has real governance gaps: operation scope is not enforced, intent hashes do not bind paths/operations, and tests can pass without exercising validator approval.",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "edit_existing_tests exceptions can allow creation of new test files",
+      "evidence": "The hook only materializes proposed Write content when the exception already includes create_new_tests, while the validator's edit_existing_tests branch only runs if the target file exists. A Write to a non-existent *_test.go covered by an edit_existing_tests exception can therefore validate as success without assertion checks.",
+      "recommendation": "Infer the requested operation from tool_name and file existence before validation. Reject Write/non-existent test paths unless the matched exception includes create_new_tests, and always validate proposed content for new files.",
+      "location": "scripts/tdd/_lib_test_edit_exception.sh:198"
+    },
+    {
+      "id": "F2",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "Synthetic diffs treat unchanged context as changed assertions",
+      "evidence": "require-tdd-state.sh builds a pseudo-diff by prefixing every old_string line with '-' and every new_string line with '+'. The validator then rejects any +/- assertion line, so an Edit whose old_string/new_string contains unchanged surrounding require/assert calls will be denied even if the actual change is mechanical.",
+      "recommendation": "Generate a real line diff between old_string and new_string before calling validate_exception_diff, or restrict validation to actual changed lines produced by a diff tool.",
+      "location": ".claude/hooks/require-tdd-state.sh:351"
+    },
+    {
+      "id": "F3",
+      "severity": "P0",
+      "category": "security",
+      "title": "change_intent_hash does not bind approved paths or operations",
+      "evidence": "The recomputed intent input is cycle_id|symbols|type|reason; scope.paths and operations are omitted. An approved artifact can be edited from a narrow path to a broad glob, or from edit_existing_tests to create_new_tests, without changing the checked hash.",
+      "recommendation": "Hash a canonical JSON object containing cycle_id, type, reason, scope.paths, scope.symbols, and operations. Add regression tests that mutate paths and operations after approval.",
+      "location": ".claude/hooks/require-tdd-state.sh:318"
+    },
+    {
+      "id": "F4",
+      "severity": "P1",
+      "category": "tests",
+      "title": "Validator-dispatch smoke tests can pass on the legacy denial path",
+      "evidence": "Several hook tests create approved exceptions with change_intent_hash set to placeholder values like 'x' or ''. The hook rejects those before validator dispatch, but the assertions accept generic 'BLOCKED', so the tests can pass without proving validate_exception_diff ran.",
+      "recommendation": "Use grant-test-edit-exception.sh --approve or compute valid change_intent_hash values in these fixtures, and assert on VALIDATOR REPORT or forbid_assertion rather than generic BLOCKED.",
+      "location": "scripts/tdd-test-hooks.sh:6995"
+    }
+  ]
+}

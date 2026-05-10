@@ -1,0 +1,43 @@
+## Second opinion (scope: Tier 1 (cycle modifies .tdd/tdd-config.json + .claude/hooks/require-tdd-state.sh), model: gpt-5.5)
+
+{
+  "summary": "Validator dispatch exists, but the typed exception path still has fail-open reconstruction/expiry gaps and validator contracts that do not match the advertised governance rules.",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "Typed exception path allows when it cannot reconstruct the proposed diff",
+      "evidence": "The hook only builds _proposed_diff when the payload file_path exactly equals the normalized TIER1_TESTS entry, then still pipes whatever value exists into validate_exception_diff; an empty diff for an existing edit_existing_tests file passes because the validator only rejects matched +/- assertion lines. Absolute, ./-prefixed, or otherwise equivalent paths can therefore skip validation and set ALLOW_AFTER_RED=true.",
+      "recommendation": "Normalize payload paths to project-relative before comparison and fail closed whenever a covered Edit/Write/MultiEdit cannot produce a non-empty, per-target proposed diff for the actual tool payload.",
+      "location": ".claude/hooks/require-tdd-state.sh:376"
+    },
+    {
+      "id": "F2",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "Mechanical signature propagation is blocked when the call site is inside an assertion",
+      "evidence": "edit_existing_tests rejects any added or removed line matching the assertion regex. That blocks common legitimate signature-propagation edits such as require.NoError(t, Do(ctx)) -> require.NoError(t, Do(ctx, opts)), even though the exception type exists for mechanical call-site co-evolution.",
+      "recommendation": "Compare assertion structure instead of banning assertion lines wholesale: allow unchanged assertion operator/expected-value shapes with mechanical changes inside declared symbol call arguments, or defer these cases to a stricter AST validator.",
+      "location": "scripts/tdd/_lib_test_edit_exception.sh:260"
+    },
+    {
+      "id": "F3",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "Absolute expiry fails open on platforms without GNU date",
+      "evidence": "The ISO8601 expiry branch uses date -d and treats parse failure as _exp_ts=0; the condition only rejects when _exp_ts > 0. On BSD/macOS date, expired exceptions remain valid indefinitely instead of failing closed.",
+      "recommendation": "Use a portable parser path, or fail closed when an absolute expires value cannot be parsed. Add a smoke test that simulates date parse failure.",
+      "location": ".claude/hooks/require-tdd-state.sh:348"
+    },
+    {
+      "id": "F4",
+      "severity": "P1",
+      "category": "correctness",
+      "title": "Configured no_test_deletion and no_empty_t_run rules are not enforced",
+      "evidence": "tdd-config enables no_test_deletion and no_empty_t_run, but the validator's edit_existing_tests branch only looks for assertion-pattern changes, and create_new_tests only checks top-level Test functions, assertions, and skips. Deleting a helper-only test or adding an empty t.Run can pass despite the advertised rules.",
+      "recommendation": "Implement explicit diff checks for removed func Test lines and added empty t.Run blocks, or remove the config knobs until they are actually enforced.",
+      "location": ".tdd/tdd-config.json:49"
+    }
+  ]
+}

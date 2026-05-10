@@ -1,0 +1,52 @@
+## Second opinion (scope: Tier 1 (cycle modifies .tdd/tdd-config.json + .claude/hooks/require-tdd-state.sh), model: gpt-5.5)
+
+{
+  "summary": "Typed exceptions still over-authorize several post-red test edits; the validator is not tight enough for the governance guarantee.",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P0",
+      "category": "security",
+      "title": "mechanical_signature_propagation allows semantic assertion changes when the approved symbol is present",
+      "evidence": "The validator marks assertion-line changes safe when every changed assertion line contains a scope symbol; it never compares the assertion helper/comparator shape. A change like require.Equal(t, want, Do()) -> require.NoError(t, Do()) would pass because both lines contain Do.",
+      "recommendation": "For assertion lines, require the assertion helper/comparator to be unchanged and only allow edits inside the approved call-site expression; otherwise fail closed.",
+      "location": "scripts/tdd/_lib_test_edit_exception.sh:285"
+    },
+    {
+      "id": "F2",
+      "severity": "P0",
+      "category": "security",
+      "title": "mechanical_signature_propagation permits arbitrary non-assertion edits in covered tests",
+      "evidence": "For edit_existing_tests the validator only rejects changed lines matching the assertion regex. Non-assertion +/- lines are not checked against scope.symbols or call-site shape, so a broad approved exception can alter setup data, table cases, or helper behavior without touching the declared symbol.",
+      "recommendation": "For mechanical_signature_propagation, require every changed non-import line to be a mechanical use of one of scope.symbols, or introduce a stricter diff classifier and deny unrelated test-body edits.",
+      "location": "scripts/tdd/_lib_test_edit_exception.sh:249"
+    },
+    {
+      "id": "F3",
+      "severity": "P0",
+      "category": "security",
+      "title": "import_only is not scoped to Go import declarations",
+      "evidence": "The import_only check treats any changed line shaped like a quoted string or identifier as allowed, without tracking whether the hunk is actually inside an import block. Table-test literals such as +\"looser\" can therefore pass under an import_only exception.",
+      "recommendation": "Parse the file or at least track import block boundaries from hunk context; only allow additions/removals within import declarations.",
+      "location": "scripts/tdd/_lib_test_edit_exception.sh:153"
+    },
+    {
+      "id": "F4",
+      "severity": "P0",
+      "category": "security",
+      "title": "next_green_commit expiry can be bypassed by touching red-proof.md",
+      "evidence": "Expiry compares the last commit timestamp to the mutable filesystem mtime of .tdd/red-proof.md. Since the stored red_proof_hash still matches after touch, updating mtime after a green commit makes the exception look unexpired.",
+      "recommendation": "Bind approval to a git commit or red-proof blob plus approved HEAD, and expire when HEAD advances past that point; do not use mutable file mtime as the lifecycle authority.",
+      "location": ".claude/hooks/require-tdd-state.sh:390"
+    },
+    {
+      "id": "F5",
+      "severity": "P1",
+      "category": "correctness",
+      "title": "create_new_tests materialization ignores the hook's path normalization",
+      "evidence": "The diff builder normalizes ./ and project-absolute paths, but proposed content extraction compares .tool_input.file_path/.path directly to $f. A legitimate Write to ./internal/x/new_test.go can match the exception but fail content materialization and be denied.",
+      "recommendation": "Reuse the same normalized file field for proposed content extraction, including MultiEdit per-edit paths.",
+      "location": ".claude/hooks/require-tdd-state.sh:564"
+    }
+  ]
+}

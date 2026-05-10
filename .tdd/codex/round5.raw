@@ -1,0 +1,43 @@
+## Second opinion (scope: Tier 1 (cycle modifies .tdd/tdd-config.json + .claude/hooks/require-tdd-state.sh), model: gpt-5.5)
+
+{
+  "summary": "Typed exceptions close some obvious gaps, but approval lifetime, create-new validation, and type-specific enforcement still leave governance bypasses.",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "Approved exceptions never expire and red-proof binding is not enforced",
+      "evidence": "The hook honors any entry with status == \"approved\" plus matching cycle_id and plan_hash, but does not check expires_after_next_green, green-proof state, expires, or binding.red_proof_hash.",
+      "recommendation": "Expire or reject approved exceptions after the next green proof/commit, and compare the stored red_proof_hash with the current .tdd/red-proof.md hash before allowing the edit.",
+      "location": ".claude/hooks/require-tdd-state.sh:295"
+    },
+    {
+      "id": "F2",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "create_new_tests can pass without validating proposed content",
+      "evidence": "The create_new_tests validator only runs when the validator path exists. If the hook fails to materialize proposed content, for example an empty Write payload or unsupported MultiEdit shape, the branch is skipped and validation succeeds.",
+      "recommendation": "For create_new_tests, fail closed when proposed content cannot be materialized; remove the existence-gated skip or treat a missing validator path as a hard validation error.",
+      "location": "scripts/tdd/_lib_test_edit_exception.sh:222"
+    },
+    {
+      "id": "F3",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "compile_fix_only permits arbitrary non-assertion test edits",
+      "evidence": "Only import_only gets a type-specific hunk restriction; compile_fix_only falls through to the generic edit_existing_tests check, which only blocks recognized assertion-line changes.",
+      "recommendation": "Give compile_fix_only its own validator that restricts edits to declared mechanical forms, or require explicit symbol/path-bound rewrites and reject unrelated non-assertion hunks.",
+      "location": "scripts/tdd/_lib_test_edit_exception.sh:196"
+    },
+    {
+      "id": "F4",
+      "severity": "P1",
+      "category": "correctness",
+      "title": "import_only rejects valid Go import forms",
+      "evidence": "The import_only allowlist accepts bare quoted import lines but not aliased, dot, or blank imports such as `_ \"pkg\"`, `. \"pkg\"`, or `name \"pkg\"`.",
+      "recommendation": "Extend the import-only regex to allow optional alias tokens before quoted import paths while still rejecting non-import hunks.",
+      "location": "scripts/tdd/_lib_test_edit_exception.sh:183"
+    }
+  ]
+}

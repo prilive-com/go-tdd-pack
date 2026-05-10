@@ -312,6 +312,82 @@ on inspection the finding is actually correct). The
 short-form template is permission to skip the multi-paragraph
 rationale ONLY when the preprocessor's narrow matcher fired.
 
+## Typed test-edit exceptions (v1.7.0)
+
+The legacy `test_file_policy.allow_after_red_confirmed` boolean is
+DEPRECATED in v1.7.x and will be removed in v2.0.0. The replacement
+is the `post_red_mechanical_update` typed-exception system: typed,
+operator-authorized, mechanically-validated, auditable per-cycle
+exceptions for post-red test-edit work (e.g., signature widening
+that breaks 12 pre-existing test call sites).
+
+### When to use a typed exception
+
+- A production-signature change (function widened from `error` to
+  `(Result, error)`, struct field added that's accessed in
+  `signal.Metadata["X"]`) breaks pre-existing test call sites
+  mechanically. The change to test files is structural co-evolution,
+  NOT semantic weakening.
+
+- The cycle is in green phase (`Red phase confirmed: yes`), so the
+  legacy block kicks in and forbids test edits.
+
+- The operator approves the typed exception with an explicit
+  `APPROVED EXCEPTION E-NNN` reply (or batch `APPROVED EXCEPTIONS
+  E-001, E-002` / `APPROVED EXCEPTIONS E-001 through E-003`).
+
+### Three accepted exception types (v1.7.0)
+
+- `mechanical_signature_propagation` — function/method signature
+  widening; co-evolution of test call sites.
+- `compile_fix_only` — type-rename ripple, import path change,
+  struct field rename — purely mechanical.
+- `import_only` — adding/removing imports without changing test
+  semantics.
+
+`schema_predicate_correction` is intentionally absent in v1.7.0
+(deferred to v1.8.0; high-risk path, gather trial data first).
+
+### Workflow
+
+1. Agent identifies the need for a typed exception.
+2. Agent invokes `scripts/tdd/grant-test-edit-exception.sh
+   --type ... --paths ... --symbol ... --operations ... --reason ...`
+   to write a `pending` entry to
+   `.tdd/exceptions/post-red-test-edits.json`.
+3. Agent surfaces the entry to the operator and asks
+   `APPROVED EXCEPTION E-NNN?`.
+4. Operator reviews the entry's scope + reason; replies
+   `APPROVED EXCEPTION E-NNN` (or batch syntax).
+5. Agent runs `scripts/tdd/grant-test-edit-exception.sh --approve E-NNN`
+   to bump status to `approved` and compute binding hashes.
+6. The PreToolUse hook (`require-tdd-state.sh`) sees the approved
+   exception, routes test-file edits through the validator
+   (`scripts/tdd/_lib_test_edit_exception.sh`), allows on validator
+   pass, denies on validator fail.
+7. Auto-expiry on green-proof.md write (next-green commit).
+
+### Killswitch
+
+`TEST_EDIT_EXCEPTION_DISABLE=1` env var bypasses the typed-exception
+lookup entirely (hook proceeds to legacy block-or-allow). Documented
+as emergency-only with mandatory commit-message reason.
+
+### Validator limits (honest)
+
+The validator is regex-based. It catches the testify family
+cleanly (require.X / assert.X / Expect()), gomega (with profile
+opt-in), and stdlib `t.Errorf` / `t.Fatal` patterns. It does NOT
+reliably catch weakening expressed via custom helpers without
+operator-declared `assertion_helper_patterns`. AST-level analysis
+deferred to v1.8.0.
+
+### Migration from the legacy boolean
+
+Each consultation of `allow_after_red_confirmed` emits a stderr
+deprecation warning (rate-limited per hook invocation). Operators
+should migrate to typed exceptions before v2.0.0 ships.
+
 ## Bypass procedure
 
 For an emergency hotfix where the operator vouches for the change:
