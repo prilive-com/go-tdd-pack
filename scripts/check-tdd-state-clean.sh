@@ -33,14 +33,54 @@ if echo "$STATUS_LINE" | grep -qiE '^Status:[[:space:]]*idle[[:space:]]*$'; then
   exit 0
 fi
 
-# Active. Check that all 3 approval markers are set (= cycle complete,
-# just hasn't been reset to idle yet — common when squash-merging).
+# C5 (v1.6.1): read commit-time markers from .tdd/tdd-config.json
+# (with marker_aliases support). Hardcoded "Human approved
+# implementation: yes" was the pre-migration name; post-migration
+# plans use "Green phase authorized: yes" + a new "Implementation
+# reviewed: yes" — this script then false-failed every legitimate
+# cycle. Latent because the CI job runs only on PRs.
+CONFIG=".tdd/tdd-config.json"
+required_markers=()
+alias_pairs=""
+if [[ -f "$CONFIG" ]] && command -v jq >/dev/null 2>&1; then
+  while IFS= read -r m; do
+    [[ -n "$m" ]] && required_markers+=("$m")
+  done < <(jq -r '
+    if (.required_markers_commit_time | type) == "array"
+    then .required_markers_commit_time[]?
+    elif (.required_markers | type) == "array"
+    then .required_markers[]?
+    else empty
+    end
+  ' "$CONFIG" 2>/dev/null || true)
+  alias_pairs="$(jq -r '.marker_aliases // {} | to_entries[] | "\(.key)\t\(.value)"' "$CONFIG" 2>/dev/null || true)"
+fi
+if [[ ${#required_markers[@]} -eq 0 ]]; then
+  required_markers=(
+    "Human approved spec: yes"
+    "Red phase confirmed: yes"
+    "Green phase authorized: yes"
+    "Implementation reviewed: yes"
+  )
+fi
+
+# Active. Check that all required commit-time markers are set
+# (= cycle complete, just hasn't been reset to idle).
 MISSING=()
-for marker in \
-  "Human approved spec: yes" \
-  "Red phase confirmed: yes" \
-  "Human approved implementation: yes"; do
-  grep -q "^${marker}$" "$PLAN" || MISSING+=("$marker")
+for marker in "${required_markers[@]}"; do
+  grep -q "^${marker}$" "$PLAN" && continue
+  # Try alias (old marker name); accept with deprecation warning.
+  alias_old=""
+  if [[ -n "$alias_pairs" ]]; then
+    while IFS=$'\t' read -r k v; do
+      [[ "$k" == "$marker" ]] && alias_old="$v"
+    done <<< "$alias_pairs"
+  fi
+  if [[ -n "$alias_old" ]] && grep -q "^${alias_old}$" "$PLAN"; then
+    echo "WARNING: plan uses old marker '$alias_old' (renamed to '$marker'); run scripts/migrate-tdd-markers.sh." >&2
+    continue
+  fi
+  MISSING+=("$marker")
 done
 
 if [[ ${#MISSING[@]} -eq 0 ]]; then

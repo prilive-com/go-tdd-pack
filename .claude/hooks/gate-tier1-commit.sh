@@ -170,187 +170,47 @@ CMD="$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.command // empty' 2>/dev/null
 # Closing this class requires either a real shell parser or pivoting
 # the gate to a git pre-commit hook (which sees actual `git commit`
 # invocations regardless of how they're spelled).
-matches_git_commit() {
-  local cmd="$1"
+#
+# v1.6.1 round-8 F1: matches_git_commit() lives in the shared lib
+# scripts/tdd/_lib_commit_mode.sh — same detector is now used by
+# require-second-opinion.sh's is_git_commit branch so a
+# `echo git commit > internal/auth/handler.go` can't be misclassified
+# as a commit invocation (which would skip is_bash_mutating's
+# redirect-target check). The function definition was hoisted to the
+# lib (sourced below); the comment above documents the shared contract.
 
-  # Pre-normalise: insert spaces around shell control operators so xargs
-  # tokenises adjacent forms (`true&&git commit`, `true;git commit`)
-  # correctly. Codex round 2 P1: bash parameter expansion is a literal
-  # string substitution, so this also affects content INSIDE quoted
-  # strings — but that only changes what we OBSERVE, not what gets
-  # executed, so it's safe for analysis.
-  local _gc_norm="$cmd"
-  # Treat newlines as command separators (xargs would otherwise collapse
-  # them into whitespace and lose command-boundary context).
-  _gc_norm="${_gc_norm//$'\n'/ ; }"
-  _gc_norm="${_gc_norm//;/ ; }"
-  # bash treats `&` in replacement specially (doubles it); escape with \&.
-  _gc_norm="${_gc_norm//&&/ \&\& }"
-  _gc_norm="${_gc_norm//||/ || }"
+# v1.6.1 round-6 F1: classify_commit_mode() lives in the shared lib
+# scripts/tdd/_lib_commit_mode.sh — same classifier is used by
+# require-second-opinion.sh's hash-binding logic so both layers agree
+# on what files a given Bash git-commit will actually ship. Extracted
+# to close the round-6 P0 stale-cached-hash bypass on `git commit -am`.
+# See the lib header for the contract and parser philosophy.
+LIB_COMMIT_MODE="$(dirname -- "${BASH_SOURCE[0]}")/../../scripts/tdd/_lib_commit_mode.sh"
+if [[ ! -f "$LIB_COMMIT_MODE" ]]; then
+  # Resolve symlinks (e.g. .git/hooks → core.hooksPath layout).
+  _GTC_REAL="$(readlink -f -- "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+  LIB_COMMIT_MODE="$(dirname -- "$_GTC_REAL")/../../scripts/tdd/_lib_commit_mode.sh"
+fi
+if [[ ! -f "$LIB_COMMIT_MODE" ]] && [[ -n "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
+  LIB_COMMIT_MODE="$CLAUDE_PLUGIN_ROOT/scripts/tdd/_lib_commit_mode.sh"
+fi
+# v1.6.1 round-14 F1: hard dependency on the shared lib. Without it
+# the gate cannot classify commit modes and the bash command would
+# fail later with cryptic "matches_git_commit: command not found".
+# Fail closed with an install hint instead.
+if [[ ! -f "$LIB_COMMIT_MODE" ]]; then
+  cat >&2 <<HOOK_MSG
+[gate-tier1-commit] BLOCKED: shared commit-mode library not found.
+Looked for: $LIB_COMMIT_MODE
 
-  local _gc_tokens=() _gc_line
-  if command -v xargs >/dev/null 2>&1; then
-    while IFS= read -r _gc_line; do
-      _gc_tokens+=("$_gc_line")
-    done < <(printf '%s' "$_gc_norm" | xargs -n1 printf '%s\n' 2>/dev/null)
-  fi
-  if [[ ${#_gc_tokens[@]} -eq 0 ]]; then
-    read -ra _gc_tokens <<< "$_gc_norm"
-  fi
-
-  local _gc_at_start=true
-  local _gc_i=0 _gc_n=${#_gc_tokens[@]}
-  while [[ $_gc_i -lt $_gc_n ]]; do
-    local _gc_tok="${_gc_tokens[_gc_i]}"
-
-    if [[ "$_gc_at_start" == "true" ]]; then
-      case "$_gc_tok" in
-        git)
-          # Walk forward through global opts, look for `commit` subcommand
-          # OR `-c alias.X=...commit...` injection where alias `X` is the
-          # subcommand actually invoked. Other subcommands break.
-          local _gc_j=$((_gc_i + 1))
-          local _gc_pending_alias=""
-          while [[ $_gc_j -lt $_gc_n ]]; do
-            local _gc_sub="${_gc_tokens[_gc_j]}"
-            case "$_gc_sub" in
-              -c)
-                local _gc_kv="${_gc_tokens[$((_gc_j+1))]:-}"
-                # Codex round 2 P2: only record alias name if value
-                # contains `commit`; defer firing until we see the alias
-                # invoked as the subcommand.
-                case "$_gc_kv" in
-                  alias.*=*commit*)
-                    local _gc_aliasname="${_gc_kv#alias.}"
-                    _gc_aliasname="${_gc_aliasname%%=*}"
-                    if [[ -n "$_gc_aliasname" ]]; then
-                      _gc_pending_alias="${_gc_pending_alias}|${_gc_aliasname}|"
-                    fi
-                    ;;
-                esac
-                _gc_j=$((_gc_j + 2))
-                ;;
-              -C|--git-dir|--work-tree|--namespace|--super-prefix|--exec-path|--list-cmds)
-                _gc_j=$((_gc_j + 2)) ;;
-              --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--exec-path=*|--list-cmds=*)
-                _gc_j=$((_gc_j + 1)) ;;
-              --no-pager|--bare|--paginate|--no-replace-objects|--literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs|--no-optional-locks|--no-advice|--version|--help|-h|-p|-P)
-                _gc_j=$((_gc_j + 1)) ;;
-              commit) return 0 ;;
-              *)
-                # Check pending alias names against this subcommand.
-                # _gc_pending_alias accumulated as `|name1|name2|`.
-                if [[ -n "$_gc_pending_alias" ]]; then
-                  case "$_gc_pending_alias" in
-                    *"|${_gc_sub}|"*) return 0 ;;
-                  esac
-                fi
-                break
-                ;;
-            esac
-          done
-          ;;
-        sh|bash|zsh|dash|ksh)
-          # Walk forward looking for -c flag (short cluster, NOT a long
-          # opt that happens to contain 'c' like --norc / --rcfile).
-          # Codex round 2 P1: --* must be matched before -*c*.
-          local _gc_j=$((_gc_i + 1))
-          while [[ $_gc_j -lt $_gc_n ]]; do
-            local _gc_sub="${_gc_tokens[_gc_j]}"
-            case "$_gc_sub" in
-              --) break ;;
-              # Long opts that take a next-token value (skip the value too).
-              # Codex round 3 P1: --login is a NO-VALUE flag for bash/zsh;
-              # putting it here would skip past the real -c.
-              --rcfile|--init-file)
-                _gc_j=$((_gc_j + 2)) ;;
-              # Short opts that take a next-token value. Codex round 4 P1:
-              # `bash -o posix -c '...'` would consume `posix` and then
-              # break before reaching the real -c.
-              -o|-O|+o|+O)
-                _gc_j=$((_gc_j + 2)) ;;
-              --*) _gc_j=$((_gc_j + 1)) ;;
-              -*c*)
-                # Codex round 2 P1: payload may itself be a recognisable
-                # commit invocation (e.g., `git -c key=val commit`).
-                # Recurse on the payload instead of grepping literal text.
-                local _gc_payload="${_gc_tokens[$((_gc_j+1))]:-}"
-                if [[ -n "$_gc_payload" ]] && matches_git_commit "$_gc_payload"; then
-                  return 0
-                fi
-                break
-                ;;
-              -*) _gc_j=$((_gc_j + 1)) ;;
-              *) break ;;
-            esac
-          done
-          ;;
-        eval)
-          # Codex round 2 P1: `eval git commit -m x` (unquoted) tokenises
-          # as eval, git, commit, ... — the next-token-only check missed.
-          # eval concatenates ALL its args; concat remaining tokens up to
-          # next command boundary and recurse.
-          local _gc_eval_buf=""
-          local _gc_j=$((_gc_i + 1))
-          while [[ $_gc_j -lt $_gc_n ]]; do
-            local _gc_t2="${_gc_tokens[_gc_j]}"
-            case "$_gc_t2" in
-              \;|'&&'|'||') break ;;
-            esac
-            _gc_eval_buf+=" ${_gc_t2}"
-            _gc_j=$((_gc_j + 1))
-          done
-          if [[ -n "$_gc_eval_buf" ]] && matches_git_commit "$_gc_eval_buf"; then
-            return 0
-          fi
-          ;;
-      esac
-    fi
-
-    # Command boundary: standalone separator tokens (now standalone after
-    # the pre-normalisation) reset _gc_at_start.
-    case "$_gc_tok" in
-      \;|'&&'|'||') _gc_at_start=true ;;
-      *) _gc_at_start=false ;;
-    esac
-
-    _gc_i=$((_gc_i + 1))
-  done
-
-  # Cross-check backstop (Codex round 4 P0). Same architectural pattern
-  # as Layer-0-rescue UNCERTAIN: instead of enumerating every shell-syntax
-  # position where `git commit` can appear (subshell `()`, brace `{}`,
-  # env-var prefix `FOO=x git commit`, pipe `|`, `time`, `nice`, etc.),
-  # treat ADJACENT bare `git`+`commit` tokens as a commit invocation
-  # UNLESS they are clearly arguments to a string-output command
-  # (echo, printf, cat, grep, sed, awk, etc.). xargs strips quotes, so
-  # `echo "git commit"` becomes one quoted token (NOT adjacent bare),
-  # while a real `git commit` invocation produces two adjacent bare
-  # tokens regardless of the surrounding shell syntax.
-  local _gc_idx=1
-  while [[ $_gc_idx -lt $_gc_n ]]; do
-    if [[ "${_gc_tokens[$((_gc_idx - 1))]}" == "git" && "${_gc_tokens[_gc_idx]}" == "commit" ]]; then
-      # Walk back from `git` looking for a string-output cmd at the head
-      # of this command segment (stopping at known boundaries).
-      local _gc_back=$((_gc_idx - 2))
-      local _gc_safe=false
-      while [[ $_gc_back -ge 0 ]]; do
-        case "${_gc_tokens[_gc_back]}" in
-          echo|printf|cat|grep|fgrep|egrep|less|more|head|tail|sed|awk|cut|sort|uniq|wc|tr|tee|jq|yq|xargs|find)
-            _gc_safe=true; break ;;
-          \;|'&&'|'||'|'|') break ;;
-        esac
-        _gc_back=$((_gc_back - 1))
-      done
-      if [[ "$_gc_safe" != "true" ]]; then
-        return 0
-      fi
-    fi
-    _gc_idx=$((_gc_idx + 1))
-  done
-
-  return 1
-}
+This file is a hard dependency. Either:
+  - Reinstall the plugin (the lib ships at scripts/tdd/_lib_commit_mode.sh)
+  - Set CLAUDE_PLUGIN_ROOT to the plugin's root directory
+HOOK_MSG
+  exit 2
+fi
+# shellcheck source=/dev/null
+. "$LIB_COMMIT_MODE"
 
 if ! matches_git_commit "$CMD"; then
   exit 0
@@ -361,27 +221,112 @@ if ! git rev-parse --git-dir >/dev/null 2>&1; then
   exit 0
 fi
 
-CHANGED_FILES="$(git diff --cached --name-only 2>/dev/null)"
-if [[ -z "$CHANGED_FILES" ]]; then
-  CHANGED_FILES="$(git diff --name-only 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null)"
+# C3 (v1.6.1): classify the commit mode BEFORE picking the candidate
+# file set, so Tier 1 detection sees the same files that will actually
+# land in the commit.
+classify_commit_mode "$CMD"
+
+# C3 (v1.6.1) + round-2 F2/F3: candidate set selection by COMMIT_MODE.
+#   PLAIN                       → cached only (preserve F2 narrow scope —
+#                                 unrelated tracked WIP must NOT widen).
+#   INCLUDE + explicit pathspecs → UNION of cached + scoped pathspec
+#                                  set. --include / -i is ADDITIVE per
+#                                  git docs: "Before making a commit,
+#                                  stage the contents of paths given
+#                                  on the command line as well." So
+#                                  the commit ships staged ∪ pathspec.
+#                                  (Round-2 F3: missing the staged half
+#                                  let already-staged Tier 1 files past
+#                                  the gate.)
+#   PATHSPEC + explicit pathspecs (no INCLUDE) → scope diff HEAD +
+#                                  untracked to the given pathspecs.
+#                                  --only / -o REPLACES the staged set
+#                                  (default pathspec semantics too).
+#                                  Round-2 F2: prevents false-positive
+#                                  on `git commit notes.txt -m msg`
+#                                  with unrelated Tier 1 WIP.
+#   ALL / UNCERTAIN / interactive-PATHSPEC → diff HEAD + untracked,
+#                                 unscoped (working-tree content may
+#                                 land in the commit; if we're not
+#                                 sure, fail closed wide).
+if [[ "$COMMIT_MODE_INCLUDE" == "true" ]] \
+   && [[ ${#COMMIT_PATHSPECS[@]} -gt 0 ]] \
+   && [[ "$COMMIT_MODE_ALL" != "true" ]] \
+   && [[ "$COMMIT_MODE_UNCERTAIN" != "true" ]]; then
+  CHANGED_FILES="$(git diff --cached --name-only 2>/dev/null; \
+                   git diff HEAD --name-only -- "${COMMIT_PATHSPECS[@]}" 2>/dev/null; \
+                   git ls-files --others --exclude-standard -- "${COMMIT_PATHSPECS[@]}" 2>/dev/null)"
+elif [[ "$COMMIT_MODE_PATHSPEC" == "true" ]] \
+   && [[ ${#COMMIT_PATHSPECS[@]} -gt 0 ]] \
+   && [[ "$COMMIT_MODE_ALL" != "true" ]] \
+   && [[ "$COMMIT_MODE_UNCERTAIN" != "true" ]]; then
+  CHANGED_FILES="$(git diff HEAD --name-only -- "${COMMIT_PATHSPECS[@]}" 2>/dev/null; \
+                   git ls-files --others --exclude-standard -- "${COMMIT_PATHSPECS[@]}" 2>/dev/null)"
+elif [[ "$COMMIT_MODE_ALL" == "true" ]]; then
+  # v1.6.1 round-6 F2: ALL mode (`git commit -a` / `-am`) stages
+  # tracked modifications only — untracked files do NOT land in the
+  # commit. Excluding `git ls-files --others` here prevents false
+  # denials on unrelated untracked Tier 1 files. (UNCERTAIN and
+  # interactive-PATHSPEC stay wide; those modes can include
+  # untracked content.)
+  CHANGED_FILES="$(git diff HEAD --name-only 2>/dev/null)"
+elif [[ "$COMMIT_MODE_PATHSPEC" == "true" || "$COMMIT_MODE_UNCERTAIN" == "true" ]]; then
+  # Interactive/patch PATHSPEC (no explicit pathspecs) and UNCERTAIN
+  # may include untracked content; keep the wide candidate set.
+  CHANGED_FILES="$(git diff HEAD --name-only 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null)"
+else
+  CHANGED_FILES="$(git diff --cached --name-only 2>/dev/null)"
+fi
+# v1.6.1 round-10 F1: union shell-redirect targets from the same
+# compound bash command into the candidate set. The redirect hasn't
+# run yet at hook fire time, so it doesn't show up in `git diff` —
+# but it WILL mutate the file before the commit picks it up.
+if [[ ${#COMMIT_REDIRECT_TARGETS[@]} -gt 0 ]]; then
+  for _redir_tgt in "${COMMIT_REDIRECT_TARGETS[@]}"; do
+    CHANGED_FILES="$CHANGED_FILES"$'\n'"$_redir_tgt"
+  done
 fi
 [[ -z "$CHANGED_FILES" ]] && exit 0
 
 TIER1_REGEXES="$(jq -r '.tier1_path_regexes[]? // empty' "$CONFIG")"
 TIER1_PROD=()
+# C4 (v1.6.1): Tier 1 regex check before the trivial-path filter so
+# files declared Tier 1 in config (e.g., .claude/skills/second-opinion/SKILL.md)
+# are not silently exempted by *.md / */.claude/* etc.
+#
+# But test files keep their own pre-Tier-1 exemption: red() commits
+# legitimately ship only failing tests, even when those tests live
+# inside a Tier 1 directory. Without the test exemption FIRST, the
+# Fix 4 inversion would drag handler_test.go into TIER1_PROD and break
+# the red phase.
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
+
+  # Step 1: tests are exempt (red-phase commits ship test files only).
+  # Test files are never Tier 1 production, even in Tier 1 directories.
   case "$f" in
     *_test.go) continue ;;
-    */.tdd/*|*/.claude/*|*.md|*/docs/*|*/specs/*|*/archive/*|*/CHANGELOG.md) continue ;;
   esac
+
+  # Step 2: Tier 1 regex match. Tier 1 paths are NEVER trivially exempt.
+  is_tier1=false
   while IFS= read -r pattern; do
     [[ -z "$pattern" ]] && continue
     if printf '%s' "$f" | grep -qE "$pattern"; then
-      TIER1_PROD+=("$f")
+      is_tier1=true
       break
     fi
   done <<< "$TIER1_REGEXES"
+
+  if [[ "$is_tier1" == "true" ]]; then
+    TIER1_PROD+=("$f")
+    continue
+  fi
+
+  # Step 3: trivial paths exempted only for non-Tier-1, non-test files.
+  case "$f" in
+    */.tdd/*|*/.claude/*|*.md|*/docs/*|*/specs/*|*/archive/*|*/CHANGELOG.md) continue ;;
+  esac
 done <<< "$CHANGED_FILES"
 
 # ---- Helpers (used by both integration-guards and ceremony layers) -------
@@ -554,133 +499,37 @@ if [[ "${SIZE_THRESHOLD:-0}" -gt 0 ]]; then
   # newly-introduced git flag we haven't whitelisted; operator can
   # /second-opinion to bypass. Benefit: no future Codex round can find
   # a new bypass — unknown flags fail closed by construction.
-  COMMIT_MODE_ALL=false
-  COMMIT_MODE_PATHSPEC=false
-  COMMIT_MODE_UNCERTAIN=false
+  # C3 (v1.6.1): classification was hoisted to classify_commit_mode()
+  # near the top of the file so Tier 1 detection consumes the same
+  # COMMIT_MODE_* flags. The size-threshold block now just reads them.
 
-  # Shell-expansion fail-closed (Codex rounds 7 P1, 8 P0). Commands like
-  # `mode=a; git commit -$mode -m msg`, `git commit $(cat flags)`, or
-  # `touch -- -a && git commit -* -m msg` (where the glob expands to -a
-  # post-shell) hide content-selecting flags from a literal-text parser.
-  # We can't predict what the shell will do without eval'ing (unsafe);
-  # any unescaped $, backtick, or shell glob char (* ? [) flips to
-  # UNCERTAIN. Costs: legitimate commits with literal $ or * in the
-  # message become UNCERTAIN; operator can /second-opinion to bypass.
-  # Benefit: the entire metaprogramming/glob bypass class fails closed.
-  #
-  # KNOWN OUT-OF-SCOPE bypasses (Codex round 8 — gate-level, not parser):
-  #   - `sh -c 'git commit -a -m msg'`: outer command is `sh -c '...'`,
-  #     so the hook's COMMITS_RE doesn't match `git commit` and the gate
-  #     never fires. Same for `bash -c`, `eval`, etc.
-  #   - `git -c alias.ci='commit -a' ci -m msg` and pre-configured git
-  #     aliases (`git ci`): outer argv is `git -c` or `git ci`, not
-  #     `git commit`; COMMITS_RE doesn't match.
-  # Both bypass Layer 0 entirely. Closing them requires broadening
-  # COMMITS_RE or moving the gate to a git pre-commit hook. Tracked as
-  # follow-up; not in scope for the Layer 0 rescue cycle.
-  if printf '%s' "$CMD" | grep -qE '\$|`|\*|\?|\['; then
-    COMMIT_MODE_UNCERTAIN=true
-  fi
-  _CMD_TOKENS=()
-  if command -v xargs >/dev/null 2>&1; then
-    while IFS= read -r _line; do
-      _CMD_TOKENS+=("$_line")
-    done < <(printf '%s' "$CMD" | xargs -n1 printf '%s\n' 2>/dev/null)
-  fi
-  if [[ ${#_CMD_TOKENS[@]} -eq 0 ]]; then
-    read -ra _CMD_TOKENS <<< "$CMD"
-  fi
-  # Walk tokens with state for option-with-arg flags (-m, --message, etc.)
-  # and `--` end-of-options. Long options containing 'a' (--amend,
-  # --author) hit the --* branch and are skipped; only -a / --all and
-  # short clusters containing 'a' set COMMIT_MODE_ALL.
-  #
-  # Skip past the leading `git commit` (or whatever shell prelude) by
-  # only starting to scan AFTER seeing the literal token `commit`.
-  _expect_arg=false
-  _end_of_opts=false
-  _scanning=false
-  for _tok in "${_CMD_TOKENS[@]}"; do
-    if [[ "$_scanning" != "true" ]]; then
-      [[ "$_tok" == "commit" ]] && _scanning=true
-      continue
-    fi
-    if [[ "$_end_of_opts" == "true" ]]; then
-      continue
-    fi
-    if [[ "$_expect_arg" == "true" ]]; then
-      _expect_arg=false
-      continue
-    fi
-    case "$_tok" in
-      --) _end_of_opts=true; COMMIT_MODE_PATHSPEC=true ;;
-      -a|--all|--all=*) COMMIT_MODE_ALL=true; break ;;
-      # Pathspec-selecting modes (Codex round 4 P1):
-      # --interactive / --patch / -p open a UI that adds working-tree
-      # content; --pathspec-from-file reads pathspecs from a file.
-      # All three should classify as working-tree candidate set.
-      --include|-i|--only|-o|--interactive|--patch|-p) COMMIT_MODE_PATHSPEC=true ;;
-      --pathspec-from-file=*) COMMIT_MODE_PATHSPEC=true ;;
-      --pathspec-from-file) COMMIT_MODE_PATHSPEC=true; _expect_arg=true ;;
-      # Options that REQUIRE a value as the next token.
-      # NOTE: -S / --gpg-sign take an OPTIONAL key id. Per git docs the
-      # key must be attached (-S<key> / --gpg-sign=<key>); a bare -S
-      # signs with the default key and does NOT consume the next token
-      # (Codex round 4 P1 — bare -S would otherwise eat a pathspec arg).
-      --message|--file|--author|--date|--cleanup|--template|--squash|--fixup|--trailer|--reedit-message|--reuse-message|-m|-F|-c|-C)
-        _expect_arg=true
-        ;;
-      # Short options with attached argument: -mTEXT, -FTEXT, -cREF,
-      # -CREF, -STEXT. The arg starts immediately after the flag letter,
-      # so any 'a' inside the arg is NOT an -a flag. Codex round 3 P2.
-      -m*|-F*|-c*|-C*|-S*) ;;
-      --gpg-sign|--gpg-sign=*) ;;  # bare or attached: no next-token consumption
-      # Long options that are explicitly known NOT to add working-tree
-      # content beyond what's already in the index. Treat as plain mode.
-      --amend|--no-edit|--no-verify|--no-gpg-sign|--no-status|--no-post-rewrite|--no-template|--no-rerere-autoupdate|--no-allow-empty-message|--reset-author|--signoff|--no-signoff|--allow-empty|--allow-empty-message|--allow-empty-author|--quiet|--verbose|--dry-run|--short|--porcelain|--long|--status|--null|--no-edit-files|--branch) ;;
-      --cleanup=*|--template=*|--trailer=*|--message=*|--file=*|--author=*|--date=*|--reedit-message=*|--reuse-message=*|--squash=*|--fixup=*) ;;
-      # Unknown long option (incl. abbreviations like `--intera`,
-      # `--patc`, future git flags). Backstop: flip to UNCERTAIN so the
-      # diff-source selector uses `diff HEAD --numstat` (conservative).
-      # Codex round 6 closure: don't try to perfectly enumerate git's
-      # CLI; fail closed for anything we don't recognise.
-      --*) COMMIT_MODE_UNCERTAIN=true ;;
-      -*)
-        _flag_body="${_tok#-}"
-        case "$_flag_body" in
-          *a*) COMMIT_MODE_ALL=true; break ;;
-        esac
-        # Clustered short forms like -pm (=-p -m), -vp, -np: 'p' anywhere
-        # in the cluster opens patch mode → working-tree candidate set
-        # (Codex round 5 P1). -m*/-F*/-c*/-C*/-S* attached-arg patterns
-        # match earlier so they don't reach this branch.
-        case "$_flag_body" in
-          *p*) COMMIT_MODE_PATHSPEC=true ;;
-        esac
-        _last="${_flag_body: -1}"
-        case "$_last" in
-          m|F|c|C) _expect_arg=true ;;
-          # 'S' deliberately NOT in the consume list — see -S note above.
-        esac
-        ;;
-      *)
-        # First non-flag positional after the option block is a pathspec
-        # (or the message arg of a no-equals -m, but _expect_arg already
-        # consumed that case). Pathspec mode counts the working tree
-        # against HEAD because pathspec commits use working-tree content
-        # for the matched paths. Codex round 3 P1.
-        COMMIT_MODE_PATHSPEC=true
-        break
-        ;;
-    esac
-  done
-  unset _tok _flag_body _last _expect_arg _end_of_opts _scanning _CMD_TOKENS _line
-
-  if [[ "$COMMIT_MODE_ALL" == "true" || "$COMMIT_MODE_PATHSPEC" == "true" || "$COMMIT_MODE_UNCERTAIN" == "true" ]]; then
-    # ALL / PATHSPEC / UNCERTAIN: working-tree content may land in the
-    # commit. `git diff HEAD --numstat` covers both cached AND
-    # tracked-but-unstaged. Conservative fail-closed: if we can't be
-    # sure what's in the candidate set, count everything tracked.
+  # v1.6.1 round-3 F2: mirror Tier 1 detection's candidate-set split
+  # (INCLUDE+paths, PATHSPEC+paths, ALL/UNCERTAIN/interactive). Without
+  # this, `git commit notes.txt -m msg` with large unrelated WIP would
+  # trigger size-threshold even though the WIP doesn't land in the
+  # commit — the same false-positive class round-2 F2 closed for Tier 1
+  # detection.
+  if [[ "$COMMIT_MODE_INCLUDE" == "true" ]] \
+     && [[ ${#COMMIT_PATHSPECS[@]} -gt 0 ]] \
+     && [[ "$COMMIT_MODE_ALL" != "true" ]] \
+     && [[ "$COMMIT_MODE_UNCERTAIN" != "true" ]]; then
+    # INCLUDE: union of cached numstat + scoped pathspec working-tree numstat.
+    CACHED_NUMSTAT="$( { git diff --cached --numstat 2>/dev/null; \
+                         git diff HEAD --numstat -- "${COMMIT_PATHSPECS[@]}" 2>/dev/null; } )"
+  elif [[ "$COMMIT_MODE_PATHSPEC" == "true" ]] \
+       && [[ ${#COMMIT_PATHSPECS[@]} -gt 0 ]] \
+       && [[ "$COMMIT_MODE_ALL" != "true" ]] \
+       && [[ "$COMMIT_MODE_UNCERTAIN" != "true" ]]; then
+    # PATHSPEC (--only or default): scoped diff HEAD only.
+    CACHED_NUMSTAT="$(git diff HEAD --numstat -- "${COMMIT_PATHSPECS[@]}" 2>/dev/null)"
+  elif [[ "$COMMIT_MODE_ALL" == "true" || "$COMMIT_MODE_PATHSPEC" == "true" || "$COMMIT_MODE_UNCERTAIN" == "true" ]]; then
+    # ALL / interactive-PATHSPEC / UNCERTAIN: working-tree content may
+    # land in the commit. `git diff HEAD --numstat` covers both cached
+    # AND tracked-but-unstaged. Conservative fail-closed: if we can't
+    # be sure what's in the candidate set, count everything tracked.
+    # (Note: untracked files don't appear in `diff HEAD`, so the F2
+    # untracked-exclusion in the Tier 1 selection above doesn't need
+    # a parallel here — numstat is intrinsically tracked-only.)
     CACHED_NUMSTAT="$(git diff HEAD --numstat 2>/dev/null)"
   else
     # PLAIN mode: candidate set is the index. Empty index means git

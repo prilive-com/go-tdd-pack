@@ -78,6 +78,7 @@ ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 CONFIG="$ROOT/.tdd/tdd-config.json"
 PLAN="$ROOT/.tdd/current-plan.md"
 ADJUDICATION="$ROOT/.tdd/second-opinion-completed.md"
+GREEN_PROOF="$ROOT/.tdd/green-proof.md"
 HOOK_NAME="git-pre-commit"
 
 # No config means TDD ceremony not configured for this project — allow.
@@ -179,24 +180,41 @@ EOF
 CHANGED_FILES="$(cd "$ROOT" 2>/dev/null && git diff --cached --name-only 2>/dev/null)"
 [[ -z "$CHANGED_FILES" ]] && exit 0
 
-# Match against tier1_path_regexes. Mirror gate-tier1-commit.sh's
-# always-allow filter (test files, docs, pack-internal — exempt from
-# Tier 1 regex evaluation).
+# Match against tier1_path_regexes.
+# C4 (v1.6.1): Tier 1 regex check before the trivial-path filter so
+# files declared Tier 1 in config (e.g., .claude/skills/second-opinion/SKILL.md)
+# are not silently exempted. Tests stay exempt FIRST so red-phase
+# commits inside Tier 1 directories still pass. Mirror of the same
+# ordering in .claude/hooks/gate-tier1-commit.sh.
 TIER1_REGEXES="$(jq -r '.tier1_path_regexes[]? // empty' "$CONFIG" 2>/dev/null || true)"
 TIER1_PROD=()
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
+
+  # Step 1: tests are exempt (red-phase commits ship test files only).
   case "$f" in
     *_test.go) continue ;;
-    */.tdd/*|*/.claude/*|*.md|*/docs/*|*/specs/*|*/archive/*|*/CHANGELOG.md) continue ;;
   esac
+
+  # Step 2: Tier 1 regex match. Tier 1 paths are NEVER trivially exempt.
+  is_tier1=false
   while IFS= read -r pattern; do
     [[ -z "$pattern" ]] && continue
     if printf '%s' "$f" | grep -qE "$pattern"; then
-      TIER1_PROD+=("$f")
+      is_tier1=true
       break
     fi
   done <<< "$TIER1_REGEXES"
+
+  if [[ "$is_tier1" == "true" ]]; then
+    TIER1_PROD+=("$f")
+    continue
+  fi
+
+  # Step 3: trivial paths exempted only for non-Tier-1, non-test files.
+  case "$f" in
+    */.tdd/*|*/.claude/*|*.md|*/docs/*|*/specs/*|*/archive/*|*/CHANGELOG.md) continue ;;
+  esac
 done <<< "$CHANGED_FILES"
 
 # No Tier 1 staged → allow.
@@ -211,20 +229,31 @@ Staged Tier 1 files:
 $TIER1_LIST"
 fi
 
-# Required edit-time markers (M1+M2+M3 by default).
+# C2 (v1.6.1): commit-time gate must enforce commit-time markers
+# (M1+M2+M3+M4), NOT edit-time (which is what require-tdd-state.sh
+# enforces). Reading required_markers_edit_time silently weakened
+# this gate vs gate-tier1-commit.sh — architecture inversion the
+# v1.6.1 review caught.
 required_markers=()
 if command -v jq >/dev/null 2>&1; then
   while IFS= read -r m; do
     [[ -n "$m" ]] && required_markers+=("$m")
   done < <(jq -r '
-    if (.required_markers_edit_time | type) == "array"
-    then .required_markers_edit_time[]?
-    else .required_markers[]? // empty
+    if (.required_markers_commit_time | type) == "array"
+    then .required_markers_commit_time[]?
+    elif (.required_markers | type) == "array"
+    then .required_markers[]?
+    else empty
     end
   ' "$CONFIG" 2>/dev/null || true)
 fi
 if [[ ${#required_markers[@]} -eq 0 ]]; then
-  required_markers=("Human approved spec: yes" "Red phase confirmed: yes" "Green phase authorized: yes")
+  required_markers=(
+    "Human approved spec: yes"
+    "Red phase confirmed: yes"
+    "Green phase authorized: yes"
+    "Implementation reviewed: yes"
+  )
 fi
 
 # Read marker aliases (new -> old) for backwards-compat.
@@ -249,6 +278,16 @@ for marker in "${required_markers[@]}"; do
 Staged Tier 1 files:
 $TIER1_LIST"
 done
+
+# C2 (v1.6.1): green-proof.md must exist for Tier 1 commits.
+# gate-tier1-commit.sh enforces this; previously this hook didn't,
+# silently weakening commit-time policy. Mirror the check.
+if [[ ! -f "$GREEN_PROOF" ]]; then
+  deny "Tier 1 production files staged but .tdd/green-proof.md is missing.
+Capture verbatim test-passing output (the green proof) before committing.
+Staged Tier 1 files:
+$TIER1_LIST"
+fi
 
 # Adjudication must exist AND be fresh (mtime < 60 minutes).
 if [[ ! -f "$ADJUDICATION" ]]; then
@@ -278,6 +317,11 @@ sha256() {
 
 if [[ "${SECOND_OPINION_HASH_DISABLE:-0}" != "1" ]]; then
   hash_flag="$(jq -r '.second_opinion.require_hash_binding_tier1 // false' "$CONFIG" 2>/dev/null || echo false)"
+  # C9 (v1.6.1) auto-promote: strict mode forces hash binding on
+  # regardless of flag. Strict + flag=false is internally inconsistent.
+  if [[ "$hash_flag" != "true" ]] && [[ "$ENFORCEMENT_MODE" == "strict" ]]; then
+    hash_flag="true"
+  fi
   if [[ "$hash_flag" == "true" ]] \
      && ! command -v sha256sum >/dev/null 2>&1 \
      && ! command -v shasum    >/dev/null 2>&1; then

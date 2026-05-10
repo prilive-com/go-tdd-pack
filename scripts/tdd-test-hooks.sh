@@ -551,17 +551,27 @@ else
   fail "F5: matching plan hash should allow (got: '$out')"
 fi
 
-# AC 5: flag OFF → legacy behavior (no hash check), even with mismatched hashes
+# AC 5: flag OFF + warn mode → legacy behavior (no hash check), even with
+# mismatched hashes. C9 (v1.6.1): strict mode auto-promotes the flag, so
+# the only mode where flag=false still skips hash checks is warn (or off).
+# v161-c9 separately asserts that strict + flag=false enforces (forces on).
 f5_set_flag false
+jq '.enforcement_mode = "warn"' \
+  "$TMPROOT_F5/.tdd/tdd-config.json" > /tmp/f5-cfg.json && \
+  mv /tmp/f5-cfg.json "$TMPROOT_F5/.tdd/tdd-config.json"
 f5_write_adj "deadbeef0000000000000000000000000000000000000000000000000000beef" "deadbeef0000000000000000000000000000000000000000000000000000beef"
 out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
   | CLAUDE_PROJECT_DIR="$TMPROOT_F5" timeout "${HOOK_TIMEOUT:-5}" \
     bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
 if [[ "$out" == *"exit:0"* ]]; then
-  pass "F5: flag off → legacy behavior (mismatched hashes ignored)"
+  pass "F5: warn + flag off → legacy behavior (mismatched hashes ignored)"
 else
   fail "F5: flag off should not enforce hash (got: '$out')"
 fi
+# Restore strict for subsequent F5 tests (5b through 7).
+jq '.enforcement_mode = "strict"' \
+  "$TMPROOT_F5/.tdd/tdd-config.json" > /tmp/f5-cfg.json && \
+  mv /tmp/f5-cfg.json "$TMPROOT_F5/.tdd/tdd-config.json"
 
 # AC 5b: flag ON but path is NOT Tier 1 → hash NOT enforced (Tier-1-scoped)
 f5_set_flag true
@@ -1621,6 +1631,14 @@ jq '.second_opinion.require_research_packet_tier1 = false |
   "$TMPROOT_V16/.tdd/tdd-config.json" \
   > "$TMPROOT_V16/.tdd/tdd-config.json.tmp"
 mv "$TMPROOT_V16/.tdd/tdd-config.json.tmp" "$TMPROOT_V16/.tdd/tdd-config.json"
+# C9 (v1.6.1): keep strict so the deny-asserting tests below still
+# return deny, but disable the hash-binding check via killswitch.
+# Without this, strict auto-promotes require_hash_binding_tier1 and
+# the empty adjudication file below denies every test in this block
+# before its real v1.6.0-flag assertion can run. v161-c9 covers
+# strict auto-promotion separately; here we want the v1.6.0 contract
+# in isolation.
+export SECOND_OPINION_HASH_DISABLE=1
 cat > "$TMPROOT_V16/.tdd/current-plan.md" <<'EOF'
 Human approved spec: yes
 Red phase confirmed: yes
@@ -1831,6 +1849,7 @@ else
 fi
 
 rm -rf "$TMPROOT_V16"
+unset SECOND_OPINION_HASH_DISABLE  # scope-end: don't leak into later blocks
 
 echo
 echo "Testing migrate-rebuttal-to-matrix.sh..."
@@ -2271,14 +2290,17 @@ out=$(echo '{"tool_input":{"command":"git commit -m \"plain msg\" -- -a-file.txt
   | CLAUDE_PROJECT_DIR="$TMPROOT_SZ" timeout "${HOOK_TIMEOUT:-5}" \
     bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
   | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
-# `--` marks end-of-options AND signals pathspec mode → diff HEAD →
-# tracked WIP IS counted → DENY (the fixture has 100-line WIP). Critical:
-# the parser must NOT crash or misclassify on the literal `-a-file.txt`
-# token after `--` (it must be treated as a path, never as a flag).
-if [ "$out" = "deny" ]; then
-  pass "size_threshold: -a-file.txt after -- treated as pathspec (end-of-options respected, deny on WIP)"
+# v1.6.1 round-3 F2 update: with the size-threshold candidate set
+# scoped to explicit pathspecs (mirroring Tier 1 detection), this
+# commit only counts -a-file.txt (tiny content) — the 100-line WIP
+# elsewhere does NOT land in the commit and must NOT trigger size
+# threshold. The load-bearing assertion is parser correctness:
+# `-a-file.txt` after `--` must be treated as a path, never as a
+# flag, and the gate must not crash on the literal name.
+if [ "$out" != "deny" ]; then
+  pass "size_threshold: -a-file.txt after -- treated as pathspec (end-of-options respected; CHURN scoped, allow on tiny content)"
 else
-  fail "size_threshold: -a-file.txt after -- should be pathspec mode + deny (got: '$out')"
+  fail "size_threshold: -a-file.txt after -- should be allowed (CHURN scoped to pathspec) (got: '$out')"
 fi
 rm -f "$TMPROOT_SZ/-a-file.txt"
 
@@ -3315,11 +3337,24 @@ Implementation reviewed: yes
 EOF
 }
 
-# Helper: write a fresh adjudication file.
+# Helper: write a fresh adjudication file with REAL hashes.
+# Must be called AFTER staging the change AND writing current-plan.md
+# (all current callers do, in that order). C9 (v1.6.1): strict mode
+# auto-promotes hash binding, so the adjudication needs valid 64-hex
+# diff_sha256 + plan_sha256 fields or the gate denies.
 gh_write_adj_fresh() {
-  cat > "$1/.tdd/second-opinion-completed.md" <<EOF
+  local d="$1"
+  local diff_sha plan_sha
+  diff_sha="$(cd "$d" && git diff HEAD --cached 2>/dev/null | sha256sum | awk '{print $1}')"
+  plan_sha=""
+  if [ -f "$d/.tdd/current-plan.md" ]; then
+    plan_sha="$(sha256sum "$d/.tdd/current-plan.md" | awk '{print $1}')"
+  fi
+  cat > "$d/.tdd/second-opinion-completed.md" <<EOF
 date: $(date -u +%FT%TZ)
 adjudicated_by: claude
+diff_sha256: $diff_sha
+plan_sha256: $plan_sha
 EOF
 }
 
@@ -3392,22 +3427,32 @@ else
 fi
 rm -rf "$TMP"
 
-# AC regression: clean state (Tier 1 + plan + fresh adjudication) → allow.
+# AC regression: clean state (Tier 1 + plan + fresh adjudication +
+# green-proof) → allow. C2 (v1.6.1): pre-commit also requires
+# .tdd/green-proof.md for Tier 1 commits.
 TMP=$(gh_setup)
 gh_stage_tier1 "$TMP"
 gh_write_plan_full "$TMP"
 gh_write_adj_fresh "$TMP"
+echo "test green proof" > "$TMP/.tdd/green-proof.md"
 if [ "$(gh_invoke "$TMP")" -eq 0 ]; then
-  pass "gh: Tier 1 + plan + fresh adjudication → allow (regression)"
+  pass "gh: Tier 1 + plan + fresh adjudication + green-proof → allow (regression)"
 else
   fail "gh: clean Tier 1 commit should allow"
 fi
 TMP_HASHES="$TMP"
 
-# AC 5: hash mismatch → deny (when require_hash_binding_tier1=true).
+# AC 5: hash binding flag on + adjudication MISSING hash fields → deny.
+# C9 (v1.6.1): gh_write_adj_fresh now always writes valid hashes
+# (because strict auto-promotes the flag), so we have to strip the
+# fields back out to test the missing-field deny path.
 jq '.second_opinion.require_hash_binding_tier1 = true' \
   "$TMP_HASHES/.tdd/tdd-config.json" > /tmp/gh-cfg.json && \
   mv /tmp/gh-cfg.json "$TMP_HASHES/.tdd/tdd-config.json"
+grep -v '^diff_sha256:\|^plan_sha256:' "$TMP_HASHES/.tdd/second-opinion-completed.md" \
+  > "$TMP_HASHES/.tdd/second-opinion-completed.md.stripped" && \
+  mv "$TMP_HASHES/.tdd/second-opinion-completed.md.stripped" \
+     "$TMP_HASHES/.tdd/second-opinion-completed.md"
 if [ "$(gh_invoke "$TMP_HASHES")" -ne 0 ]; then
   pass "gh: hash binding on + missing diff_sha256/plan_sha256 → deny"
 else
@@ -3813,13 +3858,15 @@ else
 fi
 rm -rf "$TMP"
 
-# AC regression: clean state → allow.
+# AC regression: clean state → allow. C2 (v1.6.1): pre-commit (which
+# prepare-commit-msg execs) also requires .tdd/green-proof.md.
 TMP=$(gh_setup)
 gh_stage_tier1 "$TMP"
 gh_write_plan_full "$TMP"
 gh_write_adj_fresh "$TMP"
+echo "test green proof" > "$TMP/.tdd/green-proof.md"
 if [ "$(nv_invoke "$TMP")" -eq 0 ]; then
-  pass "nv: Tier 1 + plan + fresh adjudication → allow (regression)"
+  pass "nv: Tier 1 + plan + fresh adjudication + green-proof → allow (regression)"
 else
   fail "nv: clean state should allow"
 fi
@@ -4074,8 +4121,11 @@ Green phase authorized: yes
 Implementation reviewed: yes
 EOF
 
-# Fresh adjudication
-cat > "$TMPROOT_F12C/.tdd/second-opinion-completed.md" <<'EOF'
+# Fresh adjudication. C9 (v1.6.1): strict auto-promotes hash binding,
+# so the adjudication must carry real diff_sha256 + plan_sha256.
+F12C_DIFF_SHA="$(cd "$TMPROOT_F12C" && git diff HEAD --cached 2>/dev/null | sha256sum | awk '{print $1}')"
+F12C_PLAN_SHA="$(sha256sum "$TMPROOT_F12C/.tdd/current-plan.md" | awk '{print $1}')"
+cat > "$TMPROOT_F12C/.tdd/second-opinion-completed.md" <<EOF
 date: 2026-05-09T00:00:00Z
 scope: Tier 1
 model: gpt-5.5
@@ -4085,6 +4135,8 @@ findings:
     severity: P1
     stance: ACCEPT
 adjudicated_by: claude
+diff_sha256: $F12C_DIFF_SHA
+plan_sha256: $F12C_PLAN_SHA
 EOF
 
 # round1.json so the hook can compute findings_count
@@ -4388,6 +4440,1280 @@ if [ -f "$GITLAB_CI" ]; then
 else
   fail "F3: .gitlab-ci.yml missing — cycle assumes GitLab config exists"
 fi
+
+# v1.6.1-release-blockers cycle: 5 P1 + 1 P0 + 1 cross-cycle gap from
+# the combined v1.6.1 review (Claude self-review + 2 consultants).
+# These tests prove the gaps are real and the fixes close them.
+echo "Testing v1.6.1-release-blockers (5 P1 + 1 P0 + 1 cross-cycle gap)..."
+
+# Helper: invoke a hook with codex/jq deliberately absent from PATH
+# (tests strict-mode fail-closed behavior). PATH stripped to /usr/bin:/bin
+# so neither codex nor any custom tools are findable. We pass through
+# the env vars the hook needs.
+v161_invoke_no_codex() {
+  local hook_name="$1" target_dir="$2" json_input="$3"
+  shift 3
+  local rc=0
+  printf '%s' "$json_input" | env -i \
+    PATH=/usr/bin:/bin \
+    HOME="${HOME:-/tmp}" \
+    CLAUDE_PROJECT_DIR="$target_dir" \
+    "$@" \
+    bash "$PROJECT_ROOT/.claude/hooks/$hook_name" >/dev/null 2>&1 || rc=$?
+  echo "$rc"
+}
+
+v161_invoke_no_codex_capture() {
+  local hook_name="$1" target_dir="$2" json_input="$3"
+  shift 3
+  local rc=0 out
+  out=$( ( printf '%s' "$json_input" | env -i \
+    PATH=/usr/bin:/bin \
+    HOME="${HOME:-/tmp}" \
+    CLAUDE_PROJECT_DIR="$target_dir" \
+    "$@" \
+    bash "$PROJECT_ROOT/.claude/hooks/$hook_name" 2>&1 ); echo "exit:$?")
+  echo "$out"
+}
+
+# Helper: build a Tier 1 fixture with optional adjudication.
+# Args: $1 = "with_adj" | "no_adj"
+# When with_adj, also writes a plan with all 4 commit-time markers AND
+# real diff_sha256 + plan_sha256 hashes (C9 v1.6.1: strict auto-promotes
+# hash binding, so adjudications need both fields populated with valid
+# 64-hex values).
+v161_setup() {
+  local with_adj="${1:-no_adj}"
+  local d
+  d=$(mktemp -d)
+  git init -q "$d"
+  ( cd "$d" && git config user.email t@t && git config user.name t )
+  mkdir -p "$d/.tdd" "$d/internal/auth"
+  cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$d/.tdd/"
+  echo "package auth" > "$d/internal/auth/handler.go"
+  ( cd "$d" && git add . && git commit -q -m initial )
+  if [ "$with_adj" = "with_adj" ]; then
+    cat > "$d/.tdd/current-plan.md" <<'EOF'
+Bug reproduced: yes
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: yes
+Implementation reviewed: yes
+EOF
+    local diff_sha plan_sha
+    diff_sha="$(cd "$d" && git diff HEAD --cached 2>/dev/null | sha256sum | awk '{print $1}')"
+    plan_sha="$(sha256sum "$d/.tdd/current-plan.md" | awk '{print $1}')"
+    cat > "$d/.tdd/second-opinion-completed.md" <<EOF
+date: $(date -u +%FT%TZ)
+adjudicated_by: claude
+diff_sha256: $diff_sha
+plan_sha256: $plan_sha
+EOF
+  fi
+  echo "$d"
+}
+
+# AC 1.1: codex missing + strict + no adjudication → DENY (currently allows).
+TMP=$(v161_setup no_adj)
+rc=$(v161_invoke_no_codex require-second-opinion.sh "$TMP" \
+  '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}')
+if [ "$rc" -ne 0 ]; then
+  pass "v161-c1: codex missing + strict + no adj → deny (rc=$rc)"
+else
+  fail "v161-c1: codex missing in strict should deny when adj missing (rc=$rc; currently fails-open)"
+fi
+rm -rf "$TMP"
+
+# AC 1.2: codex missing + strict + fresh adjudication → ALLOW.
+TMP=$(v161_setup with_adj)
+rc=$(v161_invoke_no_codex require-second-opinion.sh "$TMP" \
+  '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}')
+if [ "$rc" -eq 0 ]; then
+  pass "v161-c1: codex missing + strict + fresh adj → allow (operator can edit without codex)"
+else
+  fail "v161-c1: codex missing with fresh adj should allow (rc=$rc)"
+fi
+rm -rf "$TMP"
+
+# AC 1.3: codex missing + warn → stderr WARNING + exit 0.
+TMP=$(v161_setup no_adj)
+jq '.enforcement_mode_overrides."require-second-opinion" = "warn"' \
+  "$TMP/.tdd/tdd-config.json" > /tmp/v161-cfg.json && mv /tmp/v161-cfg.json "$TMP/.tdd/tdd-config.json"
+out=$(v161_invoke_no_codex_capture require-second-opinion.sh "$TMP" \
+  '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}')
+if [[ "$out" == *"exit:0"* ]] && [[ "$out" == *"WARNING"* ]]; then
+  pass "v161-c1: codex missing + warn → stderr advisory + allow"
+else
+  fail "v161-c1: codex missing in warn should warn (got: '$out')"
+fi
+rm -rf "$TMP"
+
+# AC 1.4: codex missing + off → silent allow.
+TMP=$(v161_setup no_adj)
+jq '.enforcement_mode_overrides."require-second-opinion" = "off"' \
+  "$TMP/.tdd/tdd-config.json" > /tmp/v161-cfg.json && mv /tmp/v161-cfg.json "$TMP/.tdd/tdd-config.json"
+out=$(v161_invoke_no_codex_capture require-second-opinion.sh "$TMP" \
+  '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}')
+if [[ "$out" == *"exit:0"* ]] && [[ "$out" != *"BLOCKED"* ]]; then
+  pass "v161-c1: codex missing + off → silent allow"
+else
+  fail "v161-c1: codex missing in off should be silent (got: '$out')"
+fi
+rm -rf "$TMP"
+
+# AC 1.5: SECOND_OPINION_DISABLE=1 killswitch overrides codex-missing path.
+TMP=$(v161_setup no_adj)
+rc=$(v161_invoke_no_codex require-second-opinion.sh "$TMP" \
+  '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  SECOND_OPINION_DISABLE=1)
+if [ "$rc" -eq 0 ]; then
+  pass "v161-c1: SECOND_OPINION_DISABLE=1 overrides codex-missing fail-closed"
+else
+  fail "v161-c1: killswitch should always allow (rc=$rc)"
+fi
+rm -rf "$TMP"
+
+# AC 2.4: pre-commit DENIES on Tier 1 staged + plan with M1+M2+M3 only (no M4).
+TMP=$(gh_setup)
+gh_stage_tier1 "$TMP"
+cat > "$TMP/.tdd/current-plan.md" <<'EOF'
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: yes
+EOF
+# Adjudication present + fresh
+cat > "$TMP/.tdd/second-opinion-completed.md" <<EOF
+date: $(date -u +%FT%TZ)
+adjudicated_by: claude
+EOF
+if [ "$(gh_invoke "$TMP")" -ne 0 ]; then
+  pass "v161-c2: pre-commit denies M1+M2+M3 only (no M4)"
+else
+  fail "v161-c2: pre-commit should deny without M4 (currently allows; ARCHITECTURE INVERSION)"
+fi
+rm -rf "$TMP"
+
+# AC 2.4: pre-commit DENIES on Tier 1 + M1-M4 + adjudication, no green-proof.
+TMP=$(gh_setup)
+gh_stage_tier1 "$TMP"
+gh_write_plan_full "$TMP"
+gh_write_adj_fresh "$TMP"
+# Note: green-proof.md NOT created
+if [ "$(gh_invoke "$TMP")" -ne 0 ]; then
+  pass "v161-c2: pre-commit denies without .tdd/green-proof.md"
+else
+  fail "v161-c2: pre-commit should deny without green-proof.md (currently allows)"
+fi
+rm -rf "$TMP"
+
+# AC 2.4 positive: full Tier 1 state (M1-M4 + adjudication + green-proof) → ALLOW.
+TMP=$(gh_setup)
+gh_stage_tier1 "$TMP"
+gh_write_plan_full "$TMP"
+gh_write_adj_fresh "$TMP"
+echo "test green proof" > "$TMP/.tdd/green-proof.md"
+if [ "$(gh_invoke "$TMP")" -eq 0 ]; then
+  pass "v161-c2: pre-commit allows full Tier 1 state (M1-M4 + adj + green-proof)"
+else
+  fail "v161-c2: full Tier 1 state should allow"
+fi
+rm -rf "$TMP"
+
+# AC 3.3: check-tdd-state-clean.sh PASSES on plan with all 4 commit-time markers.
+TMP_C5=$(mktemp -d)
+mkdir -p "$TMP_C5/.tdd"
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_C5/.tdd/"
+cat > "$TMP_C5/.tdd/current-plan.md" <<'EOF'
+Status: active
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: yes
+Implementation reviewed: yes
+EOF
+( cd "$TMP_C5" && bash "$PROJECT_ROOT/scripts/check-tdd-state-clean.sh" >/dev/null 2>&1 ) && rc=0 || rc=$?
+if [ "$rc" -eq 0 ]; then
+  pass "v161-c5: check-state-clean passes on plan with all 4 commit-time markers"
+else
+  fail "v161-c5: should pass with M1-M4 (currently fails because hardcodes old M3 name; rc=$rc)"
+fi
+rm -rf "$TMP_C5"
+
+# AC 3.3: check-tdd-state-clean.sh FAILS on plan with M1-M3 only (missing M4).
+TMP_C5=$(mktemp -d)
+mkdir -p "$TMP_C5/.tdd"
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_C5/.tdd/"
+cat > "$TMP_C5/.tdd/current-plan.md" <<'EOF'
+Status: active
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: yes
+EOF
+( cd "$TMP_C5" && bash "$PROJECT_ROOT/scripts/check-tdd-state-clean.sh" >/dev/null 2>&1 ) && rc=0 || rc=$?
+if [ "$rc" -ne 0 ]; then
+  pass "v161-c5: check-state-clean fails on missing M4 (Implementation reviewed)"
+else
+  fail "v161-c5: should fail without M4 (rc=$rc)"
+fi
+rm -rf "$TMP_C5"
+
+# AC 4.4: SKILL.md (declared Tier 1) blocks in gate-tier1-commit.sh.
+TMP_C4=$(mktemp -d)
+git init -q "$TMP_C4"
+( cd "$TMP_C4" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_C4/.tdd" "$TMP_C4/.claude/skills/second-opinion"
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_C4/.tdd/"
+echo "# initial" > "$TMP_C4/.claude/skills/second-opinion/SKILL.md"
+( cd "$TMP_C4" && git add . && git commit -q -m initial )
+echo "# tier1 governance edit" >> "$TMP_C4/.claude/skills/second-opinion/SKILL.md"
+( cd "$TMP_C4" && git add .claude/skills/second-opinion/SKILL.md )
+out=$(echo '{"tool_input":{"command":"git commit -m \"skill md edit\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_C4" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-c4: SKILL.md (declared Tier 1) blocks in gate-tier1-commit.sh"
+else
+  fail "v161-c4: SKILL.md is declared Tier 1 but trivially exempted by *.md (got: '$out')"
+fi
+# Same fixture: pre-commit hook should also block.
+rc=$(gh_invoke "$TMP_C4")
+if [ "$rc" -ne 0 ]; then
+  pass "v161-c4: SKILL.md blocks in scripts/git-hooks/pre-commit"
+else
+  fail "v161-c4: SKILL.md should block in pre-commit (rc=$rc)"
+fi
+# Same fixture: require-second-opinion.sh on Edit to SKILL.md should require adj.
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":".claude/skills/second-opinion/SKILL.md"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_C4" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-c4: SKILL.md Edit blocks in require-second-opinion.sh (A2)"
+else
+  fail "v161-c4-a2: require-second-opinion silently allows SKILL.md Edit (currently allows)"
+fi
+rm -rf "$TMP_C4"
+
+# AC 4.4 regression: docs/random.md (NOT Tier 1) → still allowed.
+TMP_C4R=$(mktemp -d)
+git init -q "$TMP_C4R"
+( cd "$TMP_C4R" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_C4R/.tdd" "$TMP_C4R/docs"
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_C4R/.tdd/"
+echo "# docs" > "$TMP_C4R/docs/random.md"
+( cd "$TMP_C4R" && git add . && git commit -q -m initial )
+echo "extra" >> "$TMP_C4R/docs/random.md"
+( cd "$TMP_C4R" && git add docs/random.md )
+rc=$(gh_invoke "$TMP_C4R")
+if [ "$rc" -eq 0 ]; then
+  pass "v161-c4: docs/random.md (NOT Tier 1) still allowed (regression)"
+else
+  fail "v161-c4: regular docs should not be governed (rc=$rc)"
+fi
+rm -rf "$TMP_C4R"
+
+# AC 5.3: PLAIN commit + only non-Tier-1 staged + Tier-1 unstaged WIP → ALLOW.
+TMP_C3=$(mktemp -d)
+git init -q "$TMP_C3"
+( cd "$TMP_C3" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_C3/.tdd" "$TMP_C3/internal/auth"
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_C3/.tdd/"
+echo "package auth" > "$TMP_C3/internal/auth/handler.go"
+echo "non-tier1" > "$TMP_C3/notes.txt"
+( cd "$TMP_C3" && git add . && git commit -q -m initial )
+# Stage only the non-Tier-1 file; leave Tier 1 unstaged (modified).
+echo "// wip" >> "$TMP_C3/internal/auth/handler.go"
+echo "edit notes" > "$TMP_C3/notes.txt"
+( cd "$TMP_C3" && git add notes.txt )
+out=$(echo '{"tool_input":{"command":"git commit -m \"notes only\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_C3" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "v161-c3: PLAIN commit (no -a) with non-Tier1 staged + Tier1 unstaged WIP → allow (preserve PLAIN)"
+else
+  fail "v161-c3: PLAIN should not deny on unrelated WIP (got: '$out')"
+fi
+
+# AC 5.3: ALL (-am) commit with non-Tier1 staged + Tier1 unstaged tracked → BLOCK.
+out=$(echo '{"tool_input":{"command":"git commit -am \"am sweep\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_C3" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/gate-tier1-commit.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-c3: -am with unstaged Tier 1 WIP → DENY (closes silent-bypass)"
+else
+  fail "v161-c3: -am should detect Tier 1 in working tree (got: '$out'; CURRENTLY SILENT BYPASS)"
+fi
+rm -rf "$TMP_C3"
+
+# AC 6.3: strict + flag=false → behaves like strict + flag=true (auto-promote).
+# Setup: Tier 1 staged + plan with all markers + adjudication WITH WRONG hashes
+# but require_hash_binding_tier1=false. In strict mode, should still deny on hash mismatch.
+TMP_C9=$(mktemp -d)
+git init -q "$TMP_C9"
+( cd "$TMP_C9" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_C9/.tdd" "$TMP_C9/internal/auth"
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_C9/.tdd/"
+# Confirm flag is false (default).
+jq -e '.second_opinion.require_hash_binding_tier1 == false' "$TMP_C9/.tdd/tdd-config.json" >/dev/null \
+  || jq '.second_opinion.require_hash_binding_tier1 = false' "$TMP_C9/.tdd/tdd-config.json" > /tmp/v161.json \
+  && mv /tmp/v161.json "$TMP_C9/.tdd/tdd-config.json" 2>/dev/null || true
+echo "package auth" > "$TMP_C9/internal/auth/handler.go"
+( cd "$TMP_C9" && git add . && git commit -q -m initial )
+echo "// edit" >> "$TMP_C9/internal/auth/handler.go"
+( cd "$TMP_C9" && git add internal/auth/handler.go )
+gh_write_plan_full "$TMP_C9"
+# Adjudication with mismatched hashes
+cat > "$TMP_C9/.tdd/second-opinion-completed.md" <<EOF
+date: $(date -u +%FT%TZ)
+diff_sha256: deadbeef0000000000000000000000000000000000000000000000000000beef
+plan_sha256: deadbeef0000000000000000000000000000000000000000000000000000beef
+adjudicated_by: claude
+EOF
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_C9" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-c9: strict mode auto-promotes hash binding (flag=false treated as true)"
+else
+  fail "v161-c9: strict + flag=false should still enforce hash binding (got: '$out'; CURRENTLY ALLOWS STALE-REVIEW)"
+fi
+rm -rf "$TMP_C9"
+
+# AC 6.3 regression: warn mode + flag=false → unchanged (no hash check fires).
+TMP_C9W=$(mktemp -d)
+git init -q "$TMP_C9W"
+( cd "$TMP_C9W" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_C9W/.tdd" "$TMP_C9W/internal/auth"
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_C9W/.tdd/"
+jq '.enforcement_mode_overrides."require-second-opinion" = "warn" | .second_opinion.require_hash_binding_tier1 = false' \
+  "$TMP_C9W/.tdd/tdd-config.json" > /tmp/v161.json && mv /tmp/v161.json "$TMP_C9W/.tdd/tdd-config.json"
+echo "package auth" > "$TMP_C9W/internal/auth/handler.go"
+( cd "$TMP_C9W" && git add . && git commit -q -m initial )
+echo "// edit" >> "$TMP_C9W/internal/auth/handler.go"
+( cd "$TMP_C9W" && git add internal/auth/handler.go )
+gh_write_plan_full "$TMP_C9W"
+cat > "$TMP_C9W/.tdd/second-opinion-completed.md" <<EOF
+date: $(date -u +%FT%TZ)
+adjudicated_by: claude
+EOF
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_C9W" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "v161-c9: warn + flag=false → unchanged (regression preserved)"
+else
+  fail "v161-c9: warn mode should not auto-promote (got: '$out')"
+fi
+rm -rf "$TMP_C9W"
+
+# AC 7.1: contract invariants (cross-hook).
+
+# Invariant 1: every commit-time gate references commit-time marker semantics
+# (either reads from required_markers_commit_time OR contains "Implementation reviewed").
+v161_c14_failures=()
+for hook in .claude/hooks/gate-tier1-commit.sh scripts/git-hooks/pre-commit; do
+  full="$PROJECT_ROOT/$hook"
+  if grep -q "required_markers_commit_time\|Implementation reviewed: yes" "$full"; then
+    : # ok
+  else
+    v161_c14_failures+=("$hook missing commit-time marker awareness")
+  fi
+done
+if [ ${#v161_c14_failures[@]} -eq 0 ]; then
+  pass "v161-c14: all commit-time gates reference commit-time markers (Implementation reviewed: yes)"
+else
+  fail "v161-c14: ${v161_c14_failures[*]}"
+fi
+
+# Invariant 2: every commit-time gate references green-proof.
+v161_c14_failures=()
+for hook in .claude/hooks/gate-tier1-commit.sh scripts/git-hooks/pre-commit; do
+  full="$PROJECT_ROOT/$hook"
+  grep -q 'green-proof\|GREEN_PROOF' "$full" || v161_c14_failures+=("$hook missing green-proof reference")
+done
+if [ ${#v161_c14_failures[@]} -eq 0 ]; then
+  pass "v161-c14: all commit-time gates reference green-proof.md"
+else
+  fail "v161-c14: ${v161_c14_failures[*]}"
+fi
+
+# Invariant 3: no production hook hardcodes pre-migration M3 name OUTSIDE
+# legitimate uses. Approved categories:
+#   - scripts/migrate-tdd-markers.sh (renames the marker by definition)
+#   - scripts/tdd-test-hooks.sh (this file — contains test fixtures
+#     that intentionally use the old name to exercise alias handling,
+#     and contains the very grep below that names the string)
+#   - shell comment lines (lead with optional whitespace + `#`):
+#     documenting the alias relationship is fine, only enforcement code
+#     hardcoding the old name is the bug.
+v161_c14_offenders=()
+while IFS= read -r line; do
+  file="${line%%:*}"
+  rest="${line#*:}"
+  ln="${rest%%:*}"
+  body="${rest#*:}"
+  # Approved files
+  case "$file" in
+    *migrate-tdd-markers.sh) continue ;;
+    *tdd-test-hooks.sh) continue ;;
+  esac
+  # Comment lines are legitimate (alias documentation, not enforcement).
+  if printf '%s' "$body" | grep -qE '^[[:space:]]*#'; then
+    continue
+  fi
+  v161_c14_offenders+=("$file:$ln")
+done < <(grep -RnF "Human approved implementation: yes" "$PROJECT_ROOT/.claude/hooks/" "$PROJECT_ROOT/scripts/" 2>/dev/null || true)
+if [ ${#v161_c14_offenders[@]} -eq 0 ]; then
+  pass "v161-c14: no production hook hardcodes pre-migration M3 name (config-driven)"
+else
+  fail "v161-c14: hardcoded old M3 in: ${v161_c14_offenders[*]}"
+fi
+
+# Invariant 4: trivial filter ordering — Tier 1 regex check before
+# trivial-path filter in each gate. Detect via line-number comparison:
+# the line containing `tier1_path_regexes` lookup must precede the
+# line containing the trivial case statement.
+v161_c14_order_failures=()
+for hook in .claude/hooks/gate-tier1-commit.sh scripts/git-hooks/pre-commit; do
+  full="$PROJECT_ROOT/$hook"
+  # Find the line where Tier 1 regex evaluation happens (TIER1_PROD+= or
+  # equivalent) and where the trivial filter case statement sits.
+  tier1_line=$(grep -n "TIER1_PROD+=" "$full" 2>/dev/null | head -1 | cut -d: -f1)
+  trivial_line=$(grep -n "\*/\.tdd/\*|\*/\.claude/\*|\*\.md|" "$full" 2>/dev/null | head -1 | cut -d: -f1)
+  if [ -z "$tier1_line" ] || [ -z "$trivial_line" ]; then
+    continue  # Hook structure changed; can't check
+  fi
+  # After the fix: tier1 match line should precede the trivial filter.
+  # Currently the trivial filter precedes (the bug).
+  if [ "$tier1_line" -lt "$trivial_line" ]; then
+    : # OK — Tier 1 first
+  else
+    v161_c14_order_failures+=("$hook: trivial filter at line $trivial_line precedes Tier 1 match at line $tier1_line")
+  fi
+done
+if [ ${#v161_c14_order_failures[@]} -eq 0 ]; then
+  pass "v161-c14: trivial-filter ordering — Tier 1 evaluated before trivial in all gates"
+else
+  fail "v161-c14: trivial-filter ordering violation: ${v161_c14_order_failures[*]}"
+fi
+
+# v1.6.1 round-2 Codex findings (F1 + F2). Both P0 ACCEPT.
+# F1: require-second-opinion.sh must exempt *_test.go before its Tier 1
+# regex check (symmetry with the two commit gates; red-phase contract).
+# F2: classify_commit_mode must scope the candidate set to explicit
+# positional pathspecs when present (not widen to all working-tree
+# changes — that would falsely deny `git commit notes.txt -m msg` when
+# unrelated Tier 1 WIP exists).
+
+# v161-r2-F1: editing a Tier 1 *_test.go file should pass through
+# require-second-opinion.sh without requiring an adjudication.
+TMP_R2F1=$(mktemp -d)
+git init -q "$TMP_R2F1"
+( cd "$TMP_R2F1" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_R2F1/.tdd" "$TMP_R2F1/internal/auth"
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_R2F1/.tdd/"
+echo "package auth" > "$TMP_R2F1/internal/auth/handler.go"
+echo "package auth" > "$TMP_R2F1/internal/auth/handler_test.go"
+( cd "$TMP_R2F1" && git add . && git commit -q -m initial )
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler_test.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R2F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/require-second-opinion.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" != "deny" ]; then
+  pass "v161-r2-F1: require-second-opinion exempts Tier 1 *_test.go edits (red-phase contract)"
+else
+  fail "v161-r2-F1: Tier 1 _test.go edit should not require adjudication (got: $out)"
+fi
+# Negative regression: editing the production handler.go in same dir still denies.
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R2F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/require-second-opinion.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-r2-F1: regression — Tier 1 production .go edit still requires adjudication"
+else
+  fail "v161-r2-F1: production handler.go must still deny (got: $out)"
+fi
+rm -rf "$TMP_R2F1"
+
+# v161-r2-F2: `git commit notes.txt -m msg` with notes.txt staged + unrelated
+# Tier 1 WIP unstaged → ALLOW (only the pathspec'd file lands in the commit).
+TMP_R2F2=$(mktemp -d)
+git init -q "$TMP_R2F2"
+( cd "$TMP_R2F2" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_R2F2/.tdd" "$TMP_R2F2/internal/auth"
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_R2F2/.tdd/"
+echo "package auth" > "$TMP_R2F2/internal/auth/handler.go"
+echo "old" > "$TMP_R2F2/notes.txt"
+( cd "$TMP_R2F2" && git add . && git commit -q -m initial )
+# Stage only notes.txt; modify Tier 1 file unstaged.
+echo "new" > "$TMP_R2F2/notes.txt"
+( cd "$TMP_R2F2" && git add notes.txt )
+echo "// Tier 1 WIP" >> "$TMP_R2F2/internal/auth/handler.go"
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"git commit notes.txt -m msg"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R2F2" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/gate-tier1-commit.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" != "deny" ]; then
+  pass "v161-r2-F2: pathspec commit ignores unrelated Tier 1 WIP (scoped to pathspec)"
+else
+  fail "v161-r2-F2: pathspec'd commit should not deny on unrelated WIP (got: $out)"
+fi
+# Negative regression: pathspec commit OF a Tier 1 file with no ceremony → DENY.
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"git commit internal/auth/handler.go -m msg"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R2F2" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/gate-tier1-commit.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-r2-F2: regression — pathspec commit OF Tier 1 file still denies"
+else
+  fail "v161-r2-F2: Tier 1-pathspec commit must still deny without ceremony (got: $out)"
+fi
+# Negative regression: -am with Tier 1 unstaged WIP STILL denies (C3 closure preserved).
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"git commit -am msg"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R2F2" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/gate-tier1-commit.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-r2-F2: regression — -am with Tier 1 unstaged WIP still denies (C3 preserved)"
+else
+  fail "v161-r2-F2: -am bypass must remain closed (got: $out)"
+fi
+rm -rf "$TMP_R2F2"
+
+# v161-r2-F3 (round 2): `git commit --include notes.txt -m msg` and -i
+# variant. --include / -i ADD the listed pathspecs to the staged set
+# before committing — the commit ships staged + pathspec. If a Tier 1
+# file is already staged, the gate must still see it. (Round-2-F2's
+# pathspec scoping is correct for default/--only modes; --include is
+# additive and needs union(staged, pathspec).)
+TMP_R2F3=$(mktemp -d)
+git init -q "$TMP_R2F3"
+( cd "$TMP_R2F3" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_R2F3/.tdd" "$TMP_R2F3/internal/auth"
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_R2F3/.tdd/"
+echo "package auth" > "$TMP_R2F3/internal/auth/handler.go"
+echo "old" > "$TMP_R2F3/notes.txt"
+( cd "$TMP_R2F3" && git add . && git commit -q -m initial )
+# Stage Tier 1; modify notes.txt unstaged.
+echo "// Tier 1 STAGED" >> "$TMP_R2F3/internal/auth/handler.go"
+( cd "$TMP_R2F3" && git add internal/auth/handler.go )
+echo "new" > "$TMP_R2F3/notes.txt"
+# --include long form
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"git commit --include notes.txt -m msg"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R2F3" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/gate-tier1-commit.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-r2-F3: --include with staged Tier 1 → DENY (closes additive-pathspec bypass)"
+else
+  fail "v161-r2-F3: --include must see already-staged Tier 1 (got: $out)"
+fi
+# -i short form
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"git commit -i notes.txt -m msg"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R2F3" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/gate-tier1-commit.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-r2-F3: -i short form with staged Tier 1 → DENY"
+else
+  fail "v161-r2-F3: -i must see already-staged Tier 1 (got: $out)"
+fi
+# Negative regression: --only must NOT see unrelated staged Tier 1 (only mode REPLACES staged set).
+# Reset, then stage notes.txt + leave Tier 1 modified-unstaged.
+( cd "$TMP_R2F3" && git reset --hard -q HEAD )
+echo "new" > "$TMP_R2F3/notes.txt"; ( cd "$TMP_R2F3" && git add notes.txt )
+echo "// Tier 1 unstaged" >> "$TMP_R2F3/internal/auth/handler.go"
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"git commit --only notes.txt -m msg"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R2F3" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/gate-tier1-commit.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" != "deny" ]; then
+  pass "v161-r2-F3: regression — --only ignores unrelated working-tree changes"
+else
+  fail "v161-r2-F3: --only commits should not deny on unrelated WIP (got: $out)"
+fi
+rm -rf "$TMP_R2F3"
+
+# v161-r3-F1: clustered -iv bypass. The exact-match `-i` in classify_commit_mode
+# catches `-i` / `--include` but not `-iv`, `-im`, etc. in the cluster handler.
+# A staged Tier 1 file commit via `git commit -iv notes.txt -m msg` must still
+# be detected (commit ships staged ∪ notes.txt because of the -i in the cluster).
+TMP_R3F1=$(mktemp -d)
+git init -q "$TMP_R3F1"
+( cd "$TMP_R3F1" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_R3F1/.tdd" "$TMP_R3F1/internal/auth"
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_R3F1/.tdd/"
+echo "package auth" > "$TMP_R3F1/internal/auth/handler.go"
+echo "old" > "$TMP_R3F1/notes.txt"
+( cd "$TMP_R3F1" && git add . && git commit -q -m initial )
+echo "// Tier 1 STAGED" >> "$TMP_R3F1/internal/auth/handler.go"
+( cd "$TMP_R3F1" && git add internal/auth/handler.go )
+echo "new" > "$TMP_R3F1/notes.txt"
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"git commit -iv notes.txt -m msg"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R3F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/gate-tier1-commit.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-r3-F1: -iv cluster includes -i semantics; staged Tier 1 still detected"
+else
+  fail "v161-r3-F1: -iv cluster must see staged Tier 1 (got: $out)"
+fi
+rm -rf "$TMP_R3F1"
+
+# v161-r3-F2: size-threshold still widens for explicit pathspec commits.
+# `git commit notes.txt -m msg` with large unrelated WIP must NOT trigger
+# the size-threshold deny — the WIP doesn't land in the commit.
+TMP_R3F2=$(mktemp -d)
+git init -q "$TMP_R3F2"
+( cd "$TMP_R3F2" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_R3F2/.tdd"
+# Lower the size threshold so a small WIP is enough to trip it.
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_R3F2/.tdd/"
+jq '.second_opinion.size_threshold_lines = 5' \
+  "$TMP_R3F2/.tdd/tdd-config.json" > "$TMP_R3F2/.tdd/tdd-config.json.tmp" && \
+  mv "$TMP_R3F2/.tdd/tdd-config.json.tmp" "$TMP_R3F2/.tdd/tdd-config.json"
+echo "old" > "$TMP_R3F2/notes.txt"
+echo "package small" > "$TMP_R3F2/small.go"
+( cd "$TMP_R3F2" && git add . && git commit -q -m initial )
+# Stage notes.txt (small, single line). Add LARGE unrelated unstaged WIP
+# (50 lines to small.go) — should NOT count toward CHURN of the
+# `git commit notes.txt` because notes.txt is the only thing committed.
+echo "new" > "$TMP_R3F2/notes.txt"
+( cd "$TMP_R3F2" && git add notes.txt )
+for i in $(seq 1 50); do echo "// line $i" >> "$TMP_R3F2/small.go"; done
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"git commit notes.txt -m msg"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R3F2" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/gate-tier1-commit.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" != "deny" ]; then
+  pass "v161-r3-F2: size threshold scoped to pathspec; unrelated WIP doesn't count"
+else
+  fail "v161-r3-F2: size threshold must scope CHURN to pathspec set (got: $out)"
+fi
+rm -rf "$TMP_R3F2"
+
+# v161-r4-F1: bare `--` with no subsequent pathspecs must NOT enter
+# pathspec mode (commits the index only; no working-tree intent).
+TMP_R4F1=$(mktemp -d)
+git init -q "$TMP_R4F1"
+( cd "$TMP_R4F1" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_R4F1/.tdd" "$TMP_R4F1/internal/auth"
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_R4F1/.tdd/"
+echo "package auth" > "$TMP_R4F1/internal/auth/handler.go"
+echo "x" > "$TMP_R4F1/notes.txt"
+( cd "$TMP_R4F1" && git add . && git commit -q -m initial )
+echo "y" > "$TMP_R4F1/notes.txt"
+( cd "$TMP_R4F1" && git add notes.txt )
+echo "// Tier 1 unstaged" >> "$TMP_R4F1/internal/auth/handler.go"
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"git commit -m msg --"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R4F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/gate-tier1-commit.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" != "deny" ]; then
+  pass "v161-r4-F1: bare -- (no pathspecs) treated as PLAIN; unrelated WIP ignored"
+else
+  fail "v161-r4-F1: bare -- with no pathspecs must not widen to working tree (got: $out)"
+fi
+# Negative regression: `--` followed by an actual path STILL enters pathspec mode.
+( cd "$TMP_R4F1" && git reset --hard -q HEAD )
+echo "y" > "$TMP_R4F1/notes.txt"
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"git commit -m msg -- internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R4F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/gate-tier1-commit.sh" 2>/dev/null 2>&1)
+echo "// Tier 1 staged" >> "$TMP_R4F1/internal/auth/handler.go"
+( cd "$TMP_R4F1" && git add internal/auth/handler.go )
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"git commit -m msg -- internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R4F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/gate-tier1-commit.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-r4-F1: regression — -- followed by Tier 1 path still pathspec mode + denies"
+else
+  fail "v161-r4-F1: -- with Tier 1 pathspec must still deny (got: $out)"
+fi
+rm -rf "$TMP_R4F1"
+
+# v161-r4-F2: strict + flag-auto-promote requires a sha256 tool. With
+# neither sha256sum NOR shasum on PATH, the hook must DENY (not silently
+# allow). Mirror of scripts/git-hooks/pre-commit's existing guard.
+v161_invoke_no_sha() {
+  local hook_name="$1" target_dir="$2" json_input="$3"
+  local pathdir; pathdir=$(mktemp -d)
+  local tool src
+  for tool in bash jq git awk grep sed head cat find date mktemp printf ls cut tr wc rm; do
+    src=$(command -v "$tool" 2>/dev/null) || continue
+    ln -s "$src" "$pathdir/$tool" 2>/dev/null || true
+  done
+  local rc=0
+  printf '%s' "$json_input" | env -i \
+    PATH="$pathdir" \
+    HOME="${HOME:-/tmp}" \
+    CLAUDE_PROJECT_DIR="$target_dir" \
+    bash "$PROJECT_ROOT/.claude/hooks/$hook_name" >/dev/null 2>&1 || rc=$?
+  rm -rf "$pathdir"
+  echo "$rc"
+}
+TMP_R4F2=$(v161_setup with_adj)
+rc=$(v161_invoke_no_sha require-second-opinion.sh "$TMP_R4F2" \
+  '{"tool_name":"Edit","tool_input":{"file_path":"internal/auth/handler.go"}}')
+if [ "$rc" -ne 0 ]; then
+  pass "v161-r4-F2: strict + missing sha256sum/shasum → deny (cross-hook parity with pre-commit)"
+else
+  fail "v161-r4-F2: missing sha256 tool in strict must deny (rc=$rc)"
+fi
+rm -rf "$TMP_R4F2"
+
+# v161-r5-F1: shell metachars INSIDE quoted commit message must NOT
+# flip UNCERTAIN. Issue tags like `[ABC-123]` are common in commit
+# messages and should not widen the candidate set.
+TMP_R5F1=$(mktemp -d)
+git init -q "$TMP_R5F1"
+( cd "$TMP_R5F1" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_R5F1/.tdd" "$TMP_R5F1/internal/auth"
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_R5F1/.tdd/"
+echo "package auth" > "$TMP_R5F1/internal/auth/handler.go"
+echo "x" > "$TMP_R5F1/notes.txt"
+( cd "$TMP_R5F1" && git add . && git commit -q -m initial )
+echo "y" > "$TMP_R5F1/notes.txt"; ( cd "$TMP_R5F1" && git add notes.txt )
+echo "// Tier 1 unstaged" >> "$TMP_R5F1/internal/auth/handler.go"
+# `[` inside double-quoted message text. Plain commit, only notes.txt staged.
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"git commit -m \"[ABC-123] notes\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R5F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/gate-tier1-commit.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" != "deny" ]; then
+  pass "v161-r5-F1: bracket in quoted message keeps PLAIN mode (no false UNCERTAIN)"
+else
+  fail "v161-r5-F1: quoted [ABC-123] message must not widen to working tree (got: $out)"
+fi
+# Same with single quotes (single-quoted region disables ALL expansion).
+out=$(echo "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git commit -m '\$VAR is literal'\"}}" \
+  | CLAUDE_PROJECT_DIR="$TMP_R5F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/gate-tier1-commit.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" != "deny" ]; then
+  pass "v161-r5-F1: \$VAR in single-quoted message stays PLAIN (no expansion possible)"
+else
+  fail "v161-r5-F1: single-quoted \$VAR message must not widen (got: $out)"
+fi
+# Negative regression: UNQUOTED metachars (real glob risk) STILL flip UNCERTAIN.
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"git commit notes-*.txt -m msg"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R5F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/gate-tier1-commit.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-r5-F1: regression — unquoted glob still flips UNCERTAIN + denies"
+else
+  fail "v161-r5-F1: unquoted glob must still UNCERTAIN-widen (got: $out)"
+fi
+# Negative regression: \$VAR in double-quoted message DOES flip UNCERTAIN
+# (double quotes don't disable variable expansion; the actual expansion
+# is shell-context-dependent so fail-closed is correct).
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"git commit -m \"msg with $VAR\""}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R5F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/gate-tier1-commit.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-r5-F1: regression — \$VAR in double-quoted message still flips UNCERTAIN"
+else
+  fail "v161-r5-F1: \$VAR in double-quoted message must still UNCERTAIN (got: $out)"
+fi
+rm -rf "$TMP_R5F1"
+
+# v161-r6-F1: require-second-opinion.sh hash binding for Bash git-commit
+# must use the diff source that matches the commit mode. For
+# `git commit -am`, the diff is `git diff HEAD` (cached + tracked WIP),
+# not just `git diff HEAD --cached`. Otherwise a stale adjudication
+# bound to the cached diff allows the -am to sweep in unstaged changes
+# that were never reviewed.
+TMP_R6F1=$(mktemp -d)
+git init -q "$TMP_R6F1"
+( cd "$TMP_R6F1" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_R6F1/.tdd" "$TMP_R6F1/internal/auth"
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_R6F1/.tdd/"
+echo "package auth" > "$TMP_R6F1/internal/auth/handler.go"
+( cd "$TMP_R6F1" && git add . && git commit -q -m initial )
+# Plan + adjudication with hash bound to CURRENT empty-cached state.
+cat > "$TMP_R6F1/.tdd/current-plan.md" <<'EOF'
+Bug reproduced: yes
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: yes
+Implementation reviewed: yes
+EOF
+cached_sha=$(cd "$TMP_R6F1" && git diff HEAD --cached 2>/dev/null | sha256sum | awk '{print $1}')
+plan_sha=$(sha256sum "$TMP_R6F1/.tdd/current-plan.md" | awk '{print $1}')
+cat > "$TMP_R6F1/.tdd/second-opinion-completed.md" <<EOF
+date: $(date -u +%FT%TZ)
+adjudicated_by: claude
+diff_sha256: $cached_sha
+plan_sha256: $plan_sha
+EOF
+# Now modify Tier 1 unstaged. cached is unchanged; -am would sweep this in.
+echo "// Tier 1 WIP, NOT in adjudication" >> "$TMP_R6F1/internal/auth/handler.go"
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"git commit -am msg"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R6F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/require-second-opinion.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-r6-F1: -am hash binding uses diff HEAD, catches unreviewed WIP"
+else
+  fail "v161-r6-F1: -am must hash diff HEAD (cached+WIP), not cached only (got: $out)"
+fi
+rm -rf "$TMP_R6F1"
+
+# v161-r6-F2: ALL mode (`git commit -am`) candidate set must NOT include
+# untracked files. -a stages tracked modifications only; untracked
+# files are not committed. Including them produces false denials when
+# unrelated untracked Tier 1 files exist.
+TMP_R6F2=$(mktemp -d)
+git init -q "$TMP_R6F2"
+( cd "$TMP_R6F2" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_R6F2/.tdd" "$TMP_R6F2/internal/auth"
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_R6F2/.tdd/"
+echo "package safe" > "$TMP_R6F2/notes.txt"
+( cd "$TMP_R6F2" && git add . && git commit -q -m initial )
+# Modify a tracked non-Tier-1 file (will be swept by -a). Add an untracked
+# Tier 1 file (must NOT be in candidate set for -a).
+echo "more notes" >> "$TMP_R6F2/notes.txt"
+echo "package auth" > "$TMP_R6F2/internal/auth/handler.go"  # untracked
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"git commit -am msg"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R6F2" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/gate-tier1-commit.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" != "deny" ]; then
+  pass "v161-r6-F2: -am ignores untracked files (only tracked-modified land in commit)"
+else
+  fail "v161-r6-F2: -am must not deny on unrelated untracked Tier 1 files (got: $out)"
+fi
+rm -rf "$TMP_R6F2"
+
+# v161-r7-F1: --include + UNCERTAIN must fall through to wide hash, not
+# the scoped INCLUDE branch (otherwise shell expansion can introduce
+# files invisible to the bound hash).
+TMP_R7F1=$(mktemp -d)
+git init -q "$TMP_R7F1"
+( cd "$TMP_R7F1" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_R7F1/.tdd" "$TMP_R7F1/internal/auth"
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_R7F1/.tdd/"
+echo "package auth" > "$TMP_R7F1/internal/auth/handler.go"
+echo "old" > "$TMP_R7F1/notes.txt"
+( cd "$TMP_R7F1" && git add . && git commit -q -m initial )
+cat > "$TMP_R7F1/.tdd/current-plan.md" <<'EOF'
+Bug reproduced: yes
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: yes
+Implementation reviewed: yes
+EOF
+# Hash bound to current state.
+diff_sha=$(cd "$TMP_R7F1" && git diff HEAD --cached 2>/dev/null | sha256sum | awk '{print $1}')
+plan_sha=$(sha256sum "$TMP_R7F1/.tdd/current-plan.md" | awk '{print $1}')
+cat > "$TMP_R7F1/.tdd/second-opinion-completed.md" <<EOF
+date: $(date -u +%FT%TZ)
+adjudicated_by: claude
+diff_sha256: $diff_sha
+plan_sha256: $plan_sha
+EOF
+# Modify Tier 1 (would be swept by shell-expanded include of additional pathspecs).
+echo "// Tier 1 WIP" >> "$TMP_R7F1/internal/auth/handler.go"
+# Command: `git commit --include notes.txt $EXTRA -m msg` — `$EXTRA`
+# triggers UNCERTAIN; INCLUDE branch must NOT take the narrow scope.
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"git commit --include notes.txt $EXTRA -m msg"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R7F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/require-second-opinion.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-r7-F1: --include + UNCERTAIN falls through to wide hash (catches Tier 1 WIP)"
+else
+  fail "v161-r7-F1: --include + UNCERTAIN must use wide hash, not scoped (got: $out)"
+fi
+rm -rf "$TMP_R7F1"
+
+# v161-r7-F2: `git -C <repo> commit -am msg` and `git -c k=v commit ...`
+# must be recognized as git-commit (not allowed past the mutating check).
+TMP_R7F2=$(mktemp -d)
+git init -q "$TMP_R7F2"
+( cd "$TMP_R7F2" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_R7F2/.tdd" "$TMP_R7F2/internal/auth"
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_R7F2/.tdd/"
+echo "package auth" > "$TMP_R7F2/internal/auth/handler.go"
+( cd "$TMP_R7F2" && git add . && git commit -q -m initial )
+cat > "$TMP_R7F2/.tdd/current-plan.md" <<'EOF'
+Bug reproduced: yes
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: yes
+Implementation reviewed: yes
+EOF
+diff_sha=$(cd "$TMP_R7F2" && git diff HEAD --cached 2>/dev/null | sha256sum | awk '{print $1}')
+plan_sha=$(sha256sum "$TMP_R7F2/.tdd/current-plan.md" | awk '{print $1}')
+cat > "$TMP_R7F2/.tdd/second-opinion-completed.md" <<EOF
+date: $(date -u +%FT%TZ)
+adjudicated_by: claude
+diff_sha256: $diff_sha
+plan_sha256: $plan_sha
+EOF
+echo "// Tier 1 WIP" >> "$TMP_R7F2/internal/auth/handler.go"
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"git -C . commit -am msg"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R7F2" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/require-second-opinion.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-r7-F2: git -C <repo> commit -am still detected as git-commit"
+else
+  fail "v161-r7-F2: git -C ... commit -am must trigger candidate-set + hash binding (got: $out)"
+fi
+rm -rf "$TMP_R7F2"
+
+# v161-r8-F1: redirect-write whose CONTENT mentions "git" and "commit"
+# must not be misclassified as a git-commit. With the loose regex,
+# `echo git commit > internal/auth/handler.go` was routed to the
+# git-commit candidate-set path; the candidate set was empty (no
+# `commit` parser context in the redirected echo) so paths became
+# "(no-commit-candidates)" → is_tier1 false → silent allow even with
+# NO adjudication. Token-aware matches_git_commit() must reject this.
+TMP_R8F1=$(mktemp -d)
+git init -q "$TMP_R8F1"
+( cd "$TMP_R8F1" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_R8F1/.tdd" "$TMP_R8F1/internal/auth"
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_R8F1/.tdd/"
+echo "package auth" > "$TMP_R8F1/internal/auth/handler.go"
+( cd "$TMP_R8F1" && git add . && git commit -q -m initial )
+# NO adjudication, NO plan markers. Pure mutation gate test.
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"echo git commit > internal/auth/handler.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R8F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/require-second-opinion.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-r8-F1: redirect mentioning 'git commit' in content not misclassified as commit"
+else
+  fail "v161-r8-F1: redirect to Tier 1 file must still deny via mutation gate (got: $out)"
+fi
+# Negative regression: a real `git commit -am msg` command is still
+# detected and routed to the commit-mode handling.
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"echo > /dev/null; git commit -am msg"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R8F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/require-second-opinion.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-r8-F1: regression — real 'git commit' after another command still detected"
+else
+  fail "v161-r8-F1: real chained git-commit must still deny without adj (got: $out)"
+fi
+rm -rf "$TMP_R8F1"
+
+# v161-r9-F1: compound `git add <tier1> && git commit -m msg` must
+# NOT be classified as PLAIN (which would see empty cached at hook
+# time). The git-add precedes the commit in the same bash command;
+# the gate fires before either runs, so cached is still empty and
+# the Tier 1 file lands silently. classify_commit_mode must flip to
+# UNCERTAIN when an index-mutating git subcommand precedes the commit.
+TMP_R9F1=$(mktemp -d)
+git init -q "$TMP_R9F1"
+( cd "$TMP_R9F1" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_R9F1/.tdd" "$TMP_R9F1/internal/auth"
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_R9F1/.tdd/"
+echo "package auth" > "$TMP_R9F1/internal/auth/handler.go"
+( cd "$TMP_R9F1" && git add . && git commit -q -m initial )
+echo "// Tier 1 unstaged" >> "$TMP_R9F1/internal/auth/handler.go"
+# gate-tier1-commit.sh side: no plan → must deny.
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"git add internal/auth/handler.go && git commit -m msg"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R9F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/gate-tier1-commit.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-r9-F1: gate denies compound 'git add <tier1> && git commit'"
+else
+  fail "v161-r9-F1: gate-tier1-commit must catch git-add-then-commit pattern (got: $out)"
+fi
+# require-second-opinion.sh side: no adj → must deny.
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"git add internal/auth/handler.go && git commit -m msg"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R9F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/require-second-opinion.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-r9-F1: require-second-opinion denies compound git-add-then-commit"
+else
+  fail "v161-r9-F1: require-second-opinion must catch git-add-then-commit (got: $out)"
+fi
+# Negative regression: a benign chain like `pwd && git commit -m msg`
+# (no index mutation in the chain) keeps PLAIN behavior. With NO Tier 1
+# WIP, this should not deny.
+( cd "$TMP_R9F1" && git checkout -q -- internal/auth/handler.go )
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"pwd && git commit -m msg"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R9F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/gate-tier1-commit.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" != "deny" ]; then
+  pass "v161-r9-F1: regression — benign chain (no index mutation) stays PLAIN"
+else
+  fail "v161-r9-F1: pwd && git commit (no Tier 1) must not deny (got: $out)"
+fi
+rm -rf "$TMP_R9F1"
+
+# v161-r10-F1: shell redirect to a Tier 1 file BEFORE git commit must
+# trigger Tier 1 enforcement. Round-9 fix caught `git add` chains;
+# this catches `printf x > tier1.go && git commit -am msg` where the
+# redirect hasn't run yet at hook fire time, but will mutate the Tier
+# 1 file before the commit picks it up.
+TMP_R10F1=$(mktemp -d)
+git init -q "$TMP_R10F1"
+( cd "$TMP_R10F1" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_R10F1/.tdd" "$TMP_R10F1/internal/auth"
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_R10F1/.tdd/"
+echo "package auth" > "$TMP_R10F1/internal/auth/handler.go"
+( cd "$TMP_R10F1" && git add . && git commit -q -m initial )
+# gate-tier1-commit.sh: no plan → must deny.
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"printf x > internal/auth/handler.go && git commit -am msg"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R10F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/gate-tier1-commit.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-r10-F1: gate denies redirect-to-Tier1 + git commit chain"
+else
+  fail "v161-r10-F1: gate must catch printf > tier1.go && git commit (got: $out)"
+fi
+# require-second-opinion.sh: no adj → must deny.
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"printf x > internal/auth/handler.go && git commit -am msg"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R10F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/require-second-opinion.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-r10-F1: require-second-opinion denies redirect-to-Tier1 + git commit"
+else
+  fail "v161-r10-F1: require-second-opinion must see redirect target (got: $out)"
+fi
+rm -rf "$TMP_R10F1"
+
+# v161-r11-F1: redirect-and-commit with FRESH adjudication still must
+# deny. Hash binding compares pre-command state; a `printf x > tier1.go
+# && git commit -am msg` writes unreviewed content AFTER the hook
+# checks the hash. The pattern is structurally unsafe — the operator
+# must split the mutation and the commit into separate tool calls so
+# the actual content can be reviewed.
+TMP_R11F1=$(mktemp -d)
+git init -q "$TMP_R11F1"
+( cd "$TMP_R11F1" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_R11F1/.tdd" "$TMP_R11F1/internal/auth"
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_R11F1/.tdd/"
+echo "package auth" > "$TMP_R11F1/internal/auth/handler.go"
+( cd "$TMP_R11F1" && git add . && git commit -q -m initial )
+cat > "$TMP_R11F1/.tdd/current-plan.md" <<'EOF'
+Bug reproduced: yes
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: yes
+Implementation reviewed: yes
+EOF
+diff_sha=$(cd "$TMP_R11F1" && git diff HEAD --cached 2>/dev/null | sha256sum | awk '{print $1}')
+plan_sha=$(sha256sum "$TMP_R11F1/.tdd/current-plan.md" | awk '{print $1}')
+cat > "$TMP_R11F1/.tdd/second-opinion-completed.md" <<EOF
+date: $(date -u +%FT%TZ)
+adjudicated_by: claude
+diff_sha256: $diff_sha
+plan_sha256: $plan_sha
+EOF
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"printf x > internal/auth/handler.go && git commit -am msg"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R11F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/require-second-opinion.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-r11-F1: redirect-and-commit denied even with fresh adj (force split)"
+else
+  fail "v161-r11-F1: redirect-to-Tier1 + commit must deny regardless of adj (got: $out)"
+fi
+# Negative regression: redirect to NON-Tier-1 file inside commit chain → allow.
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"printf x > /tmp/safe.txt && git commit -am msg"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R11F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/require-second-opinion.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" != "deny" ]; then
+  pass "v161-r11-F1: regression — redirect to non-Tier-1 inside chain still allowed"
+else
+  fail "v161-r11-F1: non-Tier-1 redirect should not deny (got: $out)"
+fi
+rm -rf "$TMP_R11F1"
+
+# v161-r12-F1: alias-defined commit. `git -c alias.ci='commit -a' ci`
+# tokenises so the literal `commit` token never appears in argv — the
+# alias value is a string literal in -c. classify_commit_mode never
+# enters its scanning loop, falls back to PLAIN, and the cached-only
+# candidate set misses what `commit -a` will sweep in. Fail closed
+# UNCERTAIN whenever a commit-injecting alias is present.
+TMP_R12F1=$(mktemp -d)
+git init -q "$TMP_R12F1"
+( cd "$TMP_R12F1" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_R12F1/.tdd" "$TMP_R12F1/internal/auth"
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_R12F1/.tdd/"
+echo "package auth" > "$TMP_R12F1/internal/auth/handler.go"
+echo "old" > "$TMP_R12F1/notes.txt"
+( cd "$TMP_R12F1" && git add . && git commit -q -m initial )
+# Stage non-Tier-1; leave Tier 1 unstaged but tracked.
+echo "new" > "$TMP_R12F1/notes.txt"; ( cd "$TMP_R12F1" && git add notes.txt )
+echo "// Tier 1 WIP" >> "$TMP_R12F1/internal/auth/handler.go"
+out=$(echo "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git -c alias.ci='commit -a' ci -m msg\"}}" \
+  | CLAUDE_PROJECT_DIR="$TMP_R12F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/gate-tier1-commit.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-r12-F1: gate denies alias-defined 'commit -a' (UNCERTAIN fallback)"
+else
+  fail "v161-r12-F1: gate must catch git -c alias.ci='commit -a' ci (got: $out)"
+fi
+out=$(echo "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git -c alias.ci='commit -a' ci -m msg\"}}" \
+  | CLAUDE_PROJECT_DIR="$TMP_R12F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/require-second-opinion.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-r12-F1: require-second-opinion denies alias-defined commit"
+else
+  fail "v161-r12-F1: require-second-opinion must catch alias commit (got: $out)"
+fi
+rm -rf "$TMP_R12F1"
+
+# v161-r13-F1: multiple git commits in one compound command. classify
+# parses only the FIRST commit's args; later `git commit -am sweep`
+# can sweep Tier 1 changes invisibly. Fail closed UNCERTAIN whenever
+# there's more than one `git commit` invocation in the same bash
+# command.
+TMP_R13F1=$(mktemp -d)
+git init -q "$TMP_R13F1"
+( cd "$TMP_R13F1" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_R13F1/.tdd" "$TMP_R13F1/internal/auth"
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_R13F1/.tdd/"
+echo "package auth" > "$TMP_R13F1/internal/auth/handler.go"
+echo "old" > "$TMP_R13F1/notes.txt"
+( cd "$TMP_R13F1" && git add . && git commit -q -m initial )
+echo "new" > "$TMP_R13F1/notes.txt"; ( cd "$TMP_R13F1" && git add notes.txt )
+echo "// Tier 1 unstaged" >> "$TMP_R13F1/internal/auth/handler.go"
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"git commit notes.txt -m ok && git commit -am sweep"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R13F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/gate-tier1-commit.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-r13-F1: gate denies multi-commit compound (UNCERTAIN fallback)"
+else
+  fail "v161-r13-F1: gate must catch second commit in chain (got: $out)"
+fi
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"git commit notes.txt -m ok && git commit -am sweep"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R13F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/require-second-opinion.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-r13-F1: require-second-opinion denies multi-commit compound"
+else
+  fail "v161-r13-F1: require-second-opinion must catch second commit (got: $out)"
+fi
+# Negative regression: single commit with `&&` after it (status check) is fine.
+( cd "$TMP_R13F1" && git checkout -q -- internal/auth/handler.go )
+out=$(echo '{"tool_name":"Bash","tool_input":{"command":"git commit notes.txt -m ok && git status"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R13F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/gate-tier1-commit.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" != "deny" ]; then
+  pass "v161-r13-F1: regression — single commit + git status chain still scoped"
+else
+  fail "v161-r13-F1: single commit + git status must not deny (got: $out)"
+fi
+rm -rf "$TMP_R13F1"
+
+# v161-r14-F1: shared commit-mode lib must be a hard dependency. If
+# it can't be resolved, both hooks must DENY rather than soft-degrade
+# (which lets `git commit -am` through is_bash_mutating's allow path).
+TMP_R14F1=$(mktemp -d)
+mkdir -p "$TMP_R14F1/hooks-only/.claude/hooks"
+# Copy ONLY the hook files; do NOT include scripts/tdd/_lib_commit_mode.sh.
+cp "$PROJECT_ROOT/.claude/hooks/gate-tier1-commit.sh" "$TMP_R14F1/hooks-only/.claude/hooks/"
+cp "$PROJECT_ROOT/.claude/hooks/require-second-opinion.sh" "$TMP_R14F1/hooks-only/.claude/hooks/"
+chmod +x "$TMP_R14F1/hooks-only/.claude/hooks/"*.sh
+# Set up a minimal repo for the hook to find a git context.
+mkdir -p "$TMP_R14F1/repo/.tdd"
+git init -q "$TMP_R14F1/repo"
+( cd "$TMP_R14F1/repo" && git config user.email t@t && git config user.name t )
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_R14F1/repo/.tdd/"
+echo "x" > "$TMP_R14F1/repo/notes.txt"
+( cd "$TMP_R14F1/repo" && git add . && git commit -q -m initial )
+# Run the orphaned hook (no lib reachable). Pass invalid CLAUDE_PLUGIN_ROOT
+# so the third resolution path also fails.
+out=$( ( echo '{"tool_name":"Bash","tool_input":{"command":"git commit -am msg"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R14F1/repo" CLAUDE_PLUGIN_ROOT="$TMP_R14F1/nonexistent" \
+    timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$TMP_R14F1/hooks-only/.claude/hooks/gate-tier1-commit.sh" 2>&1 ); echo "exit:$?")
+if printf '%s' "$out" | grep -q 'BLOCKED.*commit-mode library' \
+   && printf '%s' "$out" | grep -q 'exit:[12]'; then
+  pass "v161-r14-F1: gate denies when shared lib missing (hard dependency)"
+else
+  fail "v161-r14-F1: gate must hard-deny on missing lib (got: '$out')"
+fi
+out=$( ( echo '{"tool_name":"Bash","tool_input":{"command":"git commit -am msg"}}' \
+  | CLAUDE_PROJECT_DIR="$TMP_R14F1/repo" CLAUDE_PLUGIN_ROOT="$TMP_R14F1/nonexistent" \
+    timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$TMP_R14F1/hooks-only/.claude/hooks/require-second-opinion.sh" 2>&1 ); echo "exit:$?")
+if printf '%s' "$out" | grep -q 'BLOCKED.*commit-mode library' \
+   && printf '%s' "$out" | grep -q 'exit:[12]'; then
+  pass "v161-r14-F1: require-second-opinion hard-denies on missing lib"
+else
+  fail "v161-r14-F1: require-second-opinion must hard-deny on missing lib (got: '$out')"
+fi
+rm -rf "$TMP_R14F1"
+
+# v161-r15-F1: in-place editor (sed -i, perl -i, gawk -i inplace)
+# targeting a Tier 1 file alongside a git commit must deny.
+# `git commit notes.txt -m ok && sed -i '...' internal/auth/handler.go`
+# mutates handler.go AFTER the hook runs but BEFORE/AFTER the commit
+# picks it up — either way, the Tier 1 file edit is unreviewed.
+TMP_R15F1=$(mktemp -d)
+git init -q "$TMP_R15F1"
+( cd "$TMP_R15F1" && git config user.email t@t && git config user.name t )
+mkdir -p "$TMP_R15F1/.tdd" "$TMP_R15F1/internal/auth"
+cp "$PROJECT_ROOT/.tdd/tdd-config.json" "$TMP_R15F1/.tdd/"
+echo "package auth" > "$TMP_R15F1/internal/auth/handler.go"
+echo "x" > "$TMP_R15F1/notes.txt"
+( cd "$TMP_R15F1" && git add . && git commit -q -m initial )
+echo "y" > "$TMP_R15F1/notes.txt"; ( cd "$TMP_R15F1" && git add notes.txt )
+# Fresh adjudication so the deny-or-allow signal isolates the sed-i path,
+# not the global missing-adj gate.
+cat > "$TMP_R15F1/.tdd/current-plan.md" <<'EOF'
+Bug reproduced: yes
+Human approved spec: yes
+Red phase confirmed: yes
+Green phase authorized: yes
+Implementation reviewed: yes
+EOF
+diff_sha=$(cd "$TMP_R15F1" && git diff HEAD --cached 2>/dev/null | sha256sum | awk '{print $1}')
+plan_sha=$(sha256sum "$TMP_R15F1/.tdd/current-plan.md" | awk '{print $1}')
+cat > "$TMP_R15F1/.tdd/second-opinion-completed.md" <<EOF
+date: $(date -u +%FT%TZ)
+adjudicated_by: claude
+diff_sha256: $diff_sha
+plan_sha256: $plan_sha
+EOF
+out=$(echo "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git commit notes.txt -m ok && sed -i '1s/^/x/' internal/auth/handler.go\"}}" \
+  | CLAUDE_PROJECT_DIR="$TMP_R15F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/require-second-opinion.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" = "deny" ]; then
+  pass "v161-r15-F1: in-place editor on Tier 1 inside compound commit denied"
+else
+  fail "v161-r15-F1: sed -i tier1.go after commit must deny (got: $out)"
+fi
+# Negative regression: in-place edit of NON-Tier-1 file is fine.
+out=$(echo "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git commit notes.txt -m ok && sed -i '1s/^/x/' /tmp/safe.txt\"}}" \
+  | CLAUDE_PROJECT_DIR="$TMP_R15F1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/.claude/hooks/require-second-opinion.sh" 2>/dev/null \
+  | jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || true)
+if [ "$out" != "deny" ]; then
+  pass "v161-r15-F1: regression — in-place edit of non-Tier-1 file inside chain still allowed"
+else
+  fail "v161-r15-F1: non-Tier-1 in-place edit should not deny (got: $out)"
+fi
+rm -rf "$TMP_R15F1"
+
+echo
 
 echo
 echo "Self-test: timeout wrapper kills a hanging hook within budget..."

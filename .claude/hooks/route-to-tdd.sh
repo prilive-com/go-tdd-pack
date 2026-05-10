@@ -45,7 +45,8 @@ Required Tier 1 cadence:
 The PreToolUse hook blocks Tier 1 production edits until .tdd/current-plan.md has:
   Human approved spec: yes
   Red phase confirmed: yes
-  Human approved implementation: yes
+  Green phase authorized: yes
+(Commit also requires: Implementation reviewed: yes — set after the post-impl review.)
 
 Ignore this notice for: docs, questions, test-only work, or explicitly low-risk changes.
 ROUTER_MSG

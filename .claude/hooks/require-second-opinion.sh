@@ -25,6 +25,41 @@ TDD_CONFIG="${ROOT}/.tdd/tdd-config.json"
 TDD_PLAN="${ROOT}/.tdd/current-plan.md"
 AUDIT="${ROOT}/.tdd/second-opinion-enforcement.log"
 
+# v1.6.1 round-6 F1: source the shared commit-mode classifier so the
+# hash-binding logic below can pick the right diff source for Bash
+# git-commit calls (cached for plain, diff HEAD for -am, scoped pathspec
+# for --only / positional pathspec, union for --include / -i). Without
+# this, hash binding always used `git diff HEAD --cached` and an -am
+# commit could sweep in unstaged Tier 1 WIP not in the recorded hash.
+# Same lib feeds gate-tier1-commit.sh — both layers stay in sync.
+LIB_COMMIT_MODE="$(dirname -- "${BASH_SOURCE[0]}")/../../scripts/tdd/_lib_commit_mode.sh"
+if [[ ! -f "$LIB_COMMIT_MODE" ]]; then
+  _RSO_REAL="$(readlink -f -- "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+  LIB_COMMIT_MODE="$(dirname -- "$_RSO_REAL")/../../scripts/tdd/_lib_commit_mode.sh"
+fi
+if [[ ! -f "$LIB_COMMIT_MODE" ]] && [[ -n "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
+  LIB_COMMIT_MODE="$CLAUDE_PLUGIN_ROOT/scripts/tdd/_lib_commit_mode.sh"
+fi
+# v1.6.1 round-14 F1: HARD dependency. Without the lib, Bash git-commit
+# classification silently degrades and a `git commit -am ...` can pass
+# through is_bash_mutating's allow path. Mirror the jq hard-deny pattern
+# (round 1 / C1+C8): fail closed with an install hint rather than
+# soft-degrade. The earlier `[[ -f ... ]] && .` form was the bypass.
+if [[ ! -f "$LIB_COMMIT_MODE" ]]; then
+  cat >&2 <<HOOK_MSG
+[require-second-opinion] BLOCKED: shared commit-mode library not found.
+Looked for: $LIB_COMMIT_MODE
+
+This file is a hard dependency for safe Bash git-commit classification.
+Either:
+  - Reinstall the plugin (the lib ships at scripts/tdd/_lib_commit_mode.sh)
+  - Set CLAUDE_PLUGIN_ROOT to the plugin's root directory
+HOOK_MSG
+  exit 2
+fi
+# shellcheck source=/dev/null
+. "$LIB_COMMIT_MODE"
+
 mkdir -p "${ROOT}/.tdd" 2>/dev/null
 
 tool=""
@@ -190,17 +225,38 @@ resolve_enforcement_mode() {
 }
 ENFORCEMENT_MODE="$(resolve_enforcement_mode "require-second-opinion" "$TDD_CONFIG")"
 
-# If codex is missing, we cannot enforce the flow. Pass through with audit.
-# (`make doctor` warns the operator separately.)
+# C1 (v1.6.1): codex-missing must NOT bypass the gate. The hook's
+# job is to enforce the presence of a fresh ADJUDICATION ARTIFACT
+# (which may have been written by a prior /second-opinion run when
+# codex was available). codex-missing is a valid local state — the
+# hook continues to the adjudication check below, which fires the
+# enforcement_mode-aware deny() if the artifact is missing/stale.
+# Operators who need to bypass entirely use SECOND_OPINION_DISABLE=1
+# (already handled above).
 if ! command -v codex >/dev/null 2>&1; then
   audit "codex_missing"
-  allow
+  # Continue to artifact enforcement; do NOT allow here.
 fi
 
-# jq is required to parse the input JSON.
+# jq is a hard dependency. Without it we can't parse tool input or
+# the config (which means we can't even resolve enforcement_mode).
+# Fail closed with a clear install hint. This is an environment
+# fault, not a TDD discipline violation, so it bypasses
+# enforcement_mode by design.
 if ! command -v jq >/dev/null 2>&1; then
   audit "jq_missing"
-  allow
+  cat >&2 <<'HOOK_MSG'
+[require-second-opinion] BLOCKED: jq is required for this hook.
+
+Install jq:
+  Debian/Ubuntu: sudo apt-get install jq
+  macOS:         brew install jq
+  Alpine:        apk add jq
+
+Then retry. (This check bypasses enforcement_mode by design — without
+jq we cannot read the config to determine the mode.)
+HOOK_MSG
+  exit 2
 fi
 
 stdin="$(cat)"
@@ -222,11 +278,41 @@ command="$(jq -r '.tool_input.command // empty' <<<"$stdin" 2>/dev/null || echo 
 # Always-allow paths: edits to these never require a second opinion.
 # F13: prefer canonical .tdd/tdd-config.json `trivial_paths` field;
 # fall back to the inline list when config missing/empty OR jq
-# unavailable (no regression for environments without jq). Mirrors
-# the /second-opinion skill's Step 3 filter — single source of truth
-# (require-tdd-state.sh intentionally diverges per cycle f4).
+# unavailable.
+#
+# C4 + A2 (v1.6.1): Tier 1 paths (declared in tier1_path_regexes)
+# are NEVER trivially exempted, regardless of file extension or
+# location. Without this, a Tier 1 .md file like
+# .claude/skills/second-opinion/SKILL.md would be silently allowed
+# by `*.md` in the trivial list — re-opening F4-class governance
+# bugs in this hook (the third location of the bug class).
 is_always_allowed_path() {
   local p="$1"
+  # v1.6.1 round-2 F1: tests are exempt FIRST (red-phase contract).
+  # Symmetric with the two commit gates (gate-tier1-commit.sh,
+  # scripts/git-hooks/pre-commit) which exempt *_test.go before any
+  # Tier 1 check. Without this, editing handler_test.go in a Tier 1
+  # directory denies via the C4/A2 Tier-1-first lookup below — but
+  # the operator must be able to write the failing test before any
+  # adjudication exists. require-tdd-state.sh's phase-aware policy
+  # is the right gate for test edits AFTER red is confirmed.
+  case "$p" in
+    *_test.go) return 0 ;;
+  esac
+  # C4/A2: check Tier 1 FIRST (after the test exemption). Tier 1
+  # paths are never trivially exempted. If the path matches any
+  # tier1_path_regex, it must go through the full check
+  # (returns 1 = not allowed).
+  if [[ -f "$TDD_CONFIG" ]] && command -v jq >/dev/null 2>&1; then
+    local tier1_pat
+    while IFS= read -r tier1_pat; do
+      [[ -z "$tier1_pat" ]] && continue
+      if printf '%s' "$p" | grep -qE "$tier1_pat"; then
+        return 1  # Tier 1 → not trivially allowed
+      fi
+    done < <(jq -r '.tier1_path_regexes[]? // empty' "$TDD_CONFIG" 2>/dev/null)
+  fi
+  # Now check trivial paths (only applies to non-Tier-1 files).
   if [[ -f "$TDD_CONFIG" ]] && command -v jq >/dev/null 2>&1; then
     local config_list_len
     config_list_len="$(jq -r '(.trivial_paths // []) | length' "$TDD_CONFIG" 2>/dev/null || echo 0)"
@@ -397,18 +483,103 @@ case "$tool" in
     if [[ -z "$command" ]]; then
       allow
     fi
-    if ! is_bash_mutating "$command"; then
+    # v1.6.1 round-6 F1: `git commit ...` is mutating (creates a
+    # commit object) but is_bash_mutating doesn't recognize it.
+    # Treat git-commit as a special case BEFORE that check so the
+    # candidate-set + hash-binding path below can fire. Without
+    # this, an `-am` Bash command short-circuits to allow before
+    # any Tier 1 detection or hash binding runs — the stale-cached-
+    # hash bypass round-6 F1 was about.
+    # v1.6.1 round-8 F1: token-aware detection via shared
+    # matches_git_commit() (same logic as gate-tier1-commit.sh's
+    # outer-command matcher). The earlier loose `\bgit\b && \bcommit\b`
+    # regex misclassified `echo git commit > internal/auth/handler.go`
+    # as a commit invocation and skipped is_bash_mutating's redirect-
+    # target detection — a real fail-open found by Codex round 8.
+    is_git_commit=false
+    if declare -F matches_git_commit >/dev/null 2>&1 \
+       && matches_git_commit "$command"; then
+      is_git_commit=true
+    fi
+    if [[ "$is_git_commit" != "true" ]] && ! is_bash_mutating "$command"; then
       allow
     fi
-    # Mutating Bash: try to extract target path for chmod-444 defense.
-    target_from_bash=""
-    if echo "$command" | grep -Eq '>>?[[:space:]]*[^&[:space:]]+'; then
-      target_from_bash="$(echo "$command" | grep -oE '>>?[[:space:]]*[^&[:space:]]+' | head -1 | sed -E 's/^>>?[[:space:]]*//')"
+    if [[ "$is_git_commit" == "true" ]] \
+       && declare -F classify_commit_mode >/dev/null 2>&1; then
+      classify_commit_mode "$command"
+      bash_candidate_set=""
+      # UNCERTAIN preempts the scoped INCLUDE/PATHSPEC branches (round-7 F1).
+      if [[ "$COMMIT_MODE_INCLUDE" == "true" ]] \
+         && [[ ${#COMMIT_PATHSPECS[@]} -gt 0 ]] \
+         && [[ "$COMMIT_MODE_ALL" != "true" ]] \
+         && [[ "$COMMIT_MODE_UNCERTAIN" != "true" ]]; then
+        bash_candidate_set="$(git -C "$ROOT" diff --cached --name-only 2>/dev/null; \
+                              git -C "$ROOT" diff HEAD --name-only -- "${COMMIT_PATHSPECS[@]}" 2>/dev/null; \
+                              git -C "$ROOT" ls-files --others --exclude-standard -- "${COMMIT_PATHSPECS[@]}" 2>/dev/null)"
+      elif [[ "$COMMIT_MODE_PATHSPEC" == "true" ]] \
+           && [[ ${#COMMIT_PATHSPECS[@]} -gt 0 ]] \
+           && [[ "$COMMIT_MODE_ALL" != "true" ]] \
+           && [[ "$COMMIT_MODE_UNCERTAIN" != "true" ]]; then
+        bash_candidate_set="$(git -C "$ROOT" diff HEAD --name-only -- "${COMMIT_PATHSPECS[@]}" 2>/dev/null; \
+                              git -C "$ROOT" ls-files --others --exclude-standard -- "${COMMIT_PATHSPECS[@]}" 2>/dev/null)"
+      elif [[ "$COMMIT_MODE_ALL" == "true" ]]; then
+        # -a / -am: tracked-modified only (no untracked).
+        bash_candidate_set="$(git -C "$ROOT" diff HEAD --name-only 2>/dev/null)"
+      elif [[ "$COMMIT_MODE_PATHSPEC" == "true" || "$COMMIT_MODE_UNCERTAIN" == "true" || "$COMMIT_MODE_INCLUDE" == "true" ]]; then
+        # interactive/patch PATHSPEC, --pathspec-from-file, UNCERTAIN,
+        # or INCLUDE-with-UNCERTAIN/no-pathspecs — fail closed wide.
+        bash_candidate_set="$(git -C "$ROOT" diff HEAD --name-only 2>/dev/null; git -C "$ROOT" ls-files --others --exclude-standard 2>/dev/null)"
+      else
+        bash_candidate_set="$(git -C "$ROOT" diff --cached --name-only 2>/dev/null)"
+      fi
+      paths=()
+      while IFS= read -r _line; do
+        [[ -z "$_line" ]] && continue
+        paths+=("$_line")
+      done <<< "$bash_candidate_set"
+      # v1.6.1 round-10 F1: union shell-redirect targets so a
+      # `printf x > tier1.go && git commit -am msg` is detected even
+      # though the redirect hasn't run yet at hook fire time.
+      if [[ ${#COMMIT_REDIRECT_TARGETS[@]} -gt 0 ]]; then
+        paths+=("${COMMIT_REDIRECT_TARGETS[@]}")
+      fi
+      # v1.6.1 round-11 F1: redirect-and-commit pattern is structurally
+      # unsafe — the redirect content is created AFTER the hook runs,
+      # so hash binding can't catch it. If any redirect target matches
+      # a Tier 1 regex, deny outright with split-into-separate-calls
+      # guidance. (Non-Tier-1 redirects in commit chains are still OK.)
+      if [[ ${#COMMIT_REDIRECT_TARGETS[@]} -gt 0 ]] \
+         && [[ -f "$TDD_CONFIG" ]] \
+         && command -v jq >/dev/null 2>&1; then
+        _r11_tier1_hit=""
+        while IFS= read -r _r11_pat; do
+          [[ -z "$_r11_pat" ]] && continue
+          for _r11_tgt in "${COMMIT_REDIRECT_TARGETS[@]}"; do
+            if printf '%s' "$_r11_tgt" | grep -qE "$_r11_pat"; then
+              _r11_tier1_hit="$_r11_tgt"
+              break 2
+            fi
+          done
+        done < <(jq -r '.tier1_path_regexes[]? // empty' "$TDD_CONFIG" 2>/dev/null)
+        if [[ -n "$_r11_tier1_hit" ]]; then
+          audit "redirect_and_commit_tier1" "{\"target\":\"$_r11_tier1_hit\"}"
+          deny "Compound bash command writes to a Tier 1 file ($_r11_tier1_hit) AND runs git commit. The redirect content is generated AFTER this hook runs, so the second-opinion hash binding cannot review what'll actually land in the commit. Split into separate tool calls: (1) write the file via the Edit tool (which fires the hook with the actual content), (2) commit in a follow-up Bash call." \
+               "redirect_and_commit_tier1" "$_r11_tier1_hit"
+        fi
+      fi
+      [[ ${#paths[@]} -eq 0 ]] && paths=("(no-commit-candidates)")
+    else
+      # Non-commit mutating Bash: try to extract target path for the
+      # chmod-444 defense (as before).
+      target_from_bash=""
+      if echo "$command" | grep -Eq '>>?[[:space:]]*[^&[:space:]]+'; then
+        target_from_bash="$(echo "$command" | grep -oE '>>?[[:space:]]*[^&[:space:]]+' | head -1 | sed -E 's/^>>?[[:space:]]*//')"
+      fi
+      if [[ -z "$target_from_bash" ]]; then
+        target_from_bash="$(echo "$command" | awk '{print $NF}')"
+      fi
+      paths=("${target_from_bash:-(unknown)}")
     fi
-    if [[ -z "$target_from_bash" ]]; then
-      target_from_bash="$(echo "$command" | awk '{print $NF}')"
-    fi
-    paths=("${target_from_bash:-(unknown)}")
     ;;
   *)
     # Other tools (Read, Glob, Grep, etc.) are never blocked.
@@ -465,12 +636,43 @@ fi
 #
 # Default: opt-in via .tdd/tdd-config.json
 #   second_opinion.require_hash_binding_tier1 (default false)
+#
+# C9 (v1.6.1): mode-based auto-promote. If enforcement_mode=strict
+# (per-hook resolved) for require-second-opinion, hash binding is
+# REQUIRED regardless of the flag. Rationale: "strict" + flag=false
+# is internally inconsistent — leaves the stale-review bypass open
+# (run /second-opinion on diff A → modify Tier 1 to diff B → gate
+# accepts fresh artifact). Strict means strict.
 if [[ "$is_tier1" == "true" ]] \
    && [[ "${SECOND_OPINION_HASH_DISABLE:-0}" != "1" ]] \
    && [[ -f "$TDD_CONFIG" ]] \
-   && command -v jq >/dev/null 2>&1 \
-   && command -v sha256sum >/dev/null 2>&1; then
+   && command -v jq >/dev/null 2>&1; then
   hash_flag="$(jq -r '.second_opinion.require_hash_binding_tier1 // false' "$TDD_CONFIG" 2>/dev/null)"
+  # C9 auto-promote: strict mode forces hash binding on regardless of flag.
+  if [[ "$hash_flag" != "true" ]] && [[ "$ENFORCEMENT_MODE" == "strict" ]]; then
+    audit "hash_binding_auto_promoted_for_strict" "{\"mode\":\"strict\"}"
+    hash_flag="true"
+  fi
+  # v1.6.1 round-4 F2: portable sha256 helper. Linux ships sha256sum
+  # (GNU coreutils); macOS ships shasum -a 256. Both produce
+  # `<hex>  <file>` so awk '{print $1}' works on either. Mirror of
+  # scripts/git-hooks/pre-commit's helper. If hash binding is required
+  # (flag on, OR auto-promoted by strict) AND neither tool exists,
+  # DENY rather than silently skip — silent skip on macOS without
+  # sha256sum was the bypass Codex round 4 flagged.
+  _sha256_cmd() {
+    if   command -v sha256sum >/dev/null 2>&1; then sha256sum
+    elif command -v shasum    >/dev/null 2>&1; then shasum -a 256
+    else return 127
+    fi
+  }
+  if [[ "$hash_flag" == "true" ]] \
+     && ! command -v sha256sum >/dev/null 2>&1 \
+     && ! command -v shasum    >/dev/null 2>&1; then
+    audit "hash_binding_no_sha_tool" "{\"strict\":\"$ENFORCEMENT_MODE\"}"
+    deny "Hash binding is required (require_hash_binding_tier1=true, or strict mode auto-promoted) but neither sha256sum nor shasum is available on PATH. Install GNU coreutils (Linux) or BSD shasum (macOS — usually pre-installed). Killswitch: SECOND_OPINION_HASH_DISABLE=1." \
+         "no_sha_tool" "$TARGET"
+  fi
   if [[ "$hash_flag" == "true" ]]; then
     recorded_diff="$(awk '/^diff_sha256:/ {print $2; exit}' "$ADJUDICATION" 2>/dev/null)"
     recorded_plan="$(awk '/^plan_sha256:/ {print $2; exit}' "$ADJUDICATION" 2>/dev/null)"
@@ -485,10 +687,53 @@ if [[ "$is_tier1" == "true" ]] \
       recorded_plan=""
     fi
 
-    current_diff="$(git -C "$ROOT" diff HEAD --cached 2>/dev/null | sha256sum | awk '{print $1}')"
+    # v1.6.1 round-6 F1: pick the diff source based on what the actual
+    # commit will ship. For Edit/Write/MultiEdit (non-commit edits),
+    # cached is correct ("did the staged diff change since review?").
+    # For Bash git-commit, the diff that lands depends on commit mode:
+    #   plain         → cached
+    #   -a / -am      → diff HEAD (cached + tracked WIP, no untracked)
+    #   --include /-i → cached ∪ scoped pathspec working-tree
+    #   --only / pos  → scoped pathspec working-tree
+    # Without this, an -am commit could sweep in unstaged Tier 1
+    # changes whose hash was never bound to the recorded adjudication.
+    # v1.6.1 round-8 F1: same token-aware matches_git_commit() check
+    # as the Bash candidate-set branch above. v1.6.1 round-7 F1:
+    # INCLUDE branch must also check UNCERTAIN — without that guard,
+    # shell expansion in the command
+    # (`git commit --include notes.txt $EXTRA`) could introduce files
+    # invisible to the bound hash.
+    if [[ "$tool" == "Bash" ]] \
+       && [[ -n "${command:-}" ]] \
+       && declare -F classify_commit_mode >/dev/null 2>&1 \
+       && declare -F matches_git_commit >/dev/null 2>&1 \
+       && matches_git_commit "$command"; then
+      classify_commit_mode "$command"
+      if [[ "$COMMIT_MODE_ALL" == "true" ]]; then
+        current_diff="$(git -C "$ROOT" diff HEAD 2>/dev/null | _sha256_cmd | awk '{print $1}')"
+      elif [[ "$COMMIT_MODE_INCLUDE" == "true" ]] \
+           && [[ ${#COMMIT_PATHSPECS[@]} -gt 0 ]] \
+           && [[ "$COMMIT_MODE_UNCERTAIN" != "true" ]]; then
+        current_diff="$( { git -C "$ROOT" diff HEAD --cached 2>/dev/null; \
+                            git -C "$ROOT" diff HEAD -- "${COMMIT_PATHSPECS[@]}" 2>/dev/null; } \
+                          | _sha256_cmd | awk '{print $1}')"
+      elif [[ "$COMMIT_MODE_PATHSPEC" == "true" ]] && [[ ${#COMMIT_PATHSPECS[@]} -gt 0 ]] \
+           && [[ "$COMMIT_MODE_UNCERTAIN" != "true" ]]; then
+        current_diff="$(git -C "$ROOT" diff HEAD -- "${COMMIT_PATHSPECS[@]}" 2>/dev/null \
+                          | _sha256_cmd | awk '{print $1}')"
+      elif [[ "$COMMIT_MODE_UNCERTAIN" == "true" || "$COMMIT_MODE_PATHSPEC" == "true" || "$COMMIT_MODE_INCLUDE" == "true" ]]; then
+        # interactive/patch PATHSPEC, --pathspec-from-file, UNCERTAIN,
+        # or INCLUDE-with-UNCERTAIN/no-pathspecs — fail closed wide.
+        current_diff="$(git -C "$ROOT" diff HEAD 2>/dev/null | _sha256_cmd | awk '{print $1}')"
+      else
+        current_diff="$(git -C "$ROOT" diff HEAD --cached 2>/dev/null | _sha256_cmd | awk '{print $1}')"
+      fi
+    else
+      current_diff="$(git -C "$ROOT" diff HEAD --cached 2>/dev/null | _sha256_cmd | awk '{print $1}')"
+    fi
     current_plan=""
     if [[ -f "$TDD_PLAN" ]]; then
-      current_plan="$(sha256sum "$TDD_PLAN" 2>/dev/null | awk '{print $1}')"
+      current_plan="$(_sha256_cmd < "$TDD_PLAN" 2>/dev/null | awk '{print $1}')"
     fi
 
     # Codex round 1 P1: a forged or stale adjudication can omit ONE hash
