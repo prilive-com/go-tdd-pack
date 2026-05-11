@@ -1,0 +1,44 @@
+/tmp/run-second-opinion-v180.sh: line 198: failing-cmd: command not found
+## Second opinion (scope: Tier 1 (cycle modifies .tdd/tdd-config.json + .claude/hooks/require-tdd-state.sh), model: gpt-5.5)
+
+{
+  "summary": "The AST/audit additions still have governance-grade bypasses: path scoping is not honored reliably, compile-fix scope has an overbroad carve-out, and audit-chain verification tolerates post-chain unchained lines.",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "AST validators ignore --paths for three exception types",
+      "evidence": "mech-sig-prop-check discards parsed flags (`_ = parseFlags`) and iterates every FileDiff; compile-fix-scope-check and schema-predicate-check also iterate all parsed diff files without filtering by a.paths. A batch edit with separate approved per-file exceptions can be denied by the wrong exception's AST check, or validated against unrelated files.",
+      "recommendation": "Filter FileDiffs to the requested --paths before validating, and add a multi-file test with two approved exceptions whose scopes/symbols differ.",
+      "location": "scripts/tdd/ast/validator.go:514"
+    },
+    {
+      "id": "F2",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "Path matching still collides on same basenames",
+      "evidence": "pathMatches accepts any diff path whose suffix is '/' + filepath.Base(target). For target '/tmp/a/x_test.go', diff path 'b/x_test.go' matches even though it is a different file. import-block-check uses this matcher, so same-basename files can be validated against the wrong on-disk source.",
+      "recommendation": "Normalize both diff paths and target paths relative to the project/root path and require exact relative-path equality; only use basename matching when there is exactly one unambiguous candidate.",
+      "location": "scripts/tdd/ast/validator.go:222"
+    },
+    {
+      "id": "F3",
+      "severity": "P0",
+      "category": "security",
+      "title": "compile-fix scope carve-out permits off-scope identifier and literal changes",
+      "evidence": "When a hunk has one scoped-symbol change, any later line without the scoped symbol is accepted if isArgContinuation returns true. isArgContinuation allows IDENT, BasicLit, and punctuation and only rejects open delimiters/keywords, so lines like 'DangerousValue,' or '\"prod\",' can ride along in the same hunk without referencing the approved symbol.",
+      "recommendation": "Limit the carve-out to punctuation-only closers, or prove nesting inside the same scoped call before allowing argument-continuation lines without the scoped symbol.",
+      "location": "scripts/tdd/ast/validator.go:696"
+    },
+    {
+      "id": "F4",
+      "severity": "P0",
+      "category": "security",
+      "title": "Audit verifier treats missing prev_sha as legacy even after the chain has started",
+      "evidence": "Any line without prev_sha is warned and accepted, then prev_line is updated. That is only safe for a pre-v1.8 prefix. A tampered final v1.8 audit line can remove prev_sha and pass verification because there is no subsequent line to force a mismatch.",
+      "recommendation": "Track whether a prev_sha-bearing line has been seen; tolerate missing prev_sha only before the chain starts, and fail closed for missing prev_sha after that point.",
+      "location": "scripts/tdd/verify-audit-chain.sh:50"
+    }
+  ]
+}

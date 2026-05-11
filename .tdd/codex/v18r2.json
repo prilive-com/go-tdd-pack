@@ -1,0 +1,32 @@
+{
+  "summary": "Review found three P0 governance failures: schema predicate fallback can bypass validation, schema AST ignores operators, and import-only AST rejects legitimate import additions.",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P0",
+      "category": "security",
+      "title": "schema_predicate_correction becomes effectively unvalidated when AST is disabled or Go is unavailable",
+      "evidence": "_v18_ast_check returns success for TDD_AST_VALIDATOR_DISABLE=1, missing go, or missing validator.go, and the schema_predicate_correction path only checks old/new names before relying on that AST call. There is no regex pure-rename fallback for this new exception type, so a missing Go binary or AST killswitch allows non-rename test edits that pass the generic v1.7 edit_existing_tests checks.",
+      "recommendation": "For schema_predicate_correction, fail closed when AST is unavailable, or implement an actual regex/token fallback that enforces old-name to new-name only before allowing the exception.",
+      "location": "scripts/tdd/_lib_test_edit_exception.sh:97"
+    },
+    {
+      "id": "F2",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "schema-predicate-check ignores operators and punctuation, allowing non-rename predicate changes",
+      "evidence": "extractTokens records only ast.Ident and ast.BasicLit values, and isPureTokenRename compares only that reduced stream. A change like require.True(t, got.OldField > 0) to require.True(t, got.NewField >= 0) has the same identifiers/literals except the declared rename, so the operator change is accepted even though AC3 requires any other change to reject.",
+      "recommendation": "Compare normalized AST structure or token streams that include operators, delimiters, and selector structure; alternatively reject any line where the raw text is not exactly old text with old_name replaced by new_name plus formatting-only changes.",
+      "location": "scripts/tdd/ast/validator.go:223"
+    },
+    {
+      "id": "F3",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "import-block-check rejects legitimate import additions because it validates against old file line ranges",
+      "evidence": "For files with no imports, added lines are allowed only when l.NewLine <= topRegionEnd, but topOfFileBoundary returns earliestDecl - 1. In a normal diff adding import \"testing\" between package and the first func, the added line's new line number is the first decl's old line, so it is rejected. The same old-range logic also rejects converting a single-line import into an import block because new block lines extend beyond the old import declaration's end line.",
+      "recommendation": "Validate the post-edit file shape for import_only diffs, or explicitly allow added import declarations at the insertion point before the first non-import declaration and during single-import to block-import expansion.",
+      "location": "scripts/tdd/ast/validator.go:365"
+    }
+  ]
+}

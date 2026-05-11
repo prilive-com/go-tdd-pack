@@ -336,7 +336,7 @@ that breaks 12 pre-existing test call sites).
   `APPROVED EXCEPTION E-NNN` reply (or batch `APPROVED EXCEPTIONS
   E-001, E-002` / `APPROVED EXCEPTIONS E-001 through E-003`).
 
-### Three accepted exception types (v1.7.0)
+### Four accepted exception types (v1.8.0)
 
 - `mechanical_signature_propagation` — function/method signature
   widening; co-evolution of test call sites.
@@ -344,9 +344,11 @@ that breaks 12 pre-existing test call sites).
   struct field rename — purely mechanical.
 - `import_only` — adding/removing imports without changing test
   semantics.
-
-`schema_predicate_correction` is intentionally absent in v1.7.0
-(deferred to v1.8.0; high-risk path, gather trial data first).
+- `schema_predicate_correction` — pure rename of a struct field
+  or symbol everywhere it appears in test predicates (e.g.
+  `want.OldField` → `want.NewField`). Requires `--old-name` and
+  `--new-name` flags on the grant helper. AST-validated for
+  rename-only diffs; any other identifier change rejects.
 
 ### Workflow
 
@@ -367,20 +369,53 @@ that breaks 12 pre-existing test call sites).
    pass, denies on validator fail.
 7. Auto-expiry on green-proof.md write (next-green commit).
 
-### Killswitch
+### Killswitches (v1.8.0)
 
-`TEST_EDIT_EXCEPTION_DISABLE=1` env var bypasses the typed-exception
-lookup entirely (hook proceeds to legacy block-or-allow). Documented
-as emergency-only with mandatory commit-message reason.
+| Env var | Effect | When to use |
+|---|---|---|
+| `TEST_EDIT_EXCEPTION_DISABLE=1` | Bypass the entire typed-exception system; hook falls through to legacy boolean. | Emergency-only; document reason in next commit message. |
+| `TDD_AST_VALIDATOR_DISABLE=1` | Skip the AST helper checks; validator runs regex-only with stderr warning. | When `go run` is too slow OR the AST helper has a known false-positive on a legitimate edit. Document in commit. |
 
-### Validator limits (honest)
+If `go` is not installed at all, the validator falls back to
+regex-only with the same stderr warning — no opt-in needed.
+Install Go ≥1.26.2 for stricter governance.
 
-The validator is regex-based. It catches the testify family
-cleanly (require.X / assert.X / Expect()), gomega (with profile
-opt-in), and stdlib `t.Errorf` / `t.Fatal` patterns. It does NOT
-reliably catch weakening expressed via custom helpers without
-operator-declared `assertion_helper_patterns`. AST-level analysis
-deferred to v1.8.0.
+### Per-cycle exception cap (v1.8.0)
+
+`tdd-config.json` `test_file_policy.post_red_mechanical_update.max_per_cycle`
+caps the number of approved exceptions per cycle (default `5`;
+`0` = no cap). Exceeding the cap disables typed exceptions for
+the cycle until either:
+- Cycle is reverted to red phase (gate 2) and re-spec'd, OR
+- `max_per_cycle` is raised in the same commit with documented
+  reason.
+
+### Audit-log integrity (v1.8.0)
+
+Every audit-log line in `.tdd/audit/<cycle-id>.jsonl` carries a
+`prev_sha` field (sha256 of the prior line). The hook calls
+`scripts/tdd/verify-audit-chain.sh <cycle-id>` at typed-exception
+dispatch; chain mismatch fails closed for typed exceptions.
+
+If you need to verify an audit log standalone:
+```bash
+bash scripts/tdd/verify-audit-chain.sh <cycle-id>
+echo $?  # 0 = intact; 1 = tampered; 2 = hard error
+```
+
+### Validator limits (v1.8.0)
+
+The validator now AND-gates regex (v1.7.0) with AST (v1.8.0).
+AST checks are stricter (catches more); regex checks remain as
+defense-in-depth and as the no-Go fallback. Remaining limits:
+
+- AST helper cold-start ~300ms per `go run` invocation. If your
+  workflow is sensitive, `go build scripts/tdd/ast/validator.go`
+  and the hook will pick up the binary in v1.9.
+- `schema_predicate_correction` is line-by-line; multi-line
+  refactors must be split.
+- Sha-chain detects unsophisticated tampering, not a compromised
+  host.
 
 ### Migration from the legacy boolean
 

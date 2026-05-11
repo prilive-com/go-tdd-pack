@@ -30,7 +30,8 @@
     "allow_in_red_phase": true,
     "allow_after_red_confirmed": false,
     "post_red_mechanical_update": {
-      "_doc": "v1.7.0 typed-exception system. Replaces the all-or-nothing boolean above with operator-authorized, mechanically-validated, auditable per-cycle exceptions for post-red test-edit work (e.g., signature widening that breaks 12 pre-existing call sites). Default enabled:false — opt-in for safe rollout.",
+      "_doc": "v1.7.0 typed-exception system, v1.8.0 AST-validated. Replaces the all-or-nothing boolean above with operator-authorized, mechanically-validated, auditable per-cycle exceptions for post-red test-edit work (e.g., signature widening that breaks 12 pre-existing call sites). Default enabled:false — opt-in for safe rollout. v1.8.0 adds: max_per_cycle cap, schema_predicate_correction type (operators add to exception_types), AST helper at scripts/tdd/ast/validator.go (Go ≥1.26.2; falls back to regex when unavailable).",
+    "max_per_cycle": 5,
       "enabled": false,
       "require_operator_approval": true,
       "exception_artifact": ".tdd/exceptions/post-red-test-edits.json",

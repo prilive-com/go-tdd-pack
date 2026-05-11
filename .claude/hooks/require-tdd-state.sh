@@ -267,6 +267,73 @@ if [[ ${#TIER1_TESTS[@]} -gt 0 ]]; then
     if [[ -f "$EXC_ARTIFACT" ]] && [[ -f "$LIB_TYPED_EXC" ]]; then
       # shellcheck source=/dev/null
       . "$LIB_TYPED_EXC"
+
+      # v1.8.0 AC5.3: verify audit-log sha-chain integrity BEFORE
+      # honoring any approved exception. A tampered chain (operator
+      # edited a line, dropped lines, etc.) fails closed for typed
+      # exceptions; legacy boolean path is unaffected so operators
+      # can still recover via the documented bypass procedure.
+      _verify_chain_script="$(dirname -- "${BASH_SOURCE[0]}")/../../scripts/tdd/verify-audit-chain.sh"
+      [[ ! -f "$_verify_chain_script" ]] && [[ -n "${CLAUDE_PLUGIN_ROOT:-}" ]] && \
+        _verify_chain_script="$CLAUDE_PLUGIN_ROOT/scripts/tdd/verify-audit-chain.sh"
+      _audit_chain_cycle="$( { grep -E '^Cycle ID:' "$PLAN" 2>/dev/null || true; } | head -1 | sed -E 's/^Cycle ID:[[:space:]]*//')"
+      if [[ -f "$_verify_chain_script" ]] && [[ -n "$_audit_chain_cycle" ]]; then
+        # v1.8.0 round-4 F1: also require the audit log to EXIST
+        # when approved exceptions are present in the artifact.
+        # verify-audit-chain.sh exits 0 when the log is missing
+        # (vacuously OK), so an operator could `rm` the log to
+        # erase the audit trail while leaving approved exceptions
+        # active. Detect that mismatch here and fail closed.
+        _audit_log_path="$PROJECT_DIR/.tdd/audit/${_audit_chain_cycle}.jsonl"
+        _approved_for_cycle=0
+        if [[ -f "$EXC_ARTIFACT" ]]; then
+          _approved_for_cycle="$(jq -r --arg cid "$_audit_chain_cycle" '
+            [.exceptions[]? | select(.status == "approved") | select(.binding.cycle_id == $cid)] | length
+          ' "$EXC_ARTIFACT" 2>/dev/null || echo 0)"
+          [[ -z "$_approved_for_cycle" ]] && _approved_for_cycle=0
+        fi
+        if [[ "$_approved_for_cycle" -gt 0 ]] && [[ ! -s "$_audit_log_path" ]]; then
+          echo "[require-tdd-state] BLOCKED: audit log missing or empty ($_audit_log_path) but $_approved_for_cycle approved exception(s) exist for cycle '$_audit_chain_cycle'. Audit log was deleted/truncated; typed exceptions disabled until log is regenerated via grant-test-edit-exception.sh." >&2
+          _typed_exc_chain_broken=1
+        fi
+        # v1.8.0 round-6 F1 + round-7 F3: every approved exception
+        # ID for this cycle MUST appear as a `granted` event in the
+        # audit log. Count alone is fooled by mismatched IDs (a log
+        # with grants for E-001 and E-999 looks complete for an
+        # artifact approving E-001 and E-002). Compare SETS.
+        if [[ "$_approved_for_cycle" -gt 0 ]] && [[ -s "$_audit_log_path" ]]; then
+          _missing_grants="$(jq -r --slurpfile arts "$EXC_ARTIFACT" --arg cid "$_audit_chain_cycle" '
+            select(.event == "granted") | select(.cycle_id == $cid) | .exception_id
+          ' "$_audit_log_path" 2>/dev/null \
+            | sort -u \
+            | comm -23 <(jq -r --arg cid "$_audit_chain_cycle" '
+                .exceptions[]? | select(.status == "approved")
+                | select(.binding.cycle_id == $cid)
+                | .id
+              ' "$EXC_ARTIFACT" 2>/dev/null | sort -u) - \
+            | head -3 || true)"
+          if [[ -n "$_missing_grants" ]]; then
+            echo "[require-tdd-state] BLOCKED: audit log missing 'granted' event(s) for approved exception ID(s) [$(printf '%s' "$_missing_grants" | tr '\n' ',' | sed 's/,$//')] in cycle '$_audit_chain_cycle'. Typed exceptions disabled." >&2
+            _typed_exc_chain_broken=1
+          fi
+        fi
+        # Bash 5.2 with `set -e` exits on `x=$(failing-cmd)` even
+        # though POSIX docs say otherwise. Wrap in `if` so the rc
+        # is captured WITHOUT tripping -e.
+        _chain_rc=0
+        if ! _chain_out="$( cd "$PROJECT_DIR" && bash "$_verify_chain_script" "$_audit_chain_cycle" 2>&1)"; then
+          _chain_rc=1
+        fi
+        if [[ "$_chain_rc" -ne 0 ]]; then
+          echo "[require-tdd-state] BLOCKED: audit-log chain integrity check failed for cycle '$_audit_chain_cycle'." >&2
+          echo "$_chain_out" >&2
+          # Continue to legacy block below — fail closed for typed
+          # exceptions by setting a sentinel that prevents the
+          # typed-exception lookup from running.
+          _typed_exc_chain_broken=1
+        fi
+      fi
+
       _current_plan_hash=""
       if command -v sha256sum >/dev/null 2>&1; then
         _current_plan_hash="$(sha256sum < "$PLAN" 2>/dev/null | awk '{print $1}')"
@@ -291,9 +358,31 @@ if [[ ${#TIER1_TESTS[@]} -gt 0 ]]; then
 
       # v1.7.0 round-2 F4: refuse to honor exceptions when current
       # cycle_id or plan_hash CANNOT BE COMPUTED (fail closed).
+      # v1.8.0 AC5.3: a tampered audit chain disables typed exceptions
+      # for the cycle (fail closed via sentinel).
       _typed_exc_matched=true
       if [[ -z "$_current_plan_hash" ]] || [[ -z "$_current_cycle_id" ]]; then
         _typed_exc_matched=false
+      fi
+      if [[ "${_typed_exc_chain_broken:-0}" == "1" ]]; then
+        _typed_exc_matched=false
+      fi
+      # v1.8.0 AC4.2: per-cycle exception count cap. Counts approved
+      # entries in the artifact whose binding.cycle_id matches the
+      # current cycle. If above max_per_cycle (default 5; 0 = no cap),
+      # disable typed exceptions for the rest of the cycle.
+      _max_per_cycle="$(jq -r '.test_file_policy.post_red_mechanical_update.max_per_cycle // 5' "$CONFIG" 2>/dev/null || echo 5)"
+      [[ -z "$_max_per_cycle" ]] && _max_per_cycle=5
+      if [[ "$_max_per_cycle" -gt 0 ]] && [[ -n "$_current_cycle_id" ]]; then
+        _approved_count="$(jq -r --arg cid "$_current_cycle_id" \
+          '[.exceptions[]? | select(.status == "approved") | select(.binding.cycle_id == $cid)] | length' \
+          "$EXC_ARTIFACT" 2>/dev/null || echo 0)"
+        [[ -z "$_approved_count" ]] && _approved_count=0
+        if [[ "$_approved_count" -gt "$_max_per_cycle" ]]; then
+          echo "[require-tdd-state] BLOCKED: max_per_cycle exceeded — $_approved_count approved exceptions for cycle '$_current_cycle_id' (cap: $_max_per_cycle)." >&2
+          echo "[require-tdd-state] Either revert to red phase (return to gate 2 + rewrite spec) OR raise max_per_cycle in .tdd/tdd-config.json with documented reason." >&2
+          _typed_exc_matched=false
+        fi
       fi
 
       # v1.7.0 round-2 F2: per-file exception tracking. Map file →

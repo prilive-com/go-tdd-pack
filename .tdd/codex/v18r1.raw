@@ -1,0 +1,44 @@
+/tmp/run-second-opinion-v180.sh: line 198: failing-cmd: command not found
+## Second opinion (scope: Tier 1 (cycle modifies .tdd/tdd-config.json + .claude/hooks/require-tdd-state.sh), model: gpt-5.5)
+
+{
+  "summary": "The AST layer still has structural bypasses around schema renames, import-only edits, audit-chain writes, and chained assertion helper detection.",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "schema_predicate_correction accepts semantic non-renames",
+      "evidence": "runSchemaPredicateCheck only compares paired lines up to min(len(minus), len(plus)), then isPureRename compares identifier slices only. A change like require.Equal(t, 200, got.Status) -> require.Equal(t, 201, got.Status) has identical identifiers and passes; extra added lines are also ignored.",
+      "recommendation": "Reject unmatched +/- lines, require at least one old_name -> new_name replacement, and compare full parsed expressions after applying only that allowed identifier rename.",
+      "location": "scripts/tdd/ast/validator.go:466"
+    },
+    {
+      "id": "F2",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "import-block leniency permits misplaced import lines",
+      "evidence": "When the on-disk file has no import declarations, import-block-check returns OK without checking hunk position. In that case '+    import \"math\"' inside a function can pass AST, and the regex fallback only sees an import-shaped line.",
+      "recommendation": "For files with no existing imports, validate against the patched file or allow additions only in the top-level package/import region, not anywhere in the file.",
+      "location": "scripts/tdd/ast/validator.go:326"
+    },
+    {
+      "id": "F3",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "Audit append uses non-portable sha256 command",
+      "evidence": "grant-test-edit-exception.sh computes prev_sha with `sha256`, while the verifier defines its own sha256 wrapper over sha256sum/shasum. On common Linux systems `sha256` is absent, so appending a second audit event can fail or produce a broken chain.",
+      "recommendation": "Use the same sha256sum/shasum fallback helper in the grant script and add a test that approves/appends at least two events in one cycle.",
+      "location": "scripts/tdd/grant-test-edit-exception.sh:227"
+    },
+    {
+      "id": "F4",
+      "severity": "P1",
+      "category": "correctness",
+      "title": "Assertion helper extraction misses chained helper changes",
+      "evidence": "extractAssertionHelper returns the first CallExpr whose selector receiver is an Ident. For chained assertions such as assert.New(t).Equal(...), it records assert.New and can miss Equal -> NotEqual on the outer chained call.",
+      "recommendation": "Extract and compare all assertion call shapes, including selector chains whose receiver is another call expression, rather than stopping at the first Ident-receiver selector.",
+      "location": "scripts/tdd/ast/validator.go:218"
+    }
+  ]
+}

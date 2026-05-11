@@ -1,0 +1,41 @@
+{
+  "summary": "Audit tamper can be bypassed, and AST validation has both over-allow and over-deny paths that undermine typed-exception governance.",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P0",
+      "category": "security",
+      "title": "Deleting the audit log bypasses sha-chain tamper detection",
+      "evidence": "verify-audit-chain exits 0 when .tdd/audit/<cycle>.jsonl is missing, and require-tdd-state only disables typed exceptions when the verifier returns nonzero. An operator can delete or truncate the audit log while leaving approved exceptions intact, then typed exceptions still dispatch.",
+      "recommendation": "Fail closed when approved v1.8 exceptions exist but the cycle audit log is missing/empty, and bind the expected audit head or line count into the exception artifact so truncation is detectable.",
+      "location": "scripts/tdd/verify-audit-chain.sh:38"
+    },
+    {
+      "id": "F2",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "compile-fix-scope-check allows arbitrary off-scope identifier lines in a scoped hunk",
+      "evidence": "Once any changed line in a hunk mentions a scoped symbol, later changed lines with identifiers but no scoped symbol are accepted via the unconditional hunkHasScopedChange continue path. A line like cleanupProductionData(\"Reconcile\") in the same hunk as Reconcile(...) can satisfy the regex via the string while AST allows it despite no Reconcile identifier.",
+      "recommendation": "Keep the hunk-level carve-out only for punctuation/no-identifier continuation lines. Any changed line with identifiers should still require a real scoped-symbol identifier match.",
+      "location": "scripts/tdd/ast/validator.go:620"
+    },
+    {
+      "id": "F3",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "mech-sig-prop-check rejects legitimate argument-expression changes",
+      "evidence": "extractAssertionHelpers collects every selector CallExpr in the line, not just assertion helpers, and runMechSigPropCheck rejects if the full selector sequence changes. That denies valid mechanical updates where require.Equal stays unchanged but an argument call changes receiver/helper shape.",
+      "recommendation": "Compare only the assertion helper/comparator shape matched by the configured assertion profiles, or normalize assertion arguments before comparison.",
+      "location": "scripts/tdd/ast/validator.go:520"
+    },
+    {
+      "id": "F4",
+      "severity": "P1",
+      "category": "correctness",
+      "title": "AST diff path matching can select the wrong file when basenames collide",
+      "evidence": "pathMatches returns true when diffPath equals filepath.Base(target). In a multi-file edit containing internal/a/x_test.go and internal/b/x_test.go, findFileDiff can validate the first x_test.go diff against the second target path.",
+      "recommendation": "Normalize target paths relative to the project root and require exact relative-path matching; do not fall back to basename-only matching.",
+      "location": "scripts/tdd/ast/validator.go:231"
+    }
+  ]
+}

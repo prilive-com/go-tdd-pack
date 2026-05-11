@@ -6888,6 +6888,8 @@ cat > "$TMP_R1F2/.tdd/exceptions/post-red-test-edits.json" <<EOF
   }]
 }
 EOF
+mkdir -p "$TMP_R1F2/.tdd/audit"
+echo '{"ts":"x","event":"granted","exception_id":"E-001","cycle_id":"test","prev_sha":""}' > "$TMP_R1F2/.tdd/audit/test.jsonl"
 # v1.7.0 round-6 F1: the hook now requires a non-empty proposed_diff,
 # so send a real Edit payload (touching declared symbol X to satisfy
 # mechanical_signature_propagation rules).
@@ -7299,6 +7301,7 @@ cat > "$TMP_R4F1/.tdd/exceptions/post-red-test-edits.json" <<EOF
   }]
 }
 EOF
+echo '{"ts":"x","event":"granted","exception_id":"E-001","cycle_id":"r4f1","prev_sha":""}' > "$TMP_R4F1/.tdd/audit/r4f1.jsonl"
 PAYLOAD=$(jq -n --arg p "internal/m/new_test.go" \
   --arg c "package m
 func TestX(t *testing.T) { require.Equal(t, 1, 1) }" \
@@ -7359,6 +7362,7 @@ cat > "$TMP_R4F2/.tdd/exceptions/post-red-test-edits.json" <<EOF
   }]
 }
 EOF
+echo '{"ts":"x","event":"granted","exception_id":"E-001","cycle_id":"r4f2","prev_sha":""}' > "$TMP_R4F2/.tdd/audit/r4f2.jsonl"
 # Edit changes only the call-site argument; surrounding require.Equal stays.
 PAYLOAD=$(jq -n --arg p "internal/m/x_test.go" \
   --arg o "    x := Old(1)
@@ -7480,6 +7484,7 @@ cat > "$TMP_R4F4/.tdd/exceptions/post-red-test-edits.json" <<EOF
   }]
 }
 EOF
+echo '{"ts":"x","event":"granted","exception_id":"E-001","cycle_id":"r4f4","prev_sha":""}' > "$TMP_R4F4/.tdd/audit/r4f4.jsonl"
 # Edit that adds a new assertion line — should be denied by validator,
 # producing a VALIDATOR REPORT in the output (not just a legacy
 # pre-validator BLOCKED message).
@@ -7761,6 +7766,7 @@ cat > "$TMP_R6F2/.tdd/exceptions/post-red-test-edits.json" <<EOF
   }]
 }
 EOF
+echo '{"ts":"x","event":"granted","exception_id":"E-001","cycle_id":"r6f2","prev_sha":""}' > "$TMP_R6F2/.tdd/audit/r6f2.jsonl"
 PAYLOAD=$(jq -n --arg p "internal/m/x_test.go" \
   --arg o "    require.NoError(t, Do(ctx))" \
   --arg n "    require.NoError(t, Do(ctx, opts))" \
@@ -8057,6 +8063,1171 @@ else
   pass "v17_r7_create_new_uses_normalized_path"
 fi
 rm -rf "$TMP_R7F5"
+
+echo
+
+# ─────────────────────────────────────────────────────────────────────
+# v1.8.0-ast-validator-and-audit-integrity acceptance tests.
+#
+# AC1: Go AST helper at scripts/tdd/ast/validator.go with 4 subcommands.
+# AC2: Validator library dispatches to AST helper.
+# AC3: schema_predicate_correction exception type.
+# AC4: Per-cycle exception count caps.
+# AC5: Audit-log sha-chain integrity.
+# AC6: Graceful degradation when Go absent.
+# AC7: Smoke + spec doc.
+# AC8: Killswitch parity + docs.
+# ─────────────────────────────────────────────────────────────────────
+
+V18_AST="$PROJECT_ROOT/scripts/tdd/ast/validator.go"
+V18_VERIFY_CHAIN="$PROJECT_ROOT/scripts/tdd/verify-audit-chain.sh"
+
+# v18-AC1.1 + AC1.5: AST helper Go file exists, is parseable, and runs
+# (warm) within budget.
+if [[ -f "$V18_AST" ]] && command -v go >/dev/null 2>&1; then
+  out=$(timeout 5 go run "$V18_AST" --version 2>&1) || true
+  if printf '%s' "$out" | grep -qE 'tdd-ast-validator|v1\.8'; then
+    pass "v18_ast_validator_go_compiles_and_runs"
+  else
+    fail "v18_ast_validator_go_compiles_and_runs: --version output unexpected (got: '$out')"
+  fi
+else
+  fail "v18_ast_validator_go_compiles_and_runs: $V18_AST missing or 'go' not installed"
+fi
+
+# v18-AC1.2: import-block-check rejects an import-shaped change OUTSIDE
+# an import block (e.g., a quoted-string change in a slice literal).
+if [[ -f "$V18_AST" ]] && command -v go >/dev/null 2>&1; then
+  TMP_V18_IMP=$(mktemp -d)
+  cat > "$TMP_V18_IMP/x.go" <<'EOF'
+package m
+import "testing"
+func TestX(t *testing.T) {
+    cases := []string{
+        "alice",
+    }
+    _ = cases
+}
+EOF
+  diff_input='--- a/x.go
++++ b/x.go
+@@ -5,1 +5,1 @@
+-        "alice",
++        "looser",'
+  out=$( ( printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" import-block-check --paths "$TMP_V18_IMP/x.go" 2>&1 ) || true)
+  if printf '%s' "$out" | grep -qE 'outside.*import.*block|not.*in.*import|forbid_non_import'; then
+    pass "v18_ast_import_block_check_rejects_outside_block"
+  else
+    fail "v18_ast_import_block_check_rejects_outside_block: must reject string-literal change outside import block (got: '$out')"
+  fi
+  rm -rf "$TMP_V18_IMP"
+else
+  fail "v18_ast_import_block_check_rejects_outside_block: prerequisites missing"
+fi
+
+# v18-AC1.2: mech-sig-prop-check rejects a helper change inside an
+# assertion line (require.Equal -> require.NoError).
+if [[ -f "$V18_AST" ]] && command -v go >/dev/null 2>&1; then
+  TMP_V18_MSP=$(mktemp -d)
+  cat > "$TMP_V18_MSP/x_test.go" <<'EOF'
+package m
+import "testing"
+func TestX(t *testing.T) {
+    require.Equal(t, want, Do())
+}
+EOF
+  diff_input='--- a/x_test.go
++++ b/x_test.go
+@@ -4,1 +4,1 @@
+-    require.Equal(t, want, Do())
++    require.NoError(t, Do())'
+  out=$( ( printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" mech-sig-prop-check --symbols Do --paths "$TMP_V18_MSP/x_test.go" 2>&1 ) || true)
+  if printf '%s' "$out" | grep -qE 'helper.*change|assertion.*shape|forbid_helper|helper_shape'; then
+    pass "v18_ast_mech_sig_prop_check_rejects_helper_change"
+  else
+    fail "v18_ast_mech_sig_prop_check_rejects_helper_change: must reject helper change (got: '$out')"
+  fi
+  rm -rf "$TMP_V18_MSP"
+else
+  fail "v18_ast_mech_sig_prop_check_rejects_helper_change: prerequisites missing"
+fi
+
+# v18-AC1.2: compile-fix-scope-check uses AST identifier matching, not
+# regex word match. A change touching `XHelper` (different identifier
+# that contains X as substring) must be REJECTED when scope is `X`.
+if [[ -f "$V18_AST" ]] && command -v go >/dev/null 2>&1; then
+  TMP_V18_CFS=$(mktemp -d)
+  cat > "$TMP_V18_CFS/x_test.go" <<'EOF'
+package m
+import "testing"
+func TestX(t *testing.T) {
+    XHelper(1)
+}
+EOF
+  diff_input='--- a/x_test.go
++++ b/x_test.go
+@@ -4,1 +4,1 @@
+-    XHelper(1)
++    XHelper(1, 2)'
+  out=$( ( printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" compile-fix-scope-check --symbols X --paths "$TMP_V18_CFS/x_test.go" 2>&1 ) || true)
+  if printf '%s' "$out" | grep -qE 'scope.*not.*used|symbol.*not.*used|not.*found|forbid_off_scope'; then
+    pass "v18_ast_compile_fix_scope_uses_ast_not_regex"
+  else
+    fail "v18_ast_compile_fix_scope_uses_ast_not_regex: AST must distinguish XHelper from X (got: '$out')"
+  fi
+  rm -rf "$TMP_V18_CFS"
+else
+  fail "v18_ast_compile_fix_scope_uses_ast_not_regex: prerequisites missing"
+fi
+
+# v18-AC1.2: schema-predicate-check accepts a pure rename and rejects
+# any other structural change in the same diff.
+if [[ -f "$V18_AST" ]] && command -v go >/dev/null 2>&1; then
+  TMP_V18_SPC=$(mktemp -d)
+  cat > "$TMP_V18_SPC/x_test.go" <<'EOF'
+package m
+import "testing"
+func TestX(t *testing.T) {
+    require.Equal(t, want.OldField, got.OldField)
+}
+EOF
+  # Pure rename diff: OldField -> NewField, nothing else.
+  diff_input='--- a/x_test.go
++++ b/x_test.go
+@@ -4,1 +4,1 @@
+-    require.Equal(t, want.OldField, got.OldField)
++    require.Equal(t, want.NewField, got.NewField)'
+  out=$( ( printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" schema-predicate-check --old-name OldField --new-name NewField --paths "$TMP_V18_SPC/x_test.go" 2>&1 ) || true)
+  rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    # Now confirm a non-rename change is rejected.
+    diff_input2='--- a/x_test.go
++++ b/x_test.go
+@@ -4,1 +4,1 @@
+-    require.Equal(t, want.OldField, got.OldField)
++    require.NotEqual(t, want.NewField, got.NewField)'
+    if printf '%s' "$diff_input2" | timeout 5 go run "$V18_AST" schema-predicate-check --old-name OldField --new-name NewField --paths "$TMP_V18_SPC/x_test.go" >/dev/null 2>&1; then
+      fail "v18_ast_schema_predicate_check_only_renames: must reject helper change masquerading as rename"
+    else
+      pass "v18_ast_schema_predicate_check_only_renames"
+    fi
+  else
+    fail "v18_ast_schema_predicate_check_only_renames: pure rename must be accepted (rc=$rc, out='$out')"
+  fi
+  rm -rf "$TMP_V18_SPC"
+else
+  fail "v18_ast_schema_predicate_check_only_renames: prerequisites missing"
+fi
+
+# v18-AC2.1: validator library dispatches to AST helper. Pick a case
+# where regex passes (the diff line matches the import-shape regex)
+# but AST rejects (the change is OUTSIDE an import block). For
+# import_only type, the regex-only path accepted bare quoted strings;
+# AST tracks block boundaries and must reject this case.
+TMP_V18_DISP=$(mktemp -d)
+cat > "$TMP_V18_DISP/x_test.go" <<'EOF'
+package m
+import "testing"
+func TestX(t *testing.T) {
+    cases := []string{
+        "alice",
+    }
+    _ = cases
+}
+EOF
+exc_json='{"id":"E-001","type":"import_only","operations":["edit_existing_tests"],"scope":{"paths":["x_test.go"],"symbols":[]}}'
+# Diff inserts an indented `import "math"` INSIDE a function body.
+# Regex's import_only filter matches `^[+-]\s*import\s` and lets it
+# through. AST sees the import is not at top level (invalid Go;
+# misplaced) and must reject under import-block-check.
+diff_input='--- a/x_test.go
++++ b/x_test.go
+@@ -3,1 +4,2 @@
+ func TestX(t *testing.T) {
++    import "math"
+ }'
+out=$( ( printf '%s' "$diff_input" | bash "$LIB_V17" validate_exception_diff "$exc_json" "$TMP_V18_DISP/x_test.go" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'outside.*import.*block|not.*in.*import|ast.*reject|forbid_non_import_block'; then
+  pass "v18_validator_dispatches_to_ast_helper"
+else
+  fail "v18_validator_dispatches_to_ast_helper: AST must catch import-shaped change outside import block — regex misses this (got: '$out')"
+fi
+rm -rf "$TMP_V18_DISP"
+
+# v18-AC2.1 + AC6.2: TDD_AST_VALIDATOR_DISABLE=1 falls back to regex
+# AND emits a stderr warning so operators see the degradation.
+TMP_V18_KS=$(mktemp -d)
+echo "package m
+import \"testing\"
+func TestX(t *testing.T) { _ = X(1) }" > "$TMP_V18_KS/x_test.go"
+exc_json='{"id":"E-001","type":"mechanical_signature_propagation","operations":["edit_existing_tests"],"scope":{"paths":["x_test.go"],"symbols":["X"]}}'
+diff_input='--- a/x_test.go
++++ b/x_test.go
+@@ -3,1 +3,1 @@
+-func TestX(t *testing.T) { _ = X(1) }
++func TestX(t *testing.T) { _ = X(1, 2) }'
+out=$( ( printf '%s' "$diff_input" | TDD_AST_VALIDATOR_DISABLE=1 bash "$LIB_V17" validate_exception_diff "$exc_json" "$TMP_V18_KS/x_test.go" 2>&1 ) || true)
+rc=$?
+if [[ "$rc" -eq 0 ]] && printf '%s' "$out" | grep -qE 'AST.*disabled|fall.*back.*regex|ast.*killswitch'; then
+  pass "v18_validator_ast_killswitch_falls_back_to_regex"
+else
+  fail "v18_validator_ast_killswitch_falls_back_to_regex: with killswitch, regex-only path must allow legitimate edit AND warn (rc=$rc, out='$out')"
+fi
+rm -rf "$TMP_V18_KS"
+
+# v18-AC6.1 + AC6.3: when go binary is absent, validator falls back
+# to regex AND warns. Simulate by stripping `go` from PATH.
+TMP_V18_NOGO=$(mktemp -d)
+echo "package m
+import \"testing\"
+func TestX(t *testing.T) { _ = X(1) }" > "$TMP_V18_NOGO/x_test.go"
+exc_json='{"id":"E-001","type":"mechanical_signature_propagation","operations":["edit_existing_tests"],"scope":{"paths":["x_test.go"],"symbols":["X"]}}'
+diff_input='--- a/x_test.go
++++ b/x_test.go
+@@ -3,1 +3,1 @@
+-func TestX(t *testing.T) { _ = X(1) }
++func TestX(t *testing.T) { _ = X(1, 2) }'
+# Build a sanitized PATH that contains jq + sha256sum + bash + grep + sed
+# but NOT go. Pin to /usr/bin (bsd-grep / GNU grep both work; jq usually there).
+SAFE_PATH="/usr/bin:/bin"
+out=$( ( printf '%s' "$diff_input" | env -i PATH="$SAFE_PATH" HOME="$HOME" bash "$LIB_V17" validate_exception_diff "$exc_json" "$TMP_V18_NOGO/x_test.go" 2>&1 ) || true)
+rc=$?
+if [[ "$rc" -eq 0 ]] && printf '%s' "$out" | grep -qE 'go.*unavailable|Go.*not.*installed|regex.only|fall.*back'; then
+  pass "v18_validator_no_go_binary_warns_and_falls_back"
+else
+  fail "v18_validator_no_go_binary_warns_and_falls_back: missing go must trigger fallback + warn (rc=$rc, out='$out')"
+fi
+rm -rf "$TMP_V18_NOGO"
+
+# v18-AC3.*: schema_predicate_correction grant + validate end-to-end.
+TMP_V18_SPCG=$(mktemp -d)
+mkdir -p "$TMP_V18_SPCG/.tdd/exceptions" "$TMP_V18_SPCG/.tdd/audit"
+cat > "$TMP_V18_SPCG/.tdd/tdd-config.json" <<'EOF'
+{
+  "tier1_path_regexes": ["^internal/"],
+  "test_file_policy": {
+    "allow_after_red_confirmed": false,
+    "post_red_mechanical_update": {
+      "enabled": true,
+      "exception_types": ["mechanical_signature_propagation","compile_fix_only","import_only","schema_predicate_correction"],
+      "validators": {"active_profiles": ["stdlib","testify"]}
+    }
+  }
+}
+EOF
+cat > "$TMP_V18_SPCG/.tdd/current-plan.md" <<'EOF'
+Cycle ID: v18spc
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+( cd "$TMP_V18_SPCG" \
+    && bash "$PROJECT_ROOT/scripts/tdd/grant-test-edit-exception.sh" \
+       --type schema_predicate_correction \
+       --paths "internal/**/*_test.go" \
+       --symbol Account \
+       --old-name OldField --new-name NewField \
+       --reason "rename Account.OldField to NewField" \
+       --cycle-id v18spc 2>&1 ) | head -3
+status=$(jq -r '.exceptions[0].status' "$TMP_V18_SPCG/.tdd/exceptions/post-red-test-edits.json" 2>/dev/null)
+type_=$(jq -r '.exceptions[0].type' "$TMP_V18_SPCG/.tdd/exceptions/post-red-test-edits.json" 2>/dev/null)
+old_name=$(jq -r '.exceptions[0].scope.old_name // ""' "$TMP_V18_SPCG/.tdd/exceptions/post-red-test-edits.json" 2>/dev/null)
+new_name=$(jq -r '.exceptions[0].scope.new_name // ""' "$TMP_V18_SPCG/.tdd/exceptions/post-red-test-edits.json" 2>/dev/null)
+if [[ "$status" == "pending" ]] \
+   && [[ "$type_" == "schema_predicate_correction" ]] \
+   && [[ "$old_name" == "OldField" ]] \
+   && [[ "$new_name" == "NewField" ]]; then
+  pass "v18_schema_predicate_correction_grant_and_validate"
+else
+  fail "v18_schema_predicate_correction_grant_and_validate: grant helper must accept --old-name/--new-name and persist them (status=$status type=$type_ old=$old_name new=$new_name)"
+fi
+rm -rf "$TMP_V18_SPCG"
+
+# v18-AC4.2 + AC4.3: max_per_cycle cap blocks at threshold. Set cap=2,
+# create 3 approved exceptions; the third must be denied at hook
+# dispatch.
+TMP_V18_CAP=$(mktemp -d)
+mkdir -p "$TMP_V18_CAP/internal/m" "$TMP_V18_CAP/.tdd/exceptions" "$TMP_V18_CAP/.tdd/audit"
+( cd "$TMP_V18_CAP" && git init -q && git config user.email t@t && git config user.name t )
+cat > "$TMP_V18_CAP/.tdd/tdd-config.json" <<'EOF'
+{
+  "tier1_path_regexes": ["^internal/"],
+  "test_file_policy": {
+    "allow_after_red_confirmed": false,
+    "post_red_mechanical_update": {
+      "enabled": true,
+      "max_per_cycle": 2,
+      "exception_types": ["mechanical_signature_propagation","compile_fix_only","import_only"],
+      "validators": {"active_profiles": ["stdlib","testify"]}
+    }
+  }
+}
+EOF
+cat > "$TMP_V18_CAP/.tdd/current-plan.md" <<'EOF'
+Cycle ID: v18cap
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+echo "red proof" > "$TMP_V18_CAP/.tdd/red-proof.md"
+echo "package m" > "$TMP_V18_CAP/internal/m/x_test.go"
+( cd "$TMP_V18_CAP" && git add . && git commit -q -m initial )
+plan_h=$(sha256sum "$TMP_V18_CAP/.tdd/current-plan.md" | awk '{print $1}')
+red_h=$(sha256sum "$TMP_V18_CAP/.tdd/red-proof.md" | awk '{print $1}')
+head_at_approval=$( cd "$TMP_V18_CAP" && git rev-parse HEAD )
+ihash() { printf 'v18cap|%s|mechanical_signature_propagation|r|internal/m/*_test.go|edit_existing_tests' "$1" | sha256sum | awk '{print $1}'; }
+cat > "$TMP_V18_CAP/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{
+  "version": 1, "cycle_id": "v18cap", "phase": "red_confirmed", "expires": "next_green_commit",
+  "exceptions": [
+    {"id":"E-001","type":"mechanical_signature_propagation","status":"approved","approved_by":"o","approved_at":"x","operations":["edit_existing_tests"],"scope":{"paths":["internal/m/*_test.go"],"symbols":["A"]},"reason":"r","binding":{"cycle_id":"v18cap","plan_hash":"$plan_h","red_proof_hash":"$red_h","change_intent_hash":"$(ihash A)","head_at_approval":"$head_at_approval"}},
+    {"id":"E-002","type":"mechanical_signature_propagation","status":"approved","approved_by":"o","approved_at":"x","operations":["edit_existing_tests"],"scope":{"paths":["internal/m/*_test.go"],"symbols":["B"]},"reason":"r","binding":{"cycle_id":"v18cap","plan_hash":"$plan_h","red_proof_hash":"$red_h","change_intent_hash":"$(ihash B)","head_at_approval":"$head_at_approval"}},
+    {"id":"E-003","type":"mechanical_signature_propagation","status":"approved","approved_by":"o","approved_at":"x","operations":["edit_existing_tests"],"scope":{"paths":["internal/m/*_test.go"],"symbols":["C"]},"reason":"r","binding":{"cycle_id":"v18cap","plan_hash":"$plan_h","red_proof_hash":"$red_h","change_intent_hash":"$(ihash C)","head_at_approval":"$head_at_approval"}}
+  ]
+}
+EOF
+PAYLOAD=$(jq -n --arg p "internal/m/x_test.go" \
+  --arg o 'package m' --arg n 'package m
+func F() { _ = C() }' \
+  '{tool_name:"Edit", tool_input:{file_path:$p, old_string:$o, new_string:$n}}')
+out=$( ( cd "$TMP_V18_CAP" && printf '%s' "$PAYLOAD" | bash "$HOOK" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'max_per_cycle|cap.*exceeded|exception.*cap|too.*many.*exception'; then
+  pass "v18_max_per_cycle_cap_blocks_at_threshold"
+else
+  fail "v18_max_per_cycle_cap_blocks_at_threshold: 3 approved exceptions with cap=2 must be denied (got: '$out')"
+fi
+rm -rf "$TMP_V18_CAP"
+
+# v18-AC4.1: max_per_cycle=0 means NO cap (any number permitted).
+TMP_V18_NOCAP=$(mktemp -d)
+mkdir -p "$TMP_V18_NOCAP/internal/m" "$TMP_V18_NOCAP/.tdd/exceptions" "$TMP_V18_NOCAP/.tdd/audit"
+( cd "$TMP_V18_NOCAP" && git init -q && git config user.email t@t && git config user.name t )
+cat > "$TMP_V18_NOCAP/.tdd/tdd-config.json" <<'EOF'
+{
+  "tier1_path_regexes": ["^internal/"],
+  "test_file_policy": {
+    "allow_after_red_confirmed": false,
+    "post_red_mechanical_update": {
+      "enabled": true,
+      "max_per_cycle": 0,
+      "exception_types": ["mechanical_signature_propagation","compile_fix_only","import_only"],
+      "validators": {"active_profiles": ["stdlib","testify"]}
+    }
+  }
+}
+EOF
+cat > "$TMP_V18_NOCAP/.tdd/current-plan.md" <<'EOF'
+Cycle ID: v18nocap
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+echo "red proof" > "$TMP_V18_NOCAP/.tdd/red-proof.md"
+echo "package m" > "$TMP_V18_NOCAP/internal/m/x_test.go"
+( cd "$TMP_V18_NOCAP" && git add . && git commit -q -m initial )
+plan_h=$(sha256sum "$TMP_V18_NOCAP/.tdd/current-plan.md" | awk '{print $1}')
+red_h=$(sha256sum "$TMP_V18_NOCAP/.tdd/red-proof.md" | awk '{print $1}')
+head_at_approval=$( cd "$TMP_V18_NOCAP" && git rev-parse HEAD )
+intent_h=$(printf 'v18nocap|X|mechanical_signature_propagation|r|internal/m/*_test.go|edit_existing_tests' | sha256sum | awk '{print $1}')
+# Make 10 entries — many more than would exceed any reasonable default cap.
+exc_array=""
+for n in $(seq 1 10); do
+  id=$(printf 'E-%03d' "$n")
+  ih=$(printf 'v18nocap|S%d|mechanical_signature_propagation|r|internal/m/*_test.go|edit_existing_tests' "$n" | sha256sum | awk '{print $1}')
+  comma=","
+  [[ "$n" -eq 1 ]] && comma=""
+  exc_array+="$comma{\"id\":\"$id\",\"type\":\"mechanical_signature_propagation\",\"status\":\"approved\",\"approved_by\":\"o\",\"approved_at\":\"x\",\"operations\":[\"edit_existing_tests\"],\"scope\":{\"paths\":[\"internal/m/*_test.go\"],\"symbols\":[\"S$n\"]},\"reason\":\"r\",\"binding\":{\"cycle_id\":\"v18nocap\",\"plan_hash\":\"$plan_h\",\"red_proof_hash\":\"$red_h\",\"change_intent_hash\":\"$ih\",\"head_at_approval\":\"$head_at_approval\"}}"
+done
+printf '{"version":1,"cycle_id":"v18nocap","phase":"red_confirmed","expires":"next_green_commit","exceptions":[%s]}' "$exc_array" > "$TMP_V18_NOCAP/.tdd/exceptions/post-red-test-edits.json"
+PAYLOAD=$(jq -n --arg p "internal/m/x_test.go" \
+  --arg o 'package m' --arg n 'package m
+func F() { _ = S5() }' \
+  '{tool_name:"Edit", tool_input:{file_path:$p, old_string:$o, new_string:$n}}')
+out=$( ( cd "$TMP_V18_NOCAP" && printf '%s' "$PAYLOAD" | bash "$HOOK" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'max_per_cycle|cap.*exceeded'; then
+  fail "v18_max_per_cycle_zero_means_no_cap: max_per_cycle=0 must NOT cap (got: '$out')"
+else
+  pass "v18_max_per_cycle_zero_means_no_cap"
+fi
+rm -rf "$TMP_V18_NOCAP"
+
+# v18-AC5.2 + AC5.3: tampered audit log detected and hook fails closed.
+TMP_V18_TAMPER=$(mktemp -d)
+mkdir -p "$TMP_V18_TAMPER/internal/m" "$TMP_V18_TAMPER/.tdd/exceptions" "$TMP_V18_TAMPER/.tdd/audit"
+( cd "$TMP_V18_TAMPER" && git init -q && git config user.email t@t && git config user.name t )
+cat > "$TMP_V18_TAMPER/.tdd/tdd-config.json" <<'EOF'
+{
+  "tier1_path_regexes": ["^internal/"],
+  "test_file_policy": {
+    "allow_after_red_confirmed": false,
+    "post_red_mechanical_update": {
+      "enabled": true,
+      "exception_types": ["mechanical_signature_propagation","compile_fix_only","import_only"],
+      "validators": {"active_profiles": ["stdlib","testify"]}
+    }
+  }
+}
+EOF
+cat > "$TMP_V18_TAMPER/.tdd/current-plan.md" <<'EOF'
+Cycle ID: v18tamper
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+echo "red proof" > "$TMP_V18_TAMPER/.tdd/red-proof.md"
+echo "package m" > "$TMP_V18_TAMPER/internal/m/x_test.go"
+( cd "$TMP_V18_TAMPER" && git add . && git commit -q -m initial )
+plan_h=$(sha256sum "$TMP_V18_TAMPER/.tdd/current-plan.md" | awk '{print $1}')
+red_h=$(sha256sum "$TMP_V18_TAMPER/.tdd/red-proof.md" | awk '{print $1}')
+head_at_approval=$( cd "$TMP_V18_TAMPER" && git rev-parse HEAD )
+intent_h=$(printf 'v18tamper|X|mechanical_signature_propagation|r|internal/m/*_test.go|edit_existing_tests' | sha256sum | awk '{print $1}')
+cat > "$TMP_V18_TAMPER/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{
+  "version": 1, "cycle_id": "v18tamper", "phase": "red_confirmed", "expires": "next_green_commit",
+  "exceptions": [{
+    "id": "E-001", "type": "mechanical_signature_propagation",
+    "status": "approved", "approved_by": "o", "approved_at": "x",
+    "operations": ["edit_existing_tests"],
+    "scope": {"paths": ["internal/m/*_test.go"], "symbols": ["X"]},
+    "reason": "r",
+    "binding": {"cycle_id": "v18tamper", "plan_hash": "$plan_h", "red_proof_hash": "$red_h", "change_intent_hash": "$intent_h", "head_at_approval": "$head_at_approval"}
+  }]
+}
+EOF
+# Write a tampered audit log: line 2's prev_sha doesn't match line 1's hash.
+cat > "$TMP_V18_TAMPER/.tdd/audit/v18tamper.jsonl" <<'EOF'
+{"ts":"2026-05-10T22:00:00Z","event":"granted","exception_id":"E-001","cycle_id":"v18tamper","prev_sha":""}
+{"ts":"2026-05-10T22:01:00Z","event":"used","exception_id":"E-001","cycle_id":"v18tamper","prev_sha":"BOGUS_HASH_TAMPERED"}
+EOF
+PAYLOAD=$(jq -n --arg p "internal/m/x_test.go" \
+  --arg o 'package m' --arg n 'package m
+func F() { _ = X() }' \
+  '{tool_name:"Edit", tool_input:{file_path:$p, old_string:$o, new_string:$n}}')
+out=$( ( cd "$TMP_V18_TAMPER" && printf '%s' "$PAYLOAD" | bash "$HOOK" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'audit.*chain.*tamper|prev_sha.*mismatch|audit.*integrity|chain.*broken'; then
+  pass "v18_audit_chain_detects_tamper"
+else
+  fail "v18_audit_chain_detects_tamper: tampered prev_sha must reject (got: '$out')"
+fi
+rm -rf "$TMP_V18_TAMPER"
+
+# v18-AC5.2: intact chain passes verify-audit-chain.sh standalone.
+if [[ -f "$V18_VERIFY_CHAIN" ]]; then
+  TMP_V18_INTACT=$(mktemp -d)
+  mkdir -p "$TMP_V18_INTACT/.tdd/audit"
+  line1='{"ts":"2026-05-10T22:00:00Z","event":"granted","exception_id":"E-001","cycle_id":"v18ok","prev_sha":""}'
+  line1_sha=$(printf '%s' "$line1" | sha256sum | awk '{print $1}')
+  line2_data="{\"ts\":\"2026-05-10T22:01:00Z\",\"event\":\"used\",\"exception_id\":\"E-001\",\"cycle_id\":\"v18ok\",\"prev_sha\":\"$line1_sha\"}"
+  printf '%s\n%s\n' "$line1" "$line2_data" > "$TMP_V18_INTACT/.tdd/audit/v18ok.jsonl"
+  if ( cd "$TMP_V18_INTACT" && bash "$V18_VERIFY_CHAIN" v18ok >/dev/null 2>&1 ); then
+    pass "v18_audit_chain_intact_passes_verify"
+  else
+    fail "v18_audit_chain_intact_passes_verify: intact chain must pass verify-audit-chain.sh"
+  fi
+  rm -rf "$TMP_V18_INTACT"
+else
+  fail "v18_audit_chain_intact_passes_verify: $V18_VERIFY_CHAIN missing"
+fi
+
+# v18-AC5.4: grant helper writes prev_sha when appending.
+TMP_V18_PREV=$(mktemp -d)
+mkdir -p "$TMP_V18_PREV/.tdd/exceptions" "$TMP_V18_PREV/.tdd/audit"
+echo '{}' > "$TMP_V18_PREV/.tdd/tdd-config.json"
+cat > "$TMP_V18_PREV/.tdd/current-plan.md" <<'EOF'
+Cycle ID: v18prev
+EOF
+( cd "$TMP_V18_PREV" \
+    && bash "$PROJECT_ROOT/scripts/tdd/grant-test-edit-exception.sh" \
+       --type mechanical_signature_propagation \
+       --paths "x_test.go" --symbol X --reason r --cycle-id v18prev 2>/dev/null )
+( cd "$TMP_V18_PREV" \
+    && bash "$PROJECT_ROOT/scripts/tdd/grant-test-edit-exception.sh" --approve E-001 2>/dev/null )
+prev_sha_present=$(jq -r 'has("prev_sha")' "$TMP_V18_PREV/.tdd/audit/v18prev.jsonl" 2>/dev/null | head -1)
+if [[ "$prev_sha_present" == "true" ]]; then
+  pass "v18_audit_chain_grant_helper_writes_prev_sha"
+else
+  fail "v18_audit_chain_grant_helper_writes_prev_sha: grant helper must write prev_sha field on each audit-log line"
+fi
+rm -rf "$TMP_V18_PREV"
+
+echo
+
+# ─────────────────────────────────────────────────────────────────────
+# v1.8.0 round-1 fixes (codex /second-opinion).
+# F1 (P0): schema_predicate_correction must reject non-rename
+#          identifier changes that happen to keep the same idents
+#          (e.g. require.Equal(t, 200, got.Status) -> require.Equal(t, 201, got.Status)).
+# F2 (P0): import-block leniency must NOT accept misplaced imports
+#          when the on-disk file has no imports yet.
+# F3 (P0): grant helper's prev_sha must compute correctly across
+#          two append events in one cycle.
+# F4 (P1): mech-sig-prop-check must catch helper changes on
+#          chained assertion calls (assert.New(t).Equal(...)).
+# ─────────────────────────────────────────────────────────────────────
+
+# v18-r1-F1: schema_predicate_check must reject identifier-equal but
+# semantically-different changes (e.g. literal value swap).
+TMP_V18R1F1=$(mktemp -d)
+echo "package m" > "$TMP_V18R1F1/x_test.go"
+diff_input='--- a/x_test.go
++++ b/x_test.go
+@@ -1,1 +1,1 @@
+-    require.Equal(t, 200, got.OldField)
++    require.Equal(t, 201, got.NewField)'
+out=$( ( printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" schema-predicate-check --old-name OldField --new-name NewField --paths "$TMP_V18R1F1/x_test.go" 2>&1 ) || true)
+# Acceptable rejection: literal change (200 -> 201) is NOT a pure rename.
+if printf '%s' "$out" | grep -qE 'non_rename|semantic|literal_change|content_changed'; then
+  pass "v18_r1_schema_predicate_rejects_literal_change"
+else
+  fail "v18_r1_schema_predicate_rejects_literal_change: literal value change must be rejected even when both sides have same idents (got: '$out')"
+fi
+rm -rf "$TMP_V18R1F1"
+
+# v18-r1-F2: import-block-check must NOT silently accept misplaced
+# `import` lines when the on-disk file has no imports. Build a file
+# with no imports and verify a `+    import "math"` inside the function
+# body is rejected.
+TMP_V18R1F2=$(mktemp -d)
+cat > "$TMP_V18R1F2/x_test.go" <<'EOF'
+package m
+func TestX(t *testing.T) {
+}
+EOF
+diff_input='--- a/x_test.go
++++ b/x_test.go
+@@ -2,1 +2,2 @@
+ func TestX(t *testing.T) {
++    import "math"
+ }'
+out=$( ( printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" import-block-check --paths "$TMP_V18R1F2/x_test.go" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'misplaced.*import|outside_import|import.*not.*top'; then
+  pass "v18_r1_import_block_rejects_misplaced_when_no_existing_imports"
+else
+  fail "v18_r1_import_block_rejects_misplaced_when_no_existing_imports: misplaced import in file with no existing imports must reject (got: '$out')"
+fi
+rm -rf "$TMP_V18R1F2"
+
+# v18-r1-F3: grant helper must write correct prev_sha across TWO
+# append events in one cycle (regression: the function definition
+# must be in scope when the loop runs).
+TMP_V18R1F3=$(mktemp -d)
+mkdir -p "$TMP_V18R1F3/.tdd/exceptions" "$TMP_V18R1F3/.tdd/audit"
+echo '{}' > "$TMP_V18R1F3/.tdd/tdd-config.json"
+cat > "$TMP_V18R1F3/.tdd/current-plan.md" <<'EOF'
+Cycle ID: v18r1f3
+EOF
+( cd "$TMP_V18R1F3" && bash "$PROJECT_ROOT/scripts/tdd/grant-test-edit-exception.sh" --type mechanical_signature_propagation --paths x_test.go --symbol X --reason r --cycle-id v18r1f3 2>/dev/null )
+( cd "$TMP_V18R1F3" && bash "$PROJECT_ROOT/scripts/tdd/grant-test-edit-exception.sh" --type compile_fix_only --paths y_test.go --symbol Y --reason r --cycle-id v18r1f3 2>/dev/null )
+( cd "$TMP_V18R1F3" && bash "$PROJECT_ROOT/scripts/tdd/grant-test-edit-exception.sh" --approve E-001 2>/dev/null )
+( cd "$TMP_V18R1F3" && bash "$PROJECT_ROOT/scripts/tdd/grant-test-edit-exception.sh" --approve E-002 2>/dev/null )
+# Verify both audit lines exist + chain is intact via verify-audit-chain.sh.
+line_count=$(wc -l < "$TMP_V18R1F3/.tdd/audit/v18r1f3.jsonl" 2>/dev/null || echo 0)
+if [[ "$line_count" -eq 2 ]] && ( cd "$TMP_V18R1F3" && bash "$V18_VERIFY_CHAIN" v18r1f3 >/dev/null 2>&1 ); then
+  pass "v18_r1_grant_helper_prev_sha_correct_across_two_events"
+else
+  fail "v18_r1_grant_helper_prev_sha_correct_across_two_events: chain check failed across two events (line_count=$line_count)"
+fi
+rm -rf "$TMP_V18R1F3"
+
+# v18-r1-F4: mech-sig-prop-check must catch helper changes on chained
+# assertion calls. extractAssertionHelper returns the FIRST Ident-recv
+# selector; on `assert.New(t).Equal(...)` it returns "assert.New" and
+# would miss an outer-call helper change.
+TMP_V18R1F4=$(mktemp -d)
+echo "package m" > "$TMP_V18R1F4/x_test.go"
+diff_input='--- a/x_test.go
++++ b/x_test.go
+@@ -1,1 +1,1 @@
+-    assert.New(t).Equal(want, Do())
++    assert.New(t).NotEqual(want, Do())'
+if printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" mech-sig-prop-check --symbols Do --paths "$TMP_V18R1F4/x_test.go" >/dev/null 2>&1; then
+  fail "v18_r1_mech_sig_prop_catches_chained_helper_change: chained helper change Equal->NotEqual must be detected (validator returned exit 0)"
+else
+  pass "v18_r1_mech_sig_prop_catches_chained_helper_change"
+fi
+rm -rf "$TMP_V18R1F4"
+
+echo
+
+# ─────────────────────────────────────────────────────────────────────
+# v1.8.0 round-2 fixes (codex /second-opinion).
+# F1 (P0): schema_predicate_correction must fail closed when AST is
+#          unavailable (no regex equivalent exists).
+# F2 (P0): schema-predicate-check must reject operator/punctuation
+#          changes (e.g. `> 0` -> `>= 0`).
+# F3 (P0): import-block-check must accept legitimate top-level
+#          import additions in files with no existing imports.
+# ─────────────────────────────────────────────────────────────────────
+
+# v18-r2-F1: schema_predicate_correction with TDD_AST_VALIDATOR_DISABLE=1
+# must FAIL closed (no regex fallback for this type).
+TMP_V18R2F1=$(mktemp -d)
+echo "package m" > "$TMP_V18R2F1/x_test.go"
+exc_json='{"id":"E-001","type":"schema_predicate_correction","operations":["edit_existing_tests"],"scope":{"paths":["x_test.go"],"symbols":[],"old_name":"OldField","new_name":"NewField"}}'
+diff_input='--- a/x_test.go
++++ b/x_test.go
+@@ -1,1 +1,1 @@
+-    require.Equal(t, want.OldField, got.OldField)
++    require.Equal(t, want.NewField, got.NewField)'
+if printf '%s' "$diff_input" | TDD_AST_VALIDATOR_DISABLE=1 bash "$LIB_V17" validate_exception_diff "$exc_json" "$TMP_V18R2F1/x_test.go" >/dev/null 2>/tmp/v18r2f1.err; then
+  fail "v18_r2_schema_predicate_fails_closed_when_ast_disabled: validator returned exit 0 with AST disabled (must fail closed)"
+else
+  if grep -qE 'schema_predicate.*requires.*ast|ast.*required|fail.*closed|ast_required' /tmp/v18r2f1.err; then
+    pass "v18_r2_schema_predicate_fails_closed_when_ast_disabled"
+  else
+    fail "v18_r2_schema_predicate_fails_closed_when_ast_disabled: validator failed but did not surface ast_required reason ($(head -1 /tmp/v18r2f1.err))"
+  fi
+fi
+rm -rf "$TMP_V18R2F1"
+
+# v18-r2-F2: schema-predicate-check must reject operator/punctuation
+# changes (`> 0` -> `>= 0`).
+TMP_V18R2F2=$(mktemp -d)
+echo "package m" > "$TMP_V18R2F2/x_test.go"
+diff_input='--- a/x_test.go
++++ b/x_test.go
+@@ -1,1 +1,1 @@
+-    require.True(t, got.OldField > 0)
++    require.True(t, got.NewField >= 0)'
+if printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" schema-predicate-check --old-name OldField --new-name NewField --paths "$TMP_V18R2F2/x_test.go" >/dev/null 2>&1; then
+  fail "v18_r2_schema_predicate_rejects_operator_change: operator change > -> >= must be rejected (validator returned exit 0)"
+else
+  pass "v18_r2_schema_predicate_rejects_operator_change"
+fi
+rm -rf "$TMP_V18R2F2"
+
+# v18-r2-F3: import-block-check must accept a legitimate top-level
+# import insertion when the file has no existing imports. Old file has
+# `package m` then `func F() {}` at line 2; diff adds `import "testing"`
+# between them at NEW line 2.
+TMP_V18R2F3=$(mktemp -d)
+cat > "$TMP_V18R2F3/x.go" <<'EOF'
+package m
+func F() {}
+EOF
+diff_input='--- a/x.go
++++ b/x.go
+@@ -1,2 +1,3 @@
+ package m
++import "testing"
+ func F() {}'
+if printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" import-block-check --paths "$TMP_V18R2F3/x.go" >/dev/null 2>&1; then
+  pass "v18_r2_import_block_accepts_legit_top_level_addition"
+else
+  out=$( ( printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" import-block-check --paths "$TMP_V18R2F3/x.go" 2>&1 ) || true)
+  fail "v18_r2_import_block_accepts_legit_top_level_addition: legitimate top-level import addition must be accepted (got: '$out')"
+fi
+rm -rf "$TMP_V18R2F3"
+
+echo
+
+# ─────────────────────────────────────────────────────────────────────
+# v1.8.0 round-3 fixes (codex /second-opinion).
+# F1 (P0): import-block-check must validate BOTH + and - lines
+#          against the appropriate file's import block ranges.
+# F2 (P0): schema-predicate-check must NOT treat changes inside
+#          string literals or comments as pure renames.
+# F3 (P1): compile-fix-scope-check must allow punctuation-only
+#          changed lines (multi-line refactor closers like `})`).
+# ─────────────────────────────────────────────────────────────────────
+
+# v18-r3-F1: import-block-check must reject deletions OUTSIDE the
+# old file's import block too.
+TMP_V18R3F1=$(mktemp -d)
+cat > "$TMP_V18R3F1/x.go" <<'EOF'
+package m
+import "testing"
+var cases = []string{
+    "alice",
+}
+func F() {}
+EOF
+diff_input='--- a/x.go
++++ b/x.go
+@@ -3,3 +3,2 @@
+ var cases = []string{
+-    "alice",
+ }'
+if printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" import-block-check --paths "$TMP_V18R3F1/x.go" >/dev/null 2>&1; then
+  fail "v18_r3_import_block_validates_deletions_too: removed line outside import block must be rejected (validator returned exit 0)"
+else
+  pass "v18_r3_import_block_validates_deletions_too"
+fi
+rm -rf "$TMP_V18R3F1"
+
+# v18-r3-F2: schema-predicate-check must reject rename-shaped changes
+# inside STRING LITERALS (not just identifier positions).
+TMP_V18R3F2=$(mktemp -d)
+echo "package m" > "$TMP_V18R3F2/x_test.go"
+diff_input='--- a/x_test.go
++++ b/x_test.go
+@@ -1,1 +1,1 @@
+-    require.Equal(t, "OldField", got.OldField)
++    require.Equal(t, "NewField", got.NewField)'
+if printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" schema-predicate-check --old-name OldField --new-name NewField --paths "$TMP_V18R3F2/x_test.go" >/dev/null 2>&1; then
+  fail "v18_r3_schema_predicate_rejects_string_literal_rename: rename inside string literal must be rejected (validator returned exit 0)"
+else
+  pass "v18_r3_schema_predicate_rejects_string_literal_rename"
+fi
+rm -rf "$TMP_V18R3F2"
+
+# v18-r3-F3: compile-fix-scope-check must allow PUNCTUATION-ONLY lines
+# in a hunk that already has a scoped-symbol change.
+TMP_V18R3F3=$(mktemp -d)
+echo "package m" > "$TMP_V18R3F3/x.go"
+diff_input='--- a/x.go
++++ b/x.go
+@@ -1,3 +1,4 @@
+-    Reconcile(
+-        ctx,
+-    )
++    Reconcile(
++        ctx,
++        opts,
++    )'
+# NOTE: post round-5 F3, the carve-out is punctuation-only. The original
+# `ctx,` line carries the IDENT `ctx` which is not in scope. Operator
+# must declare `ctx` in --symbols to authorize that line OR keep all
+# scoped tokens on the same line. Test pinned to the post-round-5
+# semantics: include `ctx` in --symbols so the multi-line scoped
+# refactor still passes; the punctuation `)` and `},` lines fall
+# through to the punctuation-only carve-out.
+if printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" compile-fix-scope-check --symbols Reconcile,ctx,opts --paths "$TMP_V18R3F3/x.go" >/dev/null 2>&1; then
+  pass "v18_r3_compile_fix_allows_punctuation_only_lines"
+else
+  out=$( ( printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" compile-fix-scope-check --symbols Reconcile,ctx,opts --paths "$TMP_V18R3F3/x.go" 2>&1 ) || true)
+  fail "v18_r3_compile_fix_allows_punctuation_only_lines: punctuation closers in a hunk that has a scoped change should be accepted (got: '$out')"
+fi
+rm -rf "$TMP_V18R3F3"
+
+echo
+
+# ─────────────────────────────────────────────────────────────────────
+# v1.8.0 round-4 fixes (codex /second-opinion).
+# F1 (P0): Audit log deletion (rm .tdd/audit/<cycle>.jsonl) must
+#          fail closed when approved exceptions still exist.
+# F2 (P0): compile-fix-scope-check hunk-level carve-out must apply
+#          ONLY to punctuation-only lines, not any line lacking the
+#          scoped symbol.
+# F3 (P0): mech-sig-prop-check must compare only the OUTER assertion
+#          helper, not inner argument call shapes (which legitimately
+#          change in mechanical_signature_propagation).
+# F4 (P1): AST path matching must prefer relative-path equality over
+#          basename match (collision between internal/a/x_test.go
+#          and internal/b/x_test.go).
+# ─────────────────────────────────────────────────────────────────────
+
+# v18-r4-F1: deleting the audit log mid-cycle while approved exceptions
+# exist must fail closed in the hook.
+TMP_V18R4F1=$(mktemp -d)
+mkdir -p "$TMP_V18R4F1/internal/m" "$TMP_V18R4F1/.tdd/exceptions" "$TMP_V18R4F1/.tdd/audit"
+( cd "$TMP_V18R4F1" && git init -q && git config user.email t@t && git config user.name t )
+cat > "$TMP_V18R4F1/.tdd/tdd-config.json" <<'EOF'
+{
+  "tier1_path_regexes": ["^internal/"],
+  "test_file_policy": {
+    "allow_after_red_confirmed": false,
+    "post_red_mechanical_update": {
+      "enabled": true,
+      "exception_types": ["mechanical_signature_propagation","compile_fix_only","import_only"],
+      "validators": {"active_profiles": ["stdlib","testify"]}
+    }
+  }
+}
+EOF
+cat > "$TMP_V18R4F1/.tdd/current-plan.md" <<'EOF'
+Cycle ID: v18r4f1
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+echo "red proof" > "$TMP_V18R4F1/.tdd/red-proof.md"
+echo "package m" > "$TMP_V18R4F1/internal/m/x_test.go"
+( cd "$TMP_V18R4F1" && git add . && git commit -q -m initial )
+plan_h=$(sha256sum "$TMP_V18R4F1/.tdd/current-plan.md" | awk '{print $1}')
+red_h=$(sha256sum "$TMP_V18R4F1/.tdd/red-proof.md" | awk '{print $1}')
+head_at_approval=$( cd "$TMP_V18R4F1" && git rev-parse HEAD )
+intent_h=$(printf 'v18r4f1|X|mechanical_signature_propagation|r|internal/m/*_test.go|edit_existing_tests' | sha256sum | awk '{print $1}')
+cat > "$TMP_V18R4F1/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{
+  "version": 1, "cycle_id": "v18r4f1", "phase": "red_confirmed", "expires": "next_green_commit",
+  "exceptions": [{
+    "id": "E-001", "type": "mechanical_signature_propagation",
+    "status": "approved", "approved_by": "o", "approved_at": "x",
+    "operations": ["edit_existing_tests"],
+    "scope": {"paths": ["internal/m/*_test.go"], "symbols": ["X"]},
+    "reason": "r",
+    "binding": {"cycle_id": "v18r4f1", "plan_hash": "$plan_h", "red_proof_hash": "$red_h", "change_intent_hash": "$intent_h", "head_at_approval": "$head_at_approval"}
+  }]
+}
+EOF
+# Audit log MISSING (operator deleted it). Approved exceptions still
+# present. Must fail closed.
+PAYLOAD=$(jq -n --arg p "internal/m/x_test.go" \
+  --arg o 'package m' --arg n 'package m
+func F() { _ = X() }' \
+  '{tool_name:"Edit", tool_input:{file_path:$p, old_string:$o, new_string:$n}}')
+out=$( ( cd "$TMP_V18R4F1" && printf '%s' "$PAYLOAD" | bash "$HOOK" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'audit.*missing|audit.*log.*deleted|audit.*chain.*absent|missing.*audit'; then
+  pass "v18_r4_audit_log_missing_with_approved_fails_closed"
+else
+  fail "v18_r4_audit_log_missing_with_approved_fails_closed: missing audit log + approved exceptions must reject (got: '$out')"
+fi
+rm -rf "$TMP_V18R4F1"
+
+# v18-r4-F2: compile-fix-scope-check must NOT accept off-scope
+# IDENTIFIER lines (only punctuation-only continuation lines).
+TMP_V18R4F2=$(mktemp -d)
+echo "package m" > "$TMP_V18R4F2/x.go"
+diff_input='--- a/x.go
++++ b/x.go
+@@ -1,2 +1,3 @@
+-    Reconcile(ctx)
++    Reconcile(ctx, opts)
++    cleanupProductionData("Reconcile")'
+if printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" compile-fix-scope-check --symbols Reconcile --paths "$TMP_V18R4F2/x.go" >/dev/null 2>&1; then
+  fail "v18_r4_compile_fix_off_scope_ident_line_rejected: off-scope identifier line must NOT be accepted via hunk-level carve-out"
+else
+  pass "v18_r4_compile_fix_off_scope_ident_line_rejected"
+fi
+rm -rf "$TMP_V18R4F2"
+
+# v18-r4-F3: mech-sig-prop-check must accept legitimate inner-arg
+# call changes when the OUTER assertion helper is unchanged.
+TMP_V18R4F3=$(mktemp -d)
+echo "package m" > "$TMP_V18R4F3/x_test.go"
+diff_input='--- a/x_test.go
++++ b/x_test.go
+@@ -1,1 +1,1 @@
+-    require.Equal(t, want, Do(ctx))
++    require.Equal(t, want, Do(ctx, opts))'
+if printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" mech-sig-prop-check --symbols Do --paths "$TMP_V18R4F3/x_test.go" >/dev/null 2>&1; then
+  pass "v18_r4_mech_sig_prop_accepts_inner_arg_change"
+else
+  out=$( ( printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" mech-sig-prop-check --symbols Do --paths "$TMP_V18R4F3/x_test.go" 2>&1 ) || true)
+  fail "v18_r4_mech_sig_prop_accepts_inner_arg_change: outer helper Equal unchanged; inner Do() arg widening must be allowed (got: '$out')"
+fi
+rm -rf "$TMP_V18R4F3"
+
+# v18-r4-F4: AST path matching must NOT collide on basenames. Two
+# files in the diff with same basename + different dirs must not be
+# confused for each other.
+TMP_V18R4F4=$(mktemp -d)
+mkdir -p "$TMP_V18R4F4/a" "$TMP_V18R4F4/b"
+# File a/x_test.go has imports; b/x_test.go does not.
+cat > "$TMP_V18R4F4/a/x_test.go" <<'EOF'
+package a
+import "testing"
+EOF
+cat > "$TMP_V18R4F4/b/x_test.go" <<'EOF'
+package b
+EOF
+# Diff modifies ONLY b/x_test.go (adding outside-import-block change).
+# When --paths includes a/x_test.go (which has imports), AST should
+# NOT validate against a's import ranges using b's diff.
+diff_input='--- a/b/x_test.go
++++ b/b/x_test.go
+@@ -1,1 +1,2 @@
+ package b
++func F() { _ = "looser" }'
+out=$( ( printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" import-block-check --paths "$TMP_V18R4F4/a/x_test.go,$TMP_V18R4F4/b/x_test.go" 2>&1 ) || true)
+# The diff modifies b/x_test.go which has NO imports. The added line
+# is non-import. AST must reject for b's path (not silently accept by
+# matching basename to a/x_test.go).
+if printf '%s' "$out" | grep -qE 'outside_import|b/x_test\.go'; then
+  pass "v18_r4_ast_path_matching_relative_not_basename"
+else
+  fail "v18_r4_ast_path_matching_relative_not_basename: must validate against the right file when basenames collide (got: '$out')"
+fi
+rm -rf "$TMP_V18R4F4"
+
+echo
+
+# ─────────────────────────────────────────────────────────────────────
+# v1.8.0 round-5 fixes (codex /second-opinion).
+# F1 (P0): AST validators must FILTER by --paths (mech-sig-prop and
+#          compile-fix-scope ignore the flag entirely).
+# F2 (P0): Path matching must prefer relative-path equality; basename
+#          fallback is too lenient (collides on same basenames in
+#          different dirs).
+# F3 (P0): compile-fix-scope carve-out must NOT accept off-scope
+#          IDENT/LITERAL lines as "argument continuation".
+# F4 (P0): verify-audit-chain must reject missing prev_sha after the
+#          chain has started (only pre-chain prefix is tolerated).
+# ─────────────────────────────────────────────────────────────────────
+
+# v18-r5-F1: AST validators (mech-sig-prop / compile-fix-scope) must
+# only validate diffs for files in --paths. A diff naming an
+# unrelated file (not in --paths) must NOT trigger rejection.
+TMP_V18R5F1=$(mktemp -d)
+echo "package m" > "$TMP_V18R5F1/scoped.go"
+echo "package m" > "$TMP_V18R5F1/other.go"
+# Diff on `other.go` only. --paths references `scoped.go`.
+diff_input='--- a/other.go
++++ b/other.go
+@@ -1,1 +1,1 @@
+-    require.Equal(t, want, Do())
++    require.NoError(t, Do())'
+# mech-sig-prop-check on scoped.go (NOT in diff). Expectation: pass
+# (no relevant diff for this path).
+if printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" mech-sig-prop-check --symbols Do --paths "$TMP_V18R5F1/scoped.go" >/dev/null 2>&1; then
+  pass "v18_r5_ast_validators_filter_by_paths"
+else
+  out=$( ( printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" mech-sig-prop-check --symbols Do --paths "$TMP_V18R5F1/scoped.go" 2>&1 ) || true)
+  fail "v18_r5_ast_validators_filter_by_paths: AST must IGNORE diff entries for files NOT in --paths (got: '$out')"
+fi
+rm -rf "$TMP_V18R5F1"
+
+# v18-r5-F2: pathMatches must NOT cross-match files with same basename
+# in different dirs. Target is a/x_test.go. Diff path b/x_test.go. The
+# AST must not validate b's diff against a's import ranges.
+TMP_V18R5F2=$(mktemp -d)
+mkdir -p "$TMP_V18R5F2/a" "$TMP_V18R5F2/b"
+cat > "$TMP_V18R5F2/a/x_test.go" <<'EOF'
+package a
+import "testing"
+EOF
+cat > "$TMP_V18R5F2/b/x_test.go" <<'EOF'
+package b
+EOF
+# Diff modifies b/x_test.go (no on-disk imports). --paths is only a/x_test.go.
+diff_input='--- a/b/x_test.go
++++ b/b/x_test.go
+@@ -1,1 +1,2 @@
+ package b
++func F() { _ = "looser" }'
+if printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" import-block-check --paths "$TMP_V18R5F2/a/x_test.go" >/dev/null 2>&1; then
+  pass "v18_r5_path_matching_strict_relative"
+else
+  out=$( ( printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" import-block-check --paths "$TMP_V18R5F2/a/x_test.go" 2>&1 ) || true)
+  fail "v18_r5_path_matching_strict_relative: diff for b/x_test.go must NOT match against a/x_test.go's --paths target (got: '$out')"
+fi
+rm -rf "$TMP_V18R5F2"
+
+# v18-r5-F3: compile-fix-scope-check must REJECT off-scope IDENT
+# argument lines even when the same hunk has a scoped change.
+TMP_V18R5F3=$(mktemp -d)
+echo "package m" > "$TMP_V18R5F3/x.go"
+diff_input='--- a/x.go
++++ b/x.go
+@@ -1,3 +1,4 @@
+-    Reconcile(
+-        ctx,
+-    )
++    Reconcile(
++        ctx,
++        DangerousProductionFlag,
++    )'
+if printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" compile-fix-scope-check --symbols Reconcile --paths "$TMP_V18R5F3/x.go" >/dev/null 2>&1; then
+  fail "v18_r5_compile_fix_rejects_off_scope_arg_continuation: an off-scope IDENT (DangerousProductionFlag) added in a Reconcile hunk must NOT slip through as argument continuation"
+else
+  pass "v18_r5_compile_fix_rejects_off_scope_arg_continuation"
+fi
+rm -rf "$TMP_V18R5F3"
+
+# v18-r5-F4: verify-audit-chain must reject a missing prev_sha line
+# AFTER the chain has started.
+TMP_V18R5F4=$(mktemp -d)
+mkdir -p "$TMP_V18R5F4/.tdd/audit"
+line1='{"ts":"2026-05-10T22:00:00Z","event":"granted","exception_id":"E-001","cycle_id":"v18r5f4","prev_sha":""}'
+line1_sha=$(printf '%s' "$line1" | sha256sum | awk '{print $1}')
+line2="{\"ts\":\"2026-05-10T22:01:00Z\",\"event\":\"used\",\"exception_id\":\"E-001\",\"cycle_id\":\"v18r5f4\",\"prev_sha\":\"$line1_sha\"}"
+# Tampered line 3: legitimate event but prev_sha REMOVED (operator
+# trying to look like pre-v1.8 history).
+line3='{"ts":"2026-05-10T22:02:00Z","event":"used","exception_id":"E-001","cycle_id":"v18r5f4"}'
+printf '%s\n%s\n%s\n' "$line1" "$line2" "$line3" > "$TMP_V18R5F4/.tdd/audit/v18r5f4.jsonl"
+if ( cd "$TMP_V18R5F4" && bash "$V18_VERIFY_CHAIN" v18r5f4 >/dev/null 2>&1 ); then
+  fail "v18_r5_verify_chain_rejects_post_chain_missing_prev_sha: missing prev_sha after chain has started must FAIL the chain check"
+else
+  pass "v18_r5_verify_chain_rejects_post_chain_missing_prev_sha"
+fi
+rm -rf "$TMP_V18R5F4"
+
+echo
+
+# ─────────────────────────────────────────────────────────────────────
+# v1.8.0 round-6 fixes (codex /second-opinion).
+# F1 (P0): audit chain must detect truncation — count of `granted`
+#          events in log must match approved-exception count in artifact.
+# F2 (PUSHBACK): codex mis-flagged grant helper's `sha256` as
+#                non-portable; the function IS defined at the top of
+#                the helper. v18_audit_chain_grant_helper_writes_prev_sha
+#                already verifies cross-event chain works.
+# F3 (P1): import-only must reject comment additions outside the
+#          import block (e.g., `//go:build` build constraints).
+# ─────────────────────────────────────────────────────────────────────
+
+# v18-r6-F1: audit log truncation (operator removes trailing lines)
+# must be detected when the artifact has more approved exceptions than
+# the log has `granted` events.
+TMP_V18R6F1=$(mktemp -d)
+mkdir -p "$TMP_V18R6F1/internal/m" "$TMP_V18R6F1/.tdd/exceptions" "$TMP_V18R6F1/.tdd/audit"
+( cd "$TMP_V18R6F1" && git init -q && git config user.email t@t && git config user.name t )
+cat > "$TMP_V18R6F1/.tdd/tdd-config.json" <<'EOF'
+{
+  "tier1_path_regexes": ["^internal/"],
+  "test_file_policy": {
+    "allow_after_red_confirmed": false,
+    "post_red_mechanical_update": {
+      "enabled": true,
+      "exception_types": ["mechanical_signature_propagation","compile_fix_only","import_only"],
+      "validators": {"active_profiles": ["stdlib","testify"]}
+    }
+  }
+}
+EOF
+cat > "$TMP_V18R6F1/.tdd/current-plan.md" <<'EOF'
+Cycle ID: v18r6f1
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+echo "red proof" > "$TMP_V18R6F1/.tdd/red-proof.md"
+echo "package m" > "$TMP_V18R6F1/internal/m/x_test.go"
+( cd "$TMP_V18R6F1" && git add . && git commit -q -m initial )
+plan_h=$(sha256sum "$TMP_V18R6F1/.tdd/current-plan.md" | awk '{print $1}')
+red_h=$(sha256sum "$TMP_V18R6F1/.tdd/red-proof.md" | awk '{print $1}')
+head_at_approval=$( cd "$TMP_V18R6F1" && git rev-parse HEAD )
+ihash() { printf 'v18r6f1|%s|mechanical_signature_propagation|r|internal/m/*_test.go|edit_existing_tests' "$1" | sha256sum | awk '{print $1}'; }
+# Artifact has TWO approved exceptions.
+cat > "$TMP_V18R6F1/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{
+  "version": 1, "cycle_id": "v18r6f1", "phase": "red_confirmed", "expires": "next_green_commit",
+  "exceptions": [
+    {"id":"E-001","type":"mechanical_signature_propagation","status":"approved","approved_by":"o","approved_at":"x","operations":["edit_existing_tests"],"scope":{"paths":["internal/m/*_test.go"],"symbols":["X"]},"reason":"r","binding":{"cycle_id":"v18r6f1","plan_hash":"$plan_h","red_proof_hash":"$red_h","change_intent_hash":"$(ihash X)","head_at_approval":"$head_at_approval"}},
+    {"id":"E-002","type":"mechanical_signature_propagation","status":"approved","approved_by":"o","approved_at":"x","operations":["edit_existing_tests"],"scope":{"paths":["internal/m/*_test.go"],"symbols":["Y"]},"reason":"r","binding":{"cycle_id":"v18r6f1","plan_hash":"$plan_h","red_proof_hash":"$red_h","change_intent_hash":"$(ihash Y)","head_at_approval":"$head_at_approval"}}
+  ]
+}
+EOF
+# Audit log has only ONE granted event (operator truncated).
+echo '{"ts":"x","event":"granted","exception_id":"E-001","cycle_id":"v18r6f1","prev_sha":""}' > "$TMP_V18R6F1/.tdd/audit/v18r6f1.jsonl"
+PAYLOAD=$(jq -n --arg p "internal/m/x_test.go" \
+  --arg o 'package m' --arg n 'package m
+func F() { _ = X() }' \
+  '{tool_name:"Edit", tool_input:{file_path:$p, old_string:$o, new_string:$n}}')
+out=$( ( cd "$TMP_V18R6F1" && printf '%s' "$PAYLOAD" | bash "$HOOK" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'audit.*truncat|granted.*event.*missing|grant.*count.*mismatch|approved.*not.*in.*audit|missing.*granted.*event'; then
+  pass "v18_r6_audit_log_truncation_detected"
+else
+  fail "v18_r6_audit_log_truncation_detected: 2 approved entries vs 1 granted event = truncation; must reject (got: '$out')"
+fi
+rm -rf "$TMP_V18R6F1"
+
+# v18-r6-F3: import_only must reject comment additions OUTSIDE import
+# block (e.g., a `//go:build prod_only` build constraint that disables
+# the test).
+TMP_V18R6F3=$(mktemp -d)
+cat > "$TMP_V18R6F3/x_test.go" <<'EOF'
+package m
+import "testing"
+EOF
+diff_input='--- a/x_test.go
++++ b/x_test.go
+@@ -1,2 +1,3 @@
++//go:build prod_only
+ package m
+ import "testing"'
+if printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" import-block-check --paths "$TMP_V18R6F3/x_test.go" >/dev/null 2>&1; then
+  fail "v18_r6_import_only_rejects_build_constraint: build constraint outside import block must be rejected (validator returned exit 0)"
+else
+  pass "v18_r6_import_only_rejects_build_constraint"
+fi
+rm -rf "$TMP_V18R6F3"
+
+echo
+
+# ─────────────────────────────────────────────────────────────────────
+# v1.8.0 round-7 fixes (codex /second-opinion).
+# F1 (P0): schema_predicate_correction must reject diffs where ANY
+#          oldName remains unrenamed on the + side.
+# F2 (P0): compile-fix-scope must NOT blanket-skip comments
+#          (//go:build directives can disable tests).
+# F3 (P0): audit truncation check must compare SETS of exception_ids,
+#          not just counts.
+# ─────────────────────────────────────────────────────────────────────
+
+# v18-r7-F1: schema_predicate_correction must reject when only SOME
+# occurrences of oldName were renamed.
+TMP_V18R7F1=$(mktemp -d)
+echo "package m" > "$TMP_V18R7F1/x_test.go"
+diff_input='--- a/x_test.go
++++ b/x_test.go
+@@ -1,1 +1,1 @@
+-    require.Equal(t, want.OldField, got.OldField)
++    require.Equal(t, want.NewField, got.OldField)'
+if printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" schema-predicate-check --old-name OldField --new-name NewField --paths "$TMP_V18R7F1/x_test.go" >/dev/null 2>&1; then
+  fail "v18_r7_schema_predicate_rejects_partial_rename: only one of two OldField occurrences renamed; must be rejected"
+else
+  pass "v18_r7_schema_predicate_rejects_partial_rename"
+fi
+rm -rf "$TMP_V18R7F1"
+
+# v18-r7-F2: compile-fix-scope-check must REJECT a Go directive
+# comment (//go:build) outside scoped-symbol context.
+TMP_V18R7F2=$(mktemp -d)
+echo "package m" > "$TMP_V18R7F2/x_test.go"
+diff_input='--- a/x_test.go
++++ b/x_test.go
+@@ -1,1 +1,2 @@
++//go:build prod_only
+ package m'
+if printf '%s' "$diff_input" | timeout 5 go run "$V18_AST" compile-fix-scope-check --symbols Reconcile --paths "$TMP_V18R7F2/x_test.go" >/dev/null 2>&1; then
+  fail "v18_r7_compile_fix_rejects_build_directive_comment: build directive must be rejected (validator returned exit 0)"
+else
+  pass "v18_r7_compile_fix_rejects_build_directive_comment"
+fi
+rm -rf "$TMP_V18R7F2"
+
+# v18-r7-F3: audit truncation check must compare SETS of IDs.
+# Artifact approves E-001, E-002. Audit log has grants for E-001 + E-999
+# (count matches but ID set doesn't). Hook must reject.
+TMP_V18R7F3=$(mktemp -d)
+mkdir -p "$TMP_V18R7F3/internal/m" "$TMP_V18R7F3/.tdd/exceptions" "$TMP_V18R7F3/.tdd/audit"
+( cd "$TMP_V18R7F3" && git init -q && git config user.email t@t && git config user.name t )
+cat > "$TMP_V18R7F3/.tdd/tdd-config.json" <<'EOF'
+{
+  "tier1_path_regexes": ["^internal/"],
+  "test_file_policy": {
+    "allow_after_red_confirmed": false,
+    "post_red_mechanical_update": {
+      "enabled": true,
+      "exception_types": ["mechanical_signature_propagation","compile_fix_only","import_only"],
+      "validators": {"active_profiles": ["stdlib","testify"]}
+    }
+  }
+}
+EOF
+cat > "$TMP_V18R7F3/.tdd/current-plan.md" <<'EOF'
+Cycle ID: v18r7f3
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+echo "red proof" > "$TMP_V18R7F3/.tdd/red-proof.md"
+echo "package m" > "$TMP_V18R7F3/internal/m/x_test.go"
+( cd "$TMP_V18R7F3" && git add . && git commit -q -m initial )
+plan_h=$(sha256sum "$TMP_V18R7F3/.tdd/current-plan.md" | awk '{print $1}')
+red_h=$(sha256sum "$TMP_V18R7F3/.tdd/red-proof.md" | awk '{print $1}')
+head_at_approval=$( cd "$TMP_V18R7F3" && git rev-parse HEAD )
+ihash() { printf 'v18r7f3|%s|mechanical_signature_propagation|r|internal/m/*_test.go|edit_existing_tests' "$1" | sha256sum | awk '{print $1}'; }
+cat > "$TMP_V18R7F3/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{
+  "version": 1, "cycle_id": "v18r7f3", "phase": "red_confirmed", "expires": "next_green_commit",
+  "exceptions": [
+    {"id":"E-001","type":"mechanical_signature_propagation","status":"approved","approved_by":"o","approved_at":"x","operations":["edit_existing_tests"],"scope":{"paths":["internal/m/*_test.go"],"symbols":["X"]},"reason":"r","binding":{"cycle_id":"v18r7f3","plan_hash":"$plan_h","red_proof_hash":"$red_h","change_intent_hash":"$(ihash X)","head_at_approval":"$head_at_approval"}},
+    {"id":"E-002","type":"mechanical_signature_propagation","status":"approved","approved_by":"o","approved_at":"x","operations":["edit_existing_tests"],"scope":{"paths":["internal/m/*_test.go"],"symbols":["Y"]},"reason":"r","binding":{"cycle_id":"v18r7f3","plan_hash":"$plan_h","red_proof_hash":"$red_h","change_intent_hash":"$(ihash Y)","head_at_approval":"$head_at_approval"}}
+  ]
+}
+EOF
+# Audit log has 2 grants but for E-001 + E-999 (not E-002).
+line1='{"ts":"x","event":"granted","exception_id":"E-001","cycle_id":"v18r7f3","prev_sha":""}'
+line1_sha=$(printf '%s' "$line1" | sha256sum | awk '{print $1}')
+line2="{\"ts\":\"x\",\"event\":\"granted\",\"exception_id\":\"E-999\",\"cycle_id\":\"v18r7f3\",\"prev_sha\":\"$line1_sha\"}"
+printf '%s\n%s\n' "$line1" "$line2" > "$TMP_V18R7F3/.tdd/audit/v18r7f3.jsonl"
+PAYLOAD=$(jq -n --arg p "internal/m/x_test.go" \
+  --arg o 'package m' --arg n 'package m
+func F() { _ = X() }' \
+  '{tool_name:"Edit", tool_input:{file_path:$p, old_string:$o, new_string:$n}}')
+out=$( ( cd "$TMP_V18R7F3" && printf '%s' "$PAYLOAD" | bash "$HOOK" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'audit.*missing.*grant|exception_id.*not.*in.*audit|grant.*set.*mismatch|approved.*not.*granted'; then
+  pass "v18_r7_audit_truncation_id_set_check"
+else
+  fail "v18_r7_audit_truncation_id_set_check: ID-set mismatch (E-002 missing) must be detected (got: '$out')"
+fi
+rm -rf "$TMP_V18R7F3"
 
 echo
 echo "Self-test: timeout wrapper kills a hanging hook within budget..."

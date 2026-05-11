@@ -55,6 +55,8 @@ symbol=""
 operations="edit_existing_tests"
 reason=""
 cycle_id=""
+old_name=""
+new_name=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -65,6 +67,8 @@ while [[ $# -gt 0 ]]; do
     --operations)     operations="${2:-}"; shift 2 ;;
     --reason)         reason="${2:-}"; shift 2 ;;
     --cycle-id)       cycle_id="${2:-}"; shift 2 ;;
+    --old-name)       old_name="${2:-}"; shift 2 ;;
+    --new-name)       new_name="${2:-}"; shift 2 ;;
     *)                shift ;;
   esac
 done
@@ -73,6 +77,13 @@ if [[ "$mode" == "create" ]]; then
   if [[ -z "$type" || -z "$paths" || -z "$reason" ]]; then
     echo "[grant-test-edit-exception] BLOCKED: --type, --paths, --reason are required." >&2
     exit 2
+  fi
+  # v1.8.0 AC3.2: schema_predicate_correction requires --old-name + --new-name.
+  if [[ "$type" == "schema_predicate_correction" ]]; then
+    if [[ -z "$old_name" || -z "$new_name" ]]; then
+      echo "[grant-test-edit-exception] BLOCKED: schema_predicate_correction requires --old-name AND --new-name." >&2
+      exit 2
+    fi
   fi
   if [[ -z "$cycle_id" ]] && [[ -f "$PLAN" ]]; then
     cycle_id="$(grep -E '^Cycle ID:' "$PLAN" 2>/dev/null | head -1 | sed -E 's/^Cycle ID:[[:space:]]*//')"
@@ -99,6 +110,8 @@ if [[ "$mode" == "create" ]]; then
      --arg type "$type" \
      --arg cycle "$cycle_id" \
      --arg reason "$reason" \
+     --arg old_name "$old_name" \
+     --arg new_name "$new_name" \
      --argjson paths "$paths_json" \
      --argjson symbols "$symbols_json" \
      --argjson ops "$ops_json" \
@@ -109,7 +122,9 @@ if [[ "$mode" == "create" ]]; then
         "approved_by": "",
         "approved_at": "",
         "operations": $ops,
-        "scope": {"paths": $paths, "symbols": $symbols},
+        "scope": ({"paths": $paths, "symbols": $symbols}
+                  + (if $old_name != "" then {"old_name": $old_name} else {} end)
+                  + (if $new_name != "" then {"new_name": $new_name} else {} end)),
         "reason": $reason,
         "binding": {"cycle_id": $cycle, "plan_hash": "", "red_proof_hash": "", "change_intent_hash": ""}
       }]' "$ARTIFACT" > "$ARTIFACT.tmp" && mv "$ARTIFACT.tmp" "$ARTIFACT"
@@ -205,11 +220,20 @@ if [[ "$mode" == "approve" ]]; then
       ))
     ' "$ARTIFACT" > "$ARTIFACT.tmp" && mv "$ARTIFACT.tmp" "$ARTIFACT"
 
-    # Append granted event to audit log.
+    # Append granted event to audit log. v1.8.0 AC5.4: include
+    # prev_sha (sha256 of the previous line) so verify-audit-chain.sh
+    # can detect tampering. First line in a fresh log has prev_sha "".
+    prev_sha=""
+    if [[ -f "$audit_log" ]] && [[ -s "$audit_log" ]]; then
+      last_line="$(tail -1 "$audit_log" 2>/dev/null || true)"
+      if [[ -n "$last_line" ]]; then
+        prev_sha="$(printf '%s' "$last_line" | sha256 | awk '{print $1}')"
+      fi
+    fi
     entry_json="$(jq -c -n \
       --arg ts "$ts" --arg event "granted" --arg id "$id" \
-      --arg cycle "$cycle_id" \
-      '{ts: $ts, event: $event, exception_id: $id, cycle_id: $cycle}')"
+      --arg cycle "$cycle_id" --arg ps "$prev_sha" \
+      '{ts: $ts, event: $event, exception_id: $id, cycle_id: $cycle, prev_sha: $ps}')"
     printf '%s\n' "$entry_json" >> "$audit_log"
     echo "[grant-test-edit-exception] Approved $id; logged to $audit_log." >&2
   done

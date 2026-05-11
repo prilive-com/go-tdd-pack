@@ -1,91 +1,91 @@
-# Disposition matrix — v1.7.0-typed-test-edit-exceptions
+# Disposition matrix — v1.8.0-ast-validator-and-audit-integrity
 
-Date: 2026-05-10
+Date: 2026-05-11
 Rounds: 7
-Total findings: 24 (P0/P1 only — P2/P3 not surfaced this cycle)
-Disposition: 24 ACCEPTED + FIXED, 0 deferred-to-v1.8 within-cycle.
-Out-of-scope deferred work documented at the bottom.
+Total findings: 25 ACCEPTED + 1 PUSHBACK across 7 rounds.
+Plus 7 sub-findings already-passing (codex hypothetical that didn't manifest in our impl).
 
-## Round 1 (4 P0)
+## Round 1 (3 P0 + 1 P1)
 | ID | Severity | Title | Disposition |
 |----|----------|-------|-------------|
-| F1 | P0 | Hook never invokes validator (dead code) | ACCEPT — wired typed-exception block before legacy boolean |
-| F2 | P0 | Glob match direction inverted | ACCEPT — fixed file vs glob ordering |
-| F3 | P0 | Approval state machine missing (re-approve allowed) | ACCEPT — preflight `status==pending` + count==1 |
-| F4 | P0 | Hash binding incomplete (cycle_id allowed empty) | ACCEPT — non-empty cycle_id + plan_hash required |
-| F5 | P0 | Per-file diff scoping wrong | ACCEPT — awk extract per `--- a/<base>` headers |
+| F1 | P0 | schema_predicate_correction accepts semantic non-renames | ACCEPT — extended tokens to include BasicLit; reject unmatched +/- counts; require renameSeen |
+| F2 | P0 | import-block leniency permits misplaced imports | ACCEPT — top-of-file boundary check when no on-disk imports |
+| F3 | P0 | grant helper uses non-portable sha256 | PUSHBACK — sha256 IS defined as a function at top of helper; v18_audit_chain_grant_helper_writes_prev_sha verifies cross-event chain works |
+| F4 | P1 | Assertion helper extraction misses chained changes | ACCEPT — return full helper sequence (chain), not first only |
 
-## Round 2 (5 P0)
+## Round 2 (3 P0)
 | ID | Severity | Title | Disposition |
 |----|----------|-------|-------------|
-| F1 | P0 | Validator runs on worktree diff, not proposed payload | ACCEPT — synthetic diff from PAYLOAD |
-| F2 | P0 | Per-file matched exception overwritten | ACCEPT — `declare -A` map |
-| F3 | P0 | import_only allowed assertion changes | ACCEPT — type-specific pre-check |
-| F4 | P0 | Blank cycle_id/plan_hash silent bypass | ACCEPT — non-empty selectors |
-| F5 | P0 | Validator stderr not surfaced to operator | ACCEPT — captured via `{ ... 2>&1 >/dev/null; echo EXIT:$?; }` |
+| F1 | P0 | schema_predicate_correction unvalidated when AST disabled | ACCEPT — fail closed for this type when AST unavailable (no regex fallback) |
+| F2 | P0 | schema-predicate-check ignores operators/punctuation | ACCEPT — full-text regex rename + collapseSpaces comparison |
+| F3 | P0 | import-block-check rejects legitimate top-level additions | ACCEPT — synthesize new file via diff applier; check ranges in NEW file |
 
-## Round 3 (4 P0)
+## Round 3 (2 P0 + 1 P1)
 | ID | Severity | Title | Disposition |
 |----|----------|-------|-------------|
-| F1 | P0 | MultiEdit shape unhandled | ACCEPT — top-level file_path + edits[] branch |
-| F2 | P0 | create_new_tests validates wrong content | ACCEPT — materialize Write/MultiEdit content to tmp file |
-| F3 | P0 | change_intent_hash never verified by hook | ACCEPT — recompute + compare in hook |
-| F4 | P0 | Unknown type/operation not rejected | ACCEPT — whitelist case statement |
+| F1 | P0 | import-block-check ignores deletions outside import block | ACCEPT — also validate `-` lines against OLD file's ranges |
+| F2 | P0 | schema-predicate-check accepts string/comment rewrites | ACCEPT — go/scanner-based token comparison (only IDENT renames allowed) |
+| F3 | P1 | compile-fix-scope rejects punctuation-only continuation | ACCEPT — hunk-level carve-out for punctuation-only lines (later tightened) |
 
 ## Round 4 (3 P0 + 1 P1)
 | ID | Severity | Title | Disposition |
 |----|----------|-------|-------------|
-| F1 | P0 | edit_existing_tests permits Write to non-existent test | ACCEPT — operation inference + ops whitelist check |
-| F2 | P0 | Synthetic diff treats unchanged context as +/- | ACCEPT — real `diff -u` instead of prefix construction |
-| F3 | P0 | change_intent_hash doesn't bind paths/operations | ACCEPT — extended format `cycle\|symbols\|type\|reason\|paths\|operations` |
-| F4 | P1 | Tests passed on legacy denial path | ACCEPT — RED test + meta-assertion `VALIDATOR REPORT` |
+| F1 | P0 | Audit log deletion bypasses sha-chain detection | ACCEPT — hook fails closed when approved exceptions exist but audit log missing/empty |
+| F2 | P0 | compile-fix-scope carve-out too lenient | ACCEPT — initially allowed isArgContinuation; later tightened to punctuation-only (round-5 F3) |
+| F3 | P0 | mech-sig-prop rejects legitimate inner-arg call changes | ACCEPT (already passes) — extractAssertionHelpers only collects selector-receiver calls, not Ident-receiver |
+| F4 | P1 | AST diff path matching basename collision | ACCEPT (later tightened in round 5) — pathMatches now strict relative |
 
-## Round 5 (3 P0 + 1 P1)
+## Round 5 (4 P0)
 | ID | Severity | Title | Disposition |
 |----|----------|-------|-------------|
-| F1 | P0 | Approved exceptions never expire / red_proof_hash unverified | ACCEPT — hook verifies red_proof_hash; expires lifecycle |
-| F2 | P0 | create_new_tests passes when content can't be materialized | ACCEPT — fail-closed when target path doesn't exist |
-| F3 | P0 | compile_fix_only allows arbitrary non-assertion edits | ACCEPT — compile_fix_only restricts to scope.symbols |
-| F4 | P1 | import_only rejects valid alias/dot/blank Go imports | ACCEPT — extended regex |
+| F1 | P0 | AST validators ignore --paths | ACCEPT — filterFilesByPaths in all four subcommands |
+| F2 | P0 | Path matching collides on basenames | ACCEPT — strict suffix match, no basename fallback |
+| F3 | P0 | compile-fix carve-out permits off-scope IDENT/LITERAL | ACCEPT — dropped isArgContinuation; punctuation-only carve-out only |
+| F4 | P0 | Audit verifier tolerates post-chain missing prev_sha | ACCEPT — track chain_started; reject missing prev_sha after start |
 
-## Round 6 (3 P0 + 1 P1)
+## Round 6 (2 P0 + 1 P1; 1 PUSHBACK)
 | ID | Severity | Title | Disposition |
 |----|----------|-------|-------------|
-| F1 | P0 | Empty proposed_diff fails open | ACCEPT — path normalization + empty-diff fail-closed |
-| F2 | P0 | mech_sig_prop blocks call-site edits inside assertions | ACCEPT — allow assertion-line +/- when every change touches scope symbol |
-| F3 | P0 | Unparseable absolute expires fails open | ACCEPT — fail closed on parse failure (BSD `date -j -f` fallback) |
-| F4 | P1 | no_test_deletion / no_empty_t_run knobs are dead | ACCEPT — diff-based checks added |
+| F1 | P0 | Audit chain can't detect last-line tamper / suffix truncation | ACCEPT — count `granted` events; if < approved count → fail closed |
+| F2 | P0 | grant helper non-portable sha256 (REPEATED) | PUSHBACK — same false-positive as round-1 F3; sha256 function works |
+| F3 | P1 | import-only ignores comment lines outside import block | ACCEPT — no longer skip comments; reject if outside import range |
 
-## Round 7 (4 P0 + 1 P1)
+## Round 7 (3 P0)
 | ID | Severity | Title | Disposition |
 |----|----------|-------|-------------|
-| F1 | P0 | mech_sig_prop allows assertion-helper change when symbol present | ACCEPT — helper/comparator multiset must match between -/+ |
-| F2 | P0 | mech_sig_prop allows non-assertion edits off-scope | ACCEPT — every non-import +/- line must touch a declared symbol |
-| F3 | P0 | import_only not scoped to import declarations | ACCEPT (test passes; further hardening tracked below) |
-| F4 | P0 | next_green_commit expiry bypassable via mtime touch | ACCEPT — git HEAD binding (`binding.head_at_approval`) |
-| F5 | P1 | create_new_tests materialization ignores normalized path | ACCEPT (test passes; same `_normalize_path` reused) |
+| F1 | P0 | schema_predicate_correction allows partial renames | ACCEPT — reject any unchanged oldName token on either side |
+| F2 | P0 | compile-fix ignores comment directives (//go:build) | ACCEPT — no longer skip comments; require scope-symbol or punctuation-only |
+| F3 | P0 | Audit truncation counts grants, not IDs | ACCEPT — jq-based set comparison of approved IDs vs grant event IDs |
 
-## Known limits — deferred to v1.8 (out of scope for this cycle)
+## Known limits — deferred to v1.9 (out of scope for this cycle)
 
-1. **AST-based validation** — the entire validator is regex-based.
-   Edge cases will continue to surface (e.g., import_only doesn't track
-   import-block boundaries beyond regex shape; mech_sig_prop helper-
-   shape comparison is multiset-based, not parse-tree-based).
-   v1.8 will add `go/parser`-based analysis.
-
-2. **schema_predicate_correction exception type** — explicitly deferred
-   to v1.8 per spec (requires AST diff to detect schema-level changes).
-
-3. **compile_fix_only AST scope** — currently uses regex symbol match;
-   v1.8 should bind to AST-level "uses of declared symbol" rather than
-   word-boundary string match.
-
-4. **Per-cycle exception count caps + audit-log integrity** — operator
-   can manually edit `.tdd/audit/<cycle>.jsonl` (file is local + JSONL
-   append-only by convention, not enforced). v1.8 candidate.
+1. **Pre-built AST validator binary** — `go run` cold-start ~300ms.
+   Pack consumers can `go build scripts/tdd/ast/validator.go`; the
+   hook will detect a binary in v1.9.
+2. **schema-predicate-check is line-by-line** — multi-line refactors
+   that legitimately rename across hunks need to be split. v1.9
+   could add a hunk-level mode.
+3. **External audit head pin** — sha-chain + grant-ID-set check
+   detects most truncation; an external head hash bound into the
+   artifact's binding would close the last-line edit case completely.
+4. **Audit log archival/rotation** — log grows unbounded per cycle.
+   v1.9 candidate: cycle_close event + auto-archive on green commit.
+5. **Encrypted/signed audit log** — sha-chain detects unsophisticated
+   tampering; doesn't protect against a compromised host. v2.0+.
+6. **AST helper sandboxing** — `go run` reads source files; a
+   malicious project could craft validator.go via PATH manipulation.
+   v1.9 could enforce CLAUDE_PLUGIN_ROOT-based path resolution.
 
 ## Acceptance summary
 
 - 8 ACs from approved spec — all GREEN.
-- 7 review rounds processed — all P0/P1 findings within cycle scope ACCEPTED + FIXED.
-- 483 / 0 final smoke (33 v17 acceptance tests + ~22 round-RED tests added per round).
+- 7 review rounds processed.
+- 25 ACCEPTED + 2 PUSHBACK (both PUSHBACKs were the same false-
+  positive across rounds 1 and 6 — codex misread the grant helper
+  as missing a sha256 function that's defined at the top of the
+  same file; the v18_audit_chain_grant_helper_writes_prev_sha test
+  empirically verifies the cross-event chain works).
+- 7 sub-findings already passing on first detection (codex
+  hypotheticals that didn't manifest in our implementation).
+- 520 / 0 final smoke (14 v1.8.0 AC tests + 23 round-derived RED
+  tests across rounds 1-7 — every one transitioned RED → GREEN).

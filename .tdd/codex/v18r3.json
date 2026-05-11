@@ -1,0 +1,32 @@
+{
+  "summary": "Review found bypass and false-positive risks in the AST validator, mainly around import deletions, text-based schema renames, and line-local compile-fix scope checks.",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P0",
+      "category": "security",
+      "title": "import_only AST check ignores deleted lines outside import blocks",
+      "evidence": "runImportBlockCheck only validates added lines: it continues unless l.Kind == '+'. A diff that removes an import-shaped string literal outside an import block can still satisfy the old regex path while the AST gate never checks the '-' line location.",
+      "recommendation": "Validate both additions and deletions. Use new-file import ranges for '+' lines and old-file import ranges for '-' lines, and reject either side when outside an import declaration.",
+      "location": "scripts/tdd/ast/validator.go:421"
+    },
+    {
+      "id": "F2",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "schema_predicate_correction treats string/comment rewrites as pure renames",
+      "evidence": "The checker applies a word-boundary regexp replacement to raw line text, then compares collapsed strings. That allows changes like require.Equal(t, \"OldField\", got.OldField) -> require.Equal(t, \"NewField\", got.NewField), changing a literal while passing as a pure identifier rename.",
+      "recommendation": "Parse/tokenize the line and allow oldName -> newName only for ast.Ident nodes. Keep literals, operators, comments, and punctuation unchanged, or explicitly reject when the rename appears inside a BasicLit/comment.",
+      "location": "scripts/tdd/ast/validator.go:682"
+    },
+    {
+      "id": "F3",
+      "severity": "P1",
+      "category": "correctness",
+      "title": "compile_fix_only rejects legitimate syntax-only lines in scoped fixes",
+      "evidence": "runCompileFixScopeCheck rejects any changed nonblank, noncomment line with no identifiers. Multi-line call or composite-literal compile fixes commonly need punctuation-only changes such as ')' or '},' adjacent to scoped-symbol edits, so the hook can deny a legitimate mechanical compile fix.",
+      "recommendation": "Validate scope at hunk or parsed statement level instead of requiring every changed physical line to contain the scoped identifier. At minimum, allow syntax-only changed lines when the same hunk contains a scoped-symbol edit.",
+      "location": "scripts/tdd/ast/validator.go:628"
+    }
+  ]
+}

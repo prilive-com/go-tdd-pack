@@ -1,0 +1,32 @@
+{
+  "summary": "Review found audit-chain integrity gaps and one validator bypass risk; the sha-chain does not actually protect the last event or truncation.",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P0",
+      "category": "security",
+      "title": "Audit chain cannot detect tampering of the latest line or suffix truncation",
+      "evidence": "The verifier only checks each line's prev_sha against the previous line, then exits successfully. There is no external head hash, line count, or current-line hash, so editing the final JSONL line or deleting trailing lines leaves all remaining prev_sha checks valid.",
+      "recommendation": "Persist and verify a chain head hash or event count outside the log, and require approved exceptions to have matching grant events in the verified log.",
+      "location": "scripts/tdd/verify-audit-chain.sh:80"
+    },
+    {
+      "id": "F2",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "Grant helper uses non-portable sha256 command when appending audit events",
+      "evidence": "prev_sha is computed with `sha256`, but the new verifier defines its own sha256sum/shasum fallback while this helper does not in the changed code. On typical Linux systems this either fails or writes an empty prev_sha for the second event, breaking legitimate multi-event cycles.",
+      "recommendation": "Add the same portable sha256 helper used by verify-audit-chain.sh, and fail hard if neither sha256sum nor shasum is available.",
+      "location": "scripts/tdd/grant-test-edit-exception.sh:227"
+    },
+    {
+      "id": "F3",
+      "severity": "P1",
+      "category": "correctness",
+      "title": "Import-only AST check ignores comment lines outside import blocks",
+      "evidence": "import-block-check skips every changed line whose trimmed text starts with `//` before range validation. Build constraints such as `//go:build ignore` are comments but can disable or change test compilation, so they are not safe import-only edits.",
+      "recommendation": "Do not blanket-skip comments. Reject comment changes outside import declarations, or at minimum treat build constraints and Go directives as semantic lines that must fail import_only validation.",
+      "location": "scripts/tdd/ast/validator.go:443"
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "summary": "I found three governance-bypass risks: partial schema renames pass, compile-fix comments can smuggle build directives, and audit grant-count checking does not bind grants to approved IDs.",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "schema_predicate_correction allows partial renames within a predicate",
+      "evidence": "runSchemaPredicateCheck treats unchanged old-name identifiers as acceptable because it first accepts identical tokens, then only validates differing IDENT oldName -> newName tokens. A diff like want.OldField -> want.NewField while leaving got.OldField unchanged still sets renameSeen and passes, even though it is not a pure rename everywhere in the predicate.",
+      "recommendation": "Reject any remaining oldName token on the added side and require every oldName occurrence in removed tokens to map to newName at the same position.",
+      "location": "scripts/tdd/ast/validator.go:927"
+    },
+    {
+      "id": "F2",
+      "severity": "P0",
+      "category": "security",
+      "title": "compile_fix_only AST check ignores comment directives",
+      "evidence": "compile-fix-scope-check skips comment lines before scope validation. That means a comment-only change is invisible to the AST gate; if the regex path is satisfied by mentioning the scoped symbol, a semantic directive such as //go:build Reconcile can disable a test file under a compile_fix_only exception.",
+      "recommendation": "Do not blanket-skip comments. Reject Go directives and build constraints in compile_fix_only, or require comment changes to pass the same scoped-symbol and directive-safety checks as code lines.",
+      "location": "scripts/tdd/ast/validator.go:705"
+    },
+    {
+      "id": "F3",
+      "severity": "P0",
+      "category": "security",
+      "title": "audit truncation check counts grants but does not verify exception IDs",
+      "evidence": "The hook only compares grep-counted granted events with the number of approved exceptions. A log containing grants for E-001 and E-999 passes for an artifact approving E-001 and E-002, so the missing E-002 grant is not detected.",
+      "recommendation": "Use jq to compare the set of approved exception IDs for the cycle against granted audit events for the same cycle; fail closed on any missing approved ID, duplicate ambiguity, or malformed event.",
+      "location": ".claude/hooks/require-tdd-state.sh:302"
+    }
+  ]
+}

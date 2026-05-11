@@ -78,6 +78,65 @@ _v17_profile_pattern() {
   esac
 }
 
+# v1.8.0 AC2 + AC6: AST helper dispatch with graceful degradation.
+#
+# _v18_ast_check <subcommand> <ast-args...>
+#   Stdin: unified diff (already consumed by caller and re-piped).
+#   Exit 0: AST passed OR Go/AST is unavailable AND fell back gracefully.
+#   Exit 1: AST rejected (caller AND-gates; this means deny).
+#
+# Honors:
+#   - TDD_AST_VALIDATOR_DISABLE=1 — skips AST, warns, exits 0.
+#   - Missing `go` binary — same as killswitch (warns, exits 0).
+#   - Missing scripts/tdd/ast/validator.go — same as killswitch.
+#
+# Warnings go to stderr so operators see degradation; the validator
+# library proceeds with regex-only enforcement when AST is absent.
+_V18_AST_WARNED=0
+_v18_ast_check() {
+  local subcmd="$1"; shift
+  local lib_dir
+  lib_dir="$(dirname -- "${BASH_SOURCE[0]}")"
+  local validator_go="$lib_dir/ast/validator.go"
+  if [[ "${TDD_AST_VALIDATOR_DISABLE:-0}" == "1" ]]; then
+    if [[ "$_V18_AST_WARNED" == "0" ]]; then
+      echo "[lib_test_edit_exception] WARN: TDD_AST_VALIDATOR_DISABLE=1 — AST checks disabled; falling back to regex-only validation." >&2
+      _V18_AST_WARNED=1
+    fi
+    return 0
+  fi
+  if ! command -v go >/dev/null 2>&1; then
+    if [[ "$_V18_AST_WARNED" == "0" ]]; then
+      echo "[lib_test_edit_exception] WARN: Go unavailable; falling back to regex-only validation. Install Go ≥1.26.2 for stricter governance." >&2
+      _V18_AST_WARNED=1
+    fi
+    return 0
+  fi
+  if [[ ! -f "$validator_go" ]]; then
+    if [[ "$_V18_AST_WARNED" == "0" ]]; then
+      echo "[lib_test_edit_exception] WARN: AST validator file missing ($validator_go) — falling back to regex-only validation." >&2
+      _V18_AST_WARNED=1
+    fi
+    return 0
+  fi
+  # Run the helper. It reads the diff from stdin (the caller pipes it).
+  local _ast_out
+  _ast_out="$(go run "$validator_go" "$subcmd" "$@" 2>&1)"
+  local _ast_rc=$?
+  if [[ "$_ast_rc" -eq 0 ]]; then
+    return 0
+  fi
+  if [[ "$_ast_rc" -eq 1 ]]; then
+    # Reject. Surface report on stderr.
+    echo "[lib_test_edit_exception] AST REPORT (subcmd=$subcmd):" >&2
+    printf '%s\n' "$_ast_out" >&2
+    return 1
+  fi
+  # Hard error (exit 2) — fail closed.
+  echo "[lib_test_edit_exception] AST hard error (subcmd=$subcmd): $_ast_out" >&2
+  return 1
+}
+
 # Build the active assertion regex from profiles + helpers.
 _v17_build_assertion_regex() {
   local config="${1:-.tdd/tdd-config.json}"
@@ -125,9 +184,9 @@ validate_exception_diff() {
   # be rejected so a forged or future-version artifact can't bypass
   # via "operations: [noop]" or similar.
   case "$etype" in
-    mechanical_signature_propagation|compile_fix_only|import_only) ;;
+    mechanical_signature_propagation|compile_fix_only|import_only|schema_predicate_correction) ;;
     *)
-      echo "[lib_test_edit_exception] BLOCKED: unknown exception type '$etype'. Allowed: mechanical_signature_propagation, compile_fix_only, import_only." >&2
+      echo "[lib_test_edit_exception] BLOCKED: unknown exception type '$etype'. Allowed: mechanical_signature_propagation, compile_fix_only, import_only, schema_predicate_correction." >&2
       return 2
       ;;
   esac
@@ -196,6 +255,51 @@ validate_exception_diff() {
         reason="import_only: forbid_non_import_hunk — exception type 'import_only' rejects non-import diff lines"
         evidence="$(printf '%s' "$_bad_nonimport" | tr '\n' ';' | sed 's/;$//')"
       fi
+      # v1.8.0 AC2.4: AND-gate with AST import-block-check. Catches
+      # `+    import "math"` indented inside a function body that the
+      # regex import-line filter would let through.
+      if [[ "$file_status" == "passed" ]] && [[ -e "$f" ]]; then
+        if ! printf '%s' "$diff_input" | _v18_ast_check import-block-check --paths "$f"; then
+          file_status="failed"
+          reason="import_only: ast_outside_import_block — AST helper rejected change outside import block"
+          evidence="(see AST REPORT on stderr)"
+        fi
+      fi
+    fi
+
+    # v1.8.0 AC3 + round-2 F1: schema_predicate_correction — pure
+    # rename of scope.old_name to scope.new_name, AST-validated.
+    # This type has NO regex fallback, so AST availability is
+    # MANDATORY. Killswitch / missing Go / missing validator file
+    # → fail closed (operator must either install Go OR pick a
+    # different exception type).
+    if [[ "$file_status" == "passed" ]] && [[ "$etype" == "schema_predicate_correction" ]]; then
+      local _old_name _new_name
+      _old_name="$(printf '%s' "$exception_json" | jq -r '.scope.old_name // ""')"
+      _new_name="$(printf '%s' "$exception_json" | jq -r '.scope.new_name // ""')"
+      if [[ -z "$_old_name" ]] || [[ -z "$_new_name" ]]; then
+        file_status="failed"
+        reason="schema_predicate_correction: scope.old_name and scope.new_name are required"
+        evidence="(missing rename pair)"
+      else
+        # Hard precondition: AST must be available.
+        local _spc_lib_dir _spc_validator_go
+        _spc_lib_dir="$(dirname -- "${BASH_SOURCE[0]}")"
+        _spc_validator_go="$_spc_lib_dir/ast/validator.go"
+        if [[ "${TDD_AST_VALIDATOR_DISABLE:-0}" == "1" ]] \
+           || ! command -v go >/dev/null 2>&1 \
+           || [[ ! -f "$_spc_validator_go" ]]; then
+          file_status="failed"
+          reason="schema_predicate_correction: ast_required — this exception type has no regex fallback and the AST helper is unavailable (Go missing, killswitch set, or validator.go absent). Install Go ≥1.26.2 OR pick a different exception type."
+          evidence="(AST unavailable — fail closed)"
+        elif ! printf '%s' "$diff_input" \
+          | _v18_ast_check schema-predicate-check \
+              --old-name "$_old_name" --new-name "$_new_name" --paths "$f"; then
+          file_status="failed"
+          reason="schema_predicate_correction: ast_non_rename_change — AST rejected change (not a pure rename of $_old_name to $_new_name)"
+          evidence="(see AST REPORT on stderr)"
+        fi
+      fi
     fi
 
     # v1.7.0 round-5 F3: compile_fix_only must restrict every changed
@@ -222,6 +326,16 @@ validate_exception_diff() {
           file_status="failed"
           reason="compile_fix_only: forbid_off_scope_change — line touches no declared symbol from scope.symbols=[$_scope_syms]"
           evidence="$(printf '%s' "$_bad_off_scope" | tr '\n' ';' | sed 's/;$//')"
+        fi
+      fi
+      # v1.8.0 AC2.3: AND-gate with AST compile-fix-scope-check. AST
+      # uses identifier matching so `XHelper` is NOT counted as `X`.
+      if [[ "$file_status" == "passed" ]] && [[ -n "$_scope_syms" ]]; then
+        local _csv_syms="${_scope_syms//|/,}"
+        if ! printf '%s' "$diff_input" | _v18_ast_check compile-fix-scope-check --symbols "$_csv_syms" --paths "$f"; then
+          file_status="failed"
+          reason="compile_fix_only: ast_scope_symbol_not_used — AST rejected change (identifier-level mismatch)"
+          evidence="(see AST REPORT on stderr)"
         fi
       fi
     fi
@@ -367,6 +481,16 @@ validate_exception_diff() {
             reason="mech_sig_prop_off_scope: non-assertion change touches no declared symbol from scope.symbols=[$_scope_syms_all]"
             evidence="$_off_scope_nonassert"
           fi
+        fi
+      fi
+      # v1.8.0 AC2.2: AND-gate with AST mech-sig-prop-check for assertion
+      # helper-shape preservation. Catches cases where the regex multiset
+      # check might be fooled by similar tokens.
+      if [[ "$file_status" == "passed" ]] && [[ "$etype" == "mechanical_signature_propagation" ]]; then
+        if ! printf '%s' "$diff_input" | _v18_ast_check mech-sig-prop-check --paths "$f"; then
+          file_status="failed"
+          reason="mechanical_signature_propagation: ast_helper_shape_changed — AST rejected helper/comparator change"
+          evidence="(see AST REPORT on stderr)"
         fi
       fi
     fi
