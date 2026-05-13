@@ -10213,6 +10213,33 @@ fi
 rm -rf "$TMP_V19R1F4"
 
 echo
+
+# v1.9.0 round-cap: runner refuses when max_review_rounds_per_cycle reached.
+TMP_V19CAP=$(mktemp -d)
+mkdir -p "$TMP_V19CAP/.tdd/exceptions" "$TMP_V19CAP/.tdd/audit"
+cat > "$TMP_V19CAP/.tdd/tdd-config.json" <<'EOF'
+{"second_opinion":{"no_discretion":{"enabled":true,"max_review_rounds_per_cycle":2}}}
+EOF
+# Seed 2 approved completions for this cycle + review_type AND a pending entry.
+cat > "$TMP_V19CAP/.tdd/exceptions/post-red-test-edits.json" <<'EOF'
+{
+  "version": 1, "cycle_id": "v19cap",
+  "exceptions": [
+    {"id":"R-001","type":"plan_review_completion","status":"approved","binding":{"cycle_id":"v19cap","scope_hash":"a"}},
+    {"id":"R-002","type":"plan_review_completion","status":"approved","binding":{"cycle_id":"v19cap","scope_hash":"b"}},
+    {"id":"R-003","type":"plan_review_completion","status":"pending","binding":{"cycle_id":"v19cap","scope_hash":"c"}}
+  ]
+}
+EOF
+out=$( ( cd "$TMP_V19CAP" && bash "$V19_RUNNER" plan_review v19cap 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'max_review_rounds_per_cycle|max_rounds=2'; then
+  pass "v19_round_cap_enforced"
+else
+  fail "v19_round_cap_enforced: runner must refuse when approved rounds >= max_review_rounds_per_cycle (got: '$out')"
+fi
+rm -rf "$TMP_V19CAP"
+
+echo
 echo "Self-test: timeout wrapper kills a hanging hook within budget..."
 TMPHOOK="$(mktemp)"
 cat > "$TMPHOOK" <<'HANG'

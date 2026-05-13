@@ -55,7 +55,66 @@ fi
 
 # Locate companion files relative to this script.
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-project_root="$(cd "$script_dir/../.." && pwd)"
+# The runner ships with the pack but operates on the OPERATOR's
+# project. Use CLAUDE_PROJECT_DIR (set by Claude Code), or the
+# caller's CWD if it contains .tdd/, otherwise fall back to the
+# starter (`script_dir/../..`).
+project_root="${CLAUDE_PROJECT_DIR:-}"
+if [[ -z "$project_root" ]]; then
+  if [[ -d "$(pwd)/.tdd" ]]; then
+    project_root="$(pwd)"
+  else
+    project_root="$(cd "$script_dir/../.." && pwd)"
+  fi
+fi
+# Round-cap check (FIRST — before any file pre-flights so the cap is
+# enforced even when other prerequisites are stale). Hard-stop at
+# max_review_rounds_per_cycle (default 4): the empirical convergence
+# point per v1.9.0's own 10-round cycle where round 10 introduced a
+# regression. Operator should ship at the cap and queue remaining
+# findings to next cycle.
+completion_type=""
+case "$review_type" in
+  plan_review)       completion_type="plan_review_completion" ;;
+  test_review)       completion_type="test_review_completion" ;;
+  production_edit)   completion_type="production_edit_review_completion" ;;
+esac
+config="$project_root/.tdd/tdd-config.json"
+artifact="$project_root/.tdd/exceptions/post-red-test-edits.json"
+max_rounds=4
+if [[ -f "$config" ]]; then
+  cfg_max=$(jq -r '.second_opinion.no_discretion.max_review_rounds_per_cycle // 4' "$config" 2>/dev/null || echo 4)
+  if [[ -n "$cfg_max" ]] && [[ "$cfg_max" =~ ^[0-9]+$ ]]; then
+    max_rounds=$cfg_max
+  fi
+fi
+approved_rounds=0
+if [[ -f "$artifact" ]]; then
+  approved_rounds=$(jq -r --arg cid "$cycle_id" --arg type "$completion_type" '
+    [.exceptions[]?
+     | select(.type == $type)
+     | select(.binding.cycle_id == $cid)
+     | select(.status == "approved")
+    ] | length
+  ' "$artifact" 2>/dev/null || echo 0)
+  [[ -z "$approved_rounds" ]] && approved_rounds=0
+fi
+if [[ "$approved_rounds" -ge "$max_rounds" ]]; then
+  echo "[run-second-opinion] BLOCKED: max_review_rounds_per_cycle reached." >&2
+  echo "[run-second-opinion]   review_type=$review_type, cycle=$cycle_id" >&2
+  echo "[run-second-opinion]   approved_rounds=$approved_rounds, max_rounds=$max_rounds" >&2
+  echo "[run-second-opinion]" >&2
+  echo "[run-second-opinion] The cycle has had $max_rounds rounds of /second-opinion." >&2
+  echo "[run-second-opinion] Diminishing-returns territory. Choose one:" >&2
+  echo "[run-second-opinion]   1. Ship the cycle now; document remaining concerns as next-cycle backlog." >&2
+  echo "[run-second-opinion]   2. Raise second_opinion.no_discretion.max_review_rounds_per_cycle in" >&2
+  echo "[run-second-opinion]      .tdd/tdd-config.json with documented operator reason in the commit." >&2
+  echo "[run-second-opinion]" >&2
+  echo "[run-second-opinion] (v1.9.0 itself ran 10 rounds; round 10 INTRODUCED a regression from round 9." >&2
+  echo "[run-second-opinion]  The 4-round cap reflects the empirical convergence point.)" >&2
+  exit 2
+fi
+
 context_builder="$script_dir/runner-context-pack.sh"
 hash_scope="$script_dir/hash-review-scope.sh"
 validate_completion="$script_dir/validate-review-completion.sh"
@@ -176,20 +235,14 @@ verify_conformance() {
 
 # Locate the pending obligation BEFORE invoking Codex so the
 # conformance check can verify Codex's output against the
-# authoritative scope_hash (v1.9.0 round-4 F3).
-artifact="$project_root/.tdd/exceptions/post-red-test-edits.json"
+# authoritative scope_hash (v1.9.0 round-4 F3). artifact path
+# already set during round-cap pre-flight; ensure parent + seed.
 mkdir -p "$(dirname "$artifact")"
 [[ -f "$artifact" ]] || cat > "$artifact" <<EOF
 {"version":1,"cycle_id":"$cycle_id","phase":"red_confirmed","expires":"next_green_commit","exceptions":[]}
 EOF
 
-completion_type=""
-case "$review_type" in
-  plan_review)       completion_type="plan_review_completion" ;;
-  test_review)       completion_type="test_review_completion" ;;
-  production_edit)   completion_type="production_edit_review_completion" ;;
-esac
-
+# Now locate the pending obligation (after cap check passed).
 pending_entry=$(jq -c --arg cid "$cycle_id" --arg type "$completion_type" '
   [.exceptions[]?
    | select(.type == $type)

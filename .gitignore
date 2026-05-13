@@ -56,3 +56,4 @@ CLAUDE.local.md
 .vscode/
 *.swp
 *~
+.tdd/second-opinion/reviews/
