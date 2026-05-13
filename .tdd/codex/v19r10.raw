@@ -1,3 +1,6 @@
+/tmp/run-second-opinion-v190.sh: line 207: failing-cmd: command not found
+## Second opinion (scope: Tier 1 (cycle modifies .tdd/tdd-config.json + .claude/hooks/require-tdd-state.sh), model: gpt-5.5)
+
 {
   "summary": "Found multiple P0 governance failures: first completions can deadlock, Bash can bypass review gates, and test/production audit checks still accept forged/legacy evidence.",
   "findings": [

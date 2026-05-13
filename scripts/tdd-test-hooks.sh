@@ -906,8 +906,9 @@ echo
 echo "Testing load_redact_patterns (extracted from SKILL.md)..."
 
 TMPRP=$(mktemp -d)
-# Extract the function definition from SKILL.md (between 'load_redact_patterns()' and the matching closing brace at column 0).
-awk '/^load_redact_patterns\(\) \{/,/^\}$/' .claude/skills/second-opinion/SKILL.md > "$TMPRP/lib.sh"
+# v1.9.0: function moved from SKILL.md to scripts/tdd/_lib_redact_patterns.sh
+# when the skill body was rewritten to remove discretion language.
+cp scripts/tdd/_lib_redact_patterns.sh "$TMPRP/lib.sh"
 echo "DEBUG_LOG=$TMPRP/debug.log" > "$TMPRP/runner.sh"
 cat "$TMPRP/lib.sh" >> "$TMPRP/runner.sh"
 echo 'load_redact_patterns "$1"' >> "$TMPRP/runner.sh"
@@ -9228,6 +9229,988 @@ else
   fail "v18_r7_audit_truncation_id_set_check: ID-set mismatch (E-002 missing) must be detected (got: '$out')"
 fi
 rm -rf "$TMP_V18R7F3"
+
+echo
+
+# ═════════════════════════════════════════════════════════════════════
+# v1.9.0 Pack No-Discretion Second Opinion Enforcement
+#
+# AC1: Skill is invoke-only.
+# AC2: Schema extension + AST validator subcommand.
+# AC3: Runner script (single legitimate Codex caller).
+# AC4: Plan-write trigger (PreToolUse).
+# AC5: Test-write trigger (PreToolUse).
+# AC6: Production-edit trigger (PreToolUse).
+# AC7: PostToolUse backstop + Stop gate.
+# AC8: Git commit gate retained.
+# AC9: Operator waiver via extended typed-exception.
+# AC10: Docs + transcript replay.
+# ═════════════════════════════════════════════════════════════════════
+
+V19_PLAN_TRIGGER="$PROJECT_ROOT/.claude/hooks/second-opinion-plan-trigger.sh"
+V19_TEST_TRIGGER="$PROJECT_ROOT/.claude/hooks/second-opinion-test-trigger.sh"
+V19_PROD_TRIGGER="$PROJECT_ROOT/.claude/hooks/second-opinion-production-trigger.sh"
+V19_POSTTOOL="$PROJECT_ROOT/.claude/hooks/second-opinion-posttool-backstop.sh"
+V19_STOP="$PROJECT_ROOT/.claude/hooks/session-stop-review.sh"
+V19_RUNNER="$PROJECT_ROOT/scripts/tdd/run-second-opinion.sh"
+V19_HASH_SCOPE="$PROJECT_ROOT/scripts/tdd/hash-review-scope.sh"
+V19_VALIDATE_COMPLETION="$PROJECT_ROOT/scripts/tdd/validate-review-completion.sh"
+V19_CONTEXT_BUILDER="$PROJECT_ROOT/scripts/tdd/build-second-opinion-context.sh"
+V19_SCHEMA="$PROJECT_ROOT/.tdd/templates/review-completion.schema.json"
+V19_SKILL="$PROJECT_ROOT/.claude/skills/second-opinion/SKILL.md"
+V19_AST="$PROJECT_ROOT/scripts/tdd/ast/validator.go"
+
+# ─────────────────────────────────────────────────────────────────────
+# AC1 — Skill is invoke-only (T-23, T-24)
+# ─────────────────────────────────────────────────────────────────────
+
+# T-23: Skill frontmatter has disable-model-invocation: true.
+if [[ -f "$V19_SKILL" ]] && grep -qE '^disable-model-invocation:[[:space:]]*true' "$V19_SKILL"; then
+  pass "v19_T23_skill_disable_model_invocation_set"
+else
+  fail "v19_T23_skill_disable_model_invocation_set: SKILL.md must set 'disable-model-invocation: true' in frontmatter"
+fi
+
+# T-24: No forbidden-discretion language in skill body. (One-time check;
+# the real enforcement is disable-model-invocation, not phrase-matching.)
+if [[ -f "$V19_SKILL" ]]; then
+  forbidden_found=""
+  for phrase in 'use your judgment' 'when appropriate' 'fresh enough' 'auto-invoke before any non-trivial' 'consider invoking' 'I will run /second-opinion'; do
+    if grep -qF "$phrase" "$V19_SKILL"; then
+      forbidden_found="$forbidden_found  $phrase"$'\n'
+    fi
+  done
+  if [[ -z "$forbidden_found" ]]; then
+    pass "v19_T24_skill_no_discretion_language"
+  else
+    fail "v19_T24_skill_no_discretion_language: forbidden phrases found in SKILL.md:$forbidden_found"
+  fi
+else
+  fail "v19_T24_skill_no_discretion_language: SKILL.md missing"
+fi
+
+# ─────────────────────────────────────────────────────────────────────
+# AC2 — Schema extension + validator (T-1, T-13, T-14)
+# ─────────────────────────────────────────────────────────────────────
+
+# T-1: hash-review-scope.sh produces deterministic hash.
+if [[ -x "$V19_HASH_SCOPE" ]]; then
+  h1=$(bash "$V19_HASH_SCOPE" plan_review test-cycle .tdd/current-plan.md "fake-content-sha" 2>/dev/null || echo MISSING)
+  h2=$(bash "$V19_HASH_SCOPE" plan_review test-cycle .tdd/current-plan.md "fake-content-sha" 2>/dev/null || echo MISSING)
+  if [[ -n "$h1" ]] && [[ "$h1" == "$h2" ]] && [[ "$h1" != "MISSING" ]]; then
+    pass "v19_T1_hash_review_scope_deterministic"
+  else
+    fail "v19_T1_hash_review_scope_deterministic: hash-review-scope.sh must produce identical hash for identical inputs (got: '$h1' vs '$h2')"
+  fi
+else
+  fail "v19_T1_hash_review_scope_deterministic: $V19_HASH_SCOPE missing or not executable"
+fi
+
+# T-13: AST validator review-completion-check exists.
+if [[ -f "$V19_AST" ]] && command -v go >/dev/null 2>&1; then
+  # Capture flag-help output; --help triggers flag.ErrHelp → exit 2,
+  # but the usage text is still printed. Use `|| true` then grep.
+  helptext=$( ( go run "$V19_AST" review-completion-check --help 2>&1 ) || true)
+  if printf '%s' "$helptext" | grep -qE 'review-completion-check|completion.*json'; then
+    pass "v19_T13_ast_validator_review_completion_check"
+  else
+    fail "v19_T13_ast_validator_review_completion_check: AST validator must expose review-completion-check subcommand (got: '$helptext')"
+  fi
+else
+  fail "v19_T13_ast_validator_review_completion_check: validator.go missing or go not installed"
+fi
+
+# T-14: Validator rejects entries with malformed prev_audit_sha.
+if [[ -f "$V19_AST" ]] && [[ -f "$V19_SCHEMA" ]] && command -v go >/dev/null 2>&1; then
+  TMP_T14=$(mktemp -d)
+  cat > "$TMP_T14/completion.json" <<'EOF'
+{
+  "review_type": "plan_review",
+  "cycle_id": "test",
+  "scope_hash": "abc123",
+  "verdict": "approve",
+  "findings": [],
+  "required_actions": [],
+  "prev_audit_sha": "MALFORMED"
+}
+EOF
+  # Capture rc separately (avoid pipefail in if-condition).
+  out=$( ( go run "$V19_AST" review-completion-check --type plan_review --scope-hash abc123 --completion "$TMP_T14/completion.json" 2>&1 ) || true)
+  rc_check=$( ( go run "$V19_AST" review-completion-check --type plan_review --scope-hash abc123 --completion "$TMP_T14/completion.json" >/dev/null 2>&1; echo "$?" ) )
+  if [[ "$rc_check" -ne 0 ]] && printf '%s' "$out" | grep -qE 'malformed|invalid.*prev_audit_sha|chain.*invalid'; then
+    pass "v19_T14_validator_rejects_malformed_prev_audit_sha"
+  else
+    fail "v19_T14_validator_rejects_malformed_prev_audit_sha: must reject (rc=$rc_check, out='$out')"
+  fi
+  rm -rf "$TMP_T14"
+else
+  fail "v19_T14_validator_rejects_malformed_prev_audit_sha: prerequisites missing"
+fi
+
+# T-15: Schema file exists and is valid JSON.
+if [[ -f "$V19_SCHEMA" ]] && jq -e . "$V19_SCHEMA" >/dev/null 2>&1; then
+  pass "v19_T15_review_completion_schema_valid_json"
+else
+  fail "v19_T15_review_completion_schema_valid_json: $V19_SCHEMA missing or invalid JSON"
+fi
+
+# ─────────────────────────────────────────────────────────────────────
+# AC3 — Runner script (T-16 through T-22)
+# ─────────────────────────────────────────────────────────────────────
+
+# T-16: Runner exists and exposes the three review types.
+if [[ -x "$V19_RUNNER" ]]; then
+  out=$(bash "$V19_RUNNER" --help 2>&1 || true)
+  if printf '%s' "$out" | grep -qE 'plan_review.*test_review.*production_edit|review-type'; then
+    pass "v19_T16_runner_exposes_three_review_types"
+  else
+    fail "v19_T16_runner_exposes_three_review_types: runner must support plan_review|test_review|production_edit (got: '$out')"
+  fi
+else
+  fail "v19_T16_runner_exposes_three_review_types: $V19_RUNNER missing or not executable"
+fi
+
+# T-17: Runner conformance-checks Codex output via jq (defends against #15451 silent-ignore).
+if [[ -x "$V19_RUNNER" ]] && grep -qE 'jq.*--exit-status|jq -e|validate.*schema|conformance' "$V19_RUNNER" 2>/dev/null; then
+  pass "v19_T17_runner_jq_conformance_check"
+else
+  fail "v19_T17_runner_jq_conformance_check: runner must verify Codex output via jq, not flag-trust"
+fi
+
+# T-18: Runner refuses unknown model family (MODEL_NOT_SCHEMA_COMPATIBLE).
+if [[ -x "$V19_RUNNER" ]] && grep -qE 'MODEL_NOT_SCHEMA_COMPATIBLE' "$V19_RUNNER" 2>/dev/null; then
+  pass "v19_T18_runner_rejects_incompatible_model_family"
+else
+  fail "v19_T18_runner_rejects_incompatible_model_family: runner must check model-family compatibility"
+fi
+
+# T-19: Runner emits CODEX_OUTPUT_NON_CONFORMANT on persistent non-conformance.
+if [[ -x "$V19_RUNNER" ]] && grep -qE 'CODEX_OUTPUT_NON_CONFORMANT' "$V19_RUNNER" 2>/dev/null; then
+  pass "v19_T19_runner_emits_non_conformant_exception"
+else
+  fail "v19_T19_runner_emits_non_conformant_exception: runner must emit CODEX_OUTPUT_NON_CONFORMANT"
+fi
+
+# T-20: Runner emits CODEX_UNREACHABLE on API failure.
+if [[ -x "$V19_RUNNER" ]] && grep -qE 'CODEX_UNREACHABLE' "$V19_RUNNER" 2>/dev/null; then
+  pass "v19_T20_runner_emits_codex_unreachable"
+else
+  fail "v19_T20_runner_emits_codex_unreachable: runner must emit CODEX_UNREACHABLE"
+fi
+
+# T-21: Runner refuses to write completion with unresolved P0/P1.
+if [[ -x "$V19_RUNNER" ]] && grep -qE 'unresolved.*P[01]|P[01].*unresolved|p0.*p1.*resolved' "$V19_RUNNER" 2>/dev/null; then
+  pass "v19_T21_runner_gates_on_p0_p1_resolution"
+else
+  fail "v19_T21_runner_gates_on_p0_p1_resolution: runner must refuse to write completion with unresolved P0/P1"
+fi
+
+# T-22: Skill body does not IMPERATIVELY address Claude as the caller.
+# Codex exec references in reference code-blocks are fine; what matters
+# is the absence of "this is what you, Claude, do" framing.
+if [[ -f "$V19_SKILL" ]]; then
+  if grep -qE '## Workflow.*this is what you, Claude, do|you \(the AI\) must invoke|## Step [0-9]+ — Run the review' "$V19_SKILL" 2>/dev/null; then
+    fail "v19_T22_skill_does_not_invoke_codex: SKILL.md must NOT contain imperative caller-framing addressed to the model"
+  else
+    pass "v19_T22_skill_does_not_invoke_codex"
+  fi
+else
+  fail "v19_T22_skill_does_not_invoke_codex: SKILL.md missing"
+fi
+
+# T-2..T-12: trigger hook tests (with fixture cycles).
+# Build a shared base fixture.
+v19_make_cycle() {
+  local d="$1"
+  local cycle_id="$2"
+  mkdir -p "$d/internal/m" "$d/.tdd/exceptions" "$d/.tdd/audit"
+  ( cd "$d" && git init -q && git config user.email t@t && git config user.name t )
+  cat > "$d/.tdd/tdd-config.json" <<EOF
+{
+  "tier1_path_regexes": ["^internal/auth/"],
+  "second_opinion": {
+    "no_discretion": {
+      "enabled": true,
+      "required_for": {
+        "plan_writes": true,
+        "test_writes": true,
+        "production_edits": true
+      }
+    }
+  }
+}
+EOF
+  cat > "$d/.tdd/current-plan.md" <<EOF
+Cycle ID: $cycle_id
+Human approved spec: yes
+Red phase confirmed: yes
+EOF
+  echo "package m" > "$d/internal/m/foo.go"
+  echo "package m" > "$d/internal/m/foo_test.go"
+  ( cd "$d" && git add . && git commit -q -m initial )
+}
+
+# T-2: plan-trigger blocks without matching plan_review_completion.
+TMP_V19T2=$(mktemp -d)
+v19_make_cycle "$TMP_V19T2" "v19t2"
+if [[ -x "$V19_PLAN_TRIGGER" ]]; then
+  PAYLOAD=$(jq -n --arg p ".tdd/current-plan.md" --arg c "modified content" \
+    '{tool_name:"Write", tool_input:{file_path:$p, content:$c}}')
+  out=$( ( cd "$TMP_V19T2" && printf '%s' "$PAYLOAD" | bash "$V19_PLAN_TRIGGER" 2>&1 ) || true)
+  if printf '%s' "$out" | grep -qE 'PLAN_REVIEW_REQUIRED|deny'; then
+    pass "v19_T2_plan_trigger_blocks_without_completion"
+  else
+    fail "v19_T2_plan_trigger_blocks_without_completion: must deny (got: '$out')"
+  fi
+else
+  fail "v19_T2_plan_trigger_blocks_without_completion: $V19_PLAN_TRIGGER missing or not executable"
+fi
+rm -rf "$TMP_V19T2"
+
+# T-3: test-trigger blocks new _test.go create without completion.
+TMP_V19T3=$(mktemp -d)
+v19_make_cycle "$TMP_V19T3" "v19t3"
+if [[ -x "$V19_TEST_TRIGGER" ]]; then
+  PAYLOAD=$(jq -n --arg p "internal/m/new_test.go" \
+    --arg c "package m
+import \"testing\"
+func TestNew(t *testing.T) { require.Equal(t, 1, 1) }" \
+    '{tool_name:"Write", tool_input:{file_path:$p, content:$c}}')
+  out=$( ( cd "$TMP_V19T3" && printf '%s' "$PAYLOAD" | bash "$V19_TEST_TRIGGER" 2>&1 ) || true)
+  if printf '%s' "$out" | grep -qE 'TEST_REVIEW_REQUIRED|deny'; then
+    pass "v19_T3_test_trigger_blocks_without_completion"
+  else
+    fail "v19_T3_test_trigger_blocks_without_completion: must deny (got: '$out')"
+  fi
+else
+  fail "v19_T3_test_trigger_blocks_without_completion: $V19_TEST_TRIGGER missing or not executable"
+fi
+rm -rf "$TMP_V19T3"
+
+# T-4: production-trigger blocks first edit per base_git_sha.
+TMP_V19T4=$(mktemp -d)
+v19_make_cycle "$TMP_V19T4" "v19t4"
+if [[ -x "$V19_PROD_TRIGGER" ]]; then
+  PAYLOAD=$(jq -n --arg p "internal/m/foo.go" --arg o "package m" --arg n "package m
+func F() {}" \
+    '{tool_name:"Edit", tool_input:{file_path:$p, old_string:$o, new_string:$n}}')
+  out=$( ( cd "$TMP_V19T4" && printf '%s' "$PAYLOAD" | bash "$V19_PROD_TRIGGER" 2>&1 ) || true)
+  if printf '%s' "$out" | grep -qE 'PRODUCTION_EDIT_REVIEW_REQUIRED|deny'; then
+    pass "v19_T4_production_trigger_blocks_first_edit"
+  else
+    fail "v19_T4_production_trigger_blocks_first_edit: must deny (got: '$out')"
+  fi
+else
+  fail "v19_T4_production_trigger_blocks_first_edit: $V19_PROD_TRIGGER missing or not executable"
+fi
+rm -rf "$TMP_V19T4"
+
+# T-5: production-trigger allows non-Go files.
+TMP_V19T5=$(mktemp -d)
+v19_make_cycle "$TMP_V19T5" "v19t5"
+if [[ -x "$V19_PROD_TRIGGER" ]]; then
+  PAYLOAD=$(jq -n --arg p "README.md" --arg c "# Readme" \
+    '{tool_name:"Write", tool_input:{file_path:$p, content:$c}}')
+  out=$( ( cd "$TMP_V19T5" && printf '%s' "$PAYLOAD" | bash "$V19_PROD_TRIGGER" 2>&1 ) || true)
+  rc=$?
+  if [[ "$rc" -eq 0 ]] && ! printf '%s' "$out" | grep -qE 'deny|PRODUCTION_EDIT_REVIEW_REQUIRED'; then
+    pass "v19_T5_production_trigger_allows_non_go_files"
+  else
+    fail "v19_T5_production_trigger_allows_non_go_files: README.md must not trigger (rc=$rc, out='$out')"
+  fi
+else
+  fail "v19_T5_production_trigger_allows_non_go_files: $V19_PROD_TRIGGER missing"
+fi
+rm -rf "$TMP_V19T5"
+
+# T-6: production-trigger excludes test files, scripts/, .claude/, .tdd/.
+TMP_V19T6=$(mktemp -d)
+v19_make_cycle "$TMP_V19T6" "v19t6"
+if [[ -x "$V19_PROD_TRIGGER" ]]; then
+  fails=""
+  for p in "internal/m/foo_test.go" ".claude/hooks/test.sh" "scripts/foo.sh" ".tdd/foo.txt" "docs/foo.md"; do
+    PAYLOAD=$(jq -n --arg pp "$p" --arg c "content" \
+      '{tool_name:"Write", tool_input:{file_path:$pp, content:$c}}')
+    out=$( ( cd "$TMP_V19T6" && printf '%s' "$PAYLOAD" | bash "$V19_PROD_TRIGGER" 2>&1 ) || true)
+    if printf '%s' "$out" | grep -qE 'PRODUCTION_EDIT_REVIEW_REQUIRED|deny'; then
+      fails="$fails $p"
+    fi
+  done
+  if [[ -z "$fails" ]]; then
+    pass "v19_T6_production_trigger_excludes_non_production"
+  else
+    fail "v19_T6_production_trigger_excludes_non_production: wrongly blocked:$fails"
+  fi
+else
+  fail "v19_T6_production_trigger_excludes_non_production: $V19_PROD_TRIGGER missing"
+fi
+rm -rf "$TMP_V19T6"
+
+# T-7: PRODUCTION_SCOPE_DRIFT detected on file-list drift.
+# (Setup with a completion covering one file, then edit a different file.)
+TMP_V19T7=$(mktemp -d)
+v19_make_cycle "$TMP_V19T7" "v19t7"
+if [[ -x "$V19_PROD_TRIGGER" ]] && [[ -x "$V19_HASH_SCOPE" ]]; then
+  base_sha=$( cd "$TMP_V19T7" && git rev-parse HEAD )
+  scope_hash=$( cd "$TMP_V19T7" && bash "$V19_HASH_SCOPE" production_edit v19t7 "$base_sha" tier2 )
+  cat > "$TMP_V19T7/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{
+  "version": 1, "cycle_id": "v19t7", "phase": "red_confirmed", "expires": "next_green_commit",
+  "exceptions": [{
+    "id": "R-001", "type": "production_edit_review_completion",
+    "status": "approved", "approved_by": "operator", "approved_at": "x",
+    "operations": ["edit_existing_tests"],
+    "scope": {"paths": ["internal/m/foo.go"], "allowed_file_globs": ["internal/m/foo.go"]},
+    "reason": "ok",
+    "binding": {
+      "cycle_id": "v19t7",
+      "base_git_sha": "$base_sha",
+      "tier_level": "tier2",
+      "scope_hash": "$scope_hash",
+      "plan_hash": "x",
+      "change_intent_hash": "x"
+    }
+  }]
+}
+EOF
+  echo '{"ts":"x","event":"granted","exception_id":"R-001","cycle_id":"v19t7","prev_sha":""}' \
+    > "$TMP_V19T7/.tdd/audit/v19t7.jsonl"
+  # Edit a DIFFERENT file (internal/m/bar.go) — must drift-detect.
+  echo "package m" > "$TMP_V19T7/internal/m/bar.go"
+  PAYLOAD=$(jq -n --arg p "internal/m/bar.go" --arg o "package m" --arg n "package m
+func B() {}" \
+    '{tool_name:"Edit", tool_input:{file_path:$p, old_string:$o, new_string:$n}}')
+  out=$( ( cd "$TMP_V19T7" && printf '%s' "$PAYLOAD" | bash "$V19_PROD_TRIGGER" 2>&1 ) || true)
+  if printf '%s' "$out" | grep -qE 'PRODUCTION_SCOPE_DRIFT|scope.*drift|outside.*scope'; then
+    pass "v19_T7_production_scope_drift_detected"
+  else
+    fail "v19_T7_production_scope_drift_detected: editing bar.go under foo.go completion must drift-detect (got: '$out')"
+  fi
+else
+  fail "v19_T7_production_scope_drift_detected: $V19_PROD_TRIGGER missing"
+fi
+rm -rf "$TMP_V19T7"
+
+# T-8: production-trigger correctly classifies tier1 vs tier2.
+TMP_V19T8=$(mktemp -d)
+v19_make_cycle "$TMP_V19T8" "v19t8"
+mkdir -p "$TMP_V19T8/internal/auth"
+echo "package auth" > "$TMP_V19T8/internal/auth/handler.go"
+( cd "$TMP_V19T8" && git add . && git commit -q -m "add auth" )
+if [[ -x "$V19_PROD_TRIGGER" ]]; then
+  PAYLOAD=$(jq -n --arg p "internal/auth/handler.go" --arg o "package auth" --arg n "package auth
+func A() {}" \
+    '{tool_name:"Edit", tool_input:{file_path:$p, old_string:$o, new_string:$n}}')
+  out=$( ( cd "$TMP_V19T8" && printf '%s' "$PAYLOAD" | bash "$V19_PROD_TRIGGER" 2>&1 ) || true)
+  if printf '%s' "$out" | grep -qE 'tier1|Tier 1|tier_level.*tier1'; then
+    pass "v19_T8_production_trigger_classifies_tier1"
+  else
+    fail "v19_T8_production_trigger_classifies_tier1: internal/auth/handler.go should be tier1 (got: '$out')"
+  fi
+else
+  fail "v19_T8_production_trigger_classifies_tier1: $V19_PROD_TRIGGER missing"
+fi
+rm -rf "$TMP_V19T8"
+
+# T-9: All three trigger hooks fail closed on bad input (exit 2).
+TMP_V19T9=$(mktemp -d)
+v19_make_cycle "$TMP_V19T9" "v19t9"
+if [[ -x "$V19_PLAN_TRIGGER" ]] && [[ -x "$V19_TEST_TRIGGER" ]] && [[ -x "$V19_PROD_TRIGGER" ]]; then
+  exits=""
+  for hook in "$V19_PLAN_TRIGGER" "$V19_TEST_TRIGGER" "$V19_PROD_TRIGGER"; do
+    rc=0
+    ( cd "$TMP_V19T9" && echo 'not json {{' | bash "$hook" >/dev/null 2>&1 ) || rc=$?
+    exits="$exits $rc"
+  done
+  if printf '%s' "$exits" | grep -qE '\b2\b'; then
+    pass "v19_T9_trigger_hooks_fail_closed_on_bad_input"
+  else
+    fail "v19_T9_trigger_hooks_fail_closed_on_bad_input: hooks must exit 2 on malformed input (got rcs:$exits)"
+  fi
+else
+  fail "v19_T9_trigger_hooks_fail_closed_on_bad_input: trigger hooks missing"
+fi
+rm -rf "$TMP_V19T9"
+
+# T-10: test-trigger allows pure mechanical_signature_propagation diff.
+TMP_V19T10=$(mktemp -d)
+v19_make_cycle "$TMP_V19T10" "v19t10"
+if [[ -x "$V19_TEST_TRIGGER" ]]; then
+  # The diff is a pure signature propagation that v1.7.0 typed exceptions cover.
+  PAYLOAD=$(jq -n --arg p "internal/m/foo_test.go" \
+    --arg o 'package m
+func TestX(t *testing.T) { Do(ctx) }' \
+    --arg n 'package m
+func TestX(t *testing.T) { Do(ctx, opts) }' \
+    '{tool_name:"Edit", tool_input:{file_path:$p, old_string:$o, new_string:$n}}')
+  out=$( ( cd "$TMP_V19T10" && printf '%s' "$PAYLOAD" | bash "$V19_TEST_TRIGGER" 2>&1 ) || true)
+  # v1.9.0 round-6 F3: mechanical skip-through REMOVED.
+  # v1.9.0 requires test_review_completion at edit time regardless
+  # of v1.7 typed-exception coverage. v1.7 still gates at commit
+  # time via require-tdd-state.sh. Both layers protect different
+  # points in the flow.
+  if printf '%s' "$out" | grep -qE 'TEST_REVIEW_REQUIRED'; then
+    pass "v19_T10_test_trigger_passes_v17_mechanical"
+  else
+    fail "v19_T10_test_trigger_passes_v17_mechanical: v1.9.0 test trigger now requires test_review_completion at edit time, even for v1.7 mechanical exceptions (got: '$out')"
+  fi
+else
+  fail "v19_T10_test_trigger_passes_v17_mechanical: $V19_TEST_TRIGGER missing"
+fi
+rm -rf "$TMP_V19T10"
+
+# T-11: plan-trigger blocks when completion exists but content_hash drifts.
+TMP_V19T11=$(mktemp -d)
+v19_make_cycle "$TMP_V19T11" "v19t11"
+if [[ -x "$V19_PLAN_TRIGGER" ]]; then
+  # Pre-existing completion with stale content_hash.
+  cat > "$TMP_V19T11/.tdd/exceptions/post-red-test-edits.json" <<'EOF'
+{
+  "version": 1, "cycle_id": "v19t11", "phase": "red_confirmed", "expires": "next_green_commit",
+  "exceptions": [{
+    "id": "R-001", "type": "plan_review_completion",
+    "status": "approved", "approved_by": "operator", "approved_at": "x",
+    "operations": ["edit_existing_tests"],
+    "scope": {"paths": [".tdd/current-plan.md"]},
+    "reason": "stale",
+    "binding": {
+      "cycle_id": "v19t11",
+      "plan_path": ".tdd/current-plan.md",
+      "scope_hash": "STALE-HASH-DOES-NOT-MATCH",
+      "plan_hash": "x",
+      "change_intent_hash": "x"
+    }
+  }]
+}
+EOF
+  echo '{"ts":"x","event":"granted","exception_id":"R-001","cycle_id":"v19t11","prev_sha":""}' \
+    > "$TMP_V19T11/.tdd/audit/v19t11.jsonl"
+  PAYLOAD=$(jq -n --arg p ".tdd/current-plan.md" --arg c "DIFFERENT plan content" \
+    '{tool_name:"Write", tool_input:{file_path:$p, content:$c}}')
+  out=$( ( cd "$TMP_V19T11" && printf '%s' "$PAYLOAD" | bash "$V19_PLAN_TRIGGER" 2>&1 ) || true)
+  if printf '%s' "$out" | grep -qE 'PLAN_REVIEW_REQUIRED|REVIEW_SCOPE_MISMATCH|stale|drift'; then
+    pass "v19_T11_plan_trigger_blocks_on_content_drift"
+  else
+    fail "v19_T11_plan_trigger_blocks_on_content_drift: stale scope_hash must block (got: '$out')"
+  fi
+else
+  fail "v19_T11_plan_trigger_blocks_on_content_drift: $V19_PLAN_TRIGGER missing"
+fi
+rm -rf "$TMP_V19T11"
+
+# T-12: production-trigger allows when matching completion exists (with correct scope).
+TMP_V19T12=$(mktemp -d)
+v19_make_cycle "$TMP_V19T12" "v19t12"
+if [[ -x "$V19_PROD_TRIGGER" ]] && [[ -x "$V19_HASH_SCOPE" ]]; then
+  base_sha=$( cd "$TMP_V19T12" && git rev-parse HEAD )
+  computed_scope=$( cd "$TMP_V19T12" && bash "$V19_HASH_SCOPE" production_edit v19t12 "$base_sha" tier2 2>/dev/null || echo MISSING )
+  if [[ "$computed_scope" != "MISSING" ]] && [[ -n "$computed_scope" ]]; then
+    cat > "$TMP_V19T12/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{
+  "version": 1, "cycle_id": "v19t12", "phase": "red_confirmed", "expires": "next_green_commit",
+  "exceptions": [{
+    "id": "R-001", "type": "production_edit_review_completion",
+    "status": "approved", "approved_by": "operator", "approved_at": "x",
+    "operations": ["edit_existing_tests"],
+    "scope": {"paths": ["internal/m/foo.go"], "allowed_file_globs": ["internal/m/**"]},
+    "reason": "ok",
+    "binding": {
+      "cycle_id": "v19t12",
+      "base_git_sha": "$base_sha",
+      "tier_level": "tier2",
+      "scope_hash": "$computed_scope",
+      "plan_hash": "x",
+      "change_intent_hash": "x"
+    }
+  }]
+}
+EOF
+    echo '{"ts":"x","event":"granted","exception_id":"R-001","cycle_id":"v19t12","prev_sha":""}' \
+      > "$TMP_V19T12/.tdd/audit/v19t12.jsonl"
+    PAYLOAD=$(jq -n --arg p "internal/m/foo.go" --arg o "package m" --arg n "package m
+func F() {}" \
+      '{tool_name:"Edit", tool_input:{file_path:$p, old_string:$o, new_string:$n}}')
+    out=$( ( cd "$TMP_V19T12" && printf '%s' "$PAYLOAD" | bash "$V19_PROD_TRIGGER" 2>&1 ) || true)
+    rc=$?
+    if [[ "$rc" -eq 0 ]] && ! printf '%s' "$out" | grep -qE 'PRODUCTION_EDIT_REVIEW_REQUIRED|deny'; then
+      pass "v19_T12_production_trigger_allows_with_matching_completion"
+    else
+      fail "v19_T12_production_trigger_allows_with_matching_completion: matching completion must allow (rc=$rc, out='$out')"
+    fi
+  else
+    fail "v19_T12_production_trigger_allows_with_matching_completion: hash-review-scope.sh missing"
+  fi
+else
+  fail "v19_T12_production_trigger_allows_with_matching_completion: prerequisites missing"
+fi
+rm -rf "$TMP_V19T12"
+
+# ─────────────────────────────────────────────────────────────────────
+# AC7 — Stop hook (T-25, T-26, T-27)
+# ─────────────────────────────────────────────────────────────────────
+
+# T-25: Stop hook exits 0 when stop_hook_active=true (loop guard).
+if [[ -x "$V19_STOP" ]]; then
+  out=$( echo '{"session_id":"x","hook_event_name":"Stop","stop_hook_active":true,"last_assistant_message":"done"}' \
+    | bash "$V19_STOP" 2>&1 || true)
+  rc=$?
+  if [[ "$rc" -eq 0 ]] && ! printf '%s' "$out" | grep -qE 'block|deny'; then
+    pass "v19_T25_stop_hook_exits_on_active_flag"
+  else
+    fail "v19_T25_stop_hook_exits_on_active_flag: stop_hook_active=true must exit 0 immediately (rc=$rc, out='$out')"
+  fi
+else
+  fail "v19_T25_stop_hook_exits_on_active_flag: $V19_STOP missing or not executable"
+fi
+
+# T-26: Stop hook blocks when stop_hook_active=false and pending obligations exist.
+TMP_V19T26=$(mktemp -d)
+v19_make_cycle "$TMP_V19T26" "v19t26"
+cat > "$TMP_V19T26/.tdd/exceptions/post-red-test-edits.json" <<'EOF'
+{
+  "version": 1, "cycle_id": "v19t26", "phase": "red_confirmed",
+  "exceptions": [{
+    "id": "R-001", "type": "plan_review_completion",
+    "status": "pending",
+    "binding": {"cycle_id": "v19t26"}
+  }]
+}
+EOF
+if [[ -x "$V19_STOP" ]]; then
+  out=$( ( cd "$TMP_V19T26" && echo '{"session_id":"x","hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"done"}' \
+    | bash "$V19_STOP" 2>&1 ) || true)
+  if printf '%s' "$out" | grep -qE 'block|pending.*obligation|cannot.*end'; then
+    pass "v19_T26_stop_hook_blocks_on_pending_obligations"
+  else
+    fail "v19_T26_stop_hook_blocks_on_pending_obligations: pending obligation must block stop (got: '$out')"
+  fi
+else
+  fail "v19_T26_stop_hook_blocks_on_pending_obligations: $V19_STOP missing"
+fi
+rm -rf "$TMP_V19T26"
+
+# T-27: Stop hook allows when CYCLE_ABANDONED.txt signed by operator.
+TMP_V19T27=$(mktemp -d)
+v19_make_cycle "$TMP_V19T27" "v19t27"
+cat > "$TMP_V19T27/.tdd/exceptions/post-red-test-edits.json" <<'EOF'
+{
+  "version": 1, "cycle_id": "v19t27",
+  "exceptions": [{"id":"R-001","type":"plan_review_completion","status":"pending","binding":{"cycle_id":"v19t27"}}]
+}
+EOF
+cat > "$TMP_V19T27/.tdd/CYCLE_ABANDONED.txt" <<'EOF'
+Cycle v19t27 abandoned by operator.
+Reason: test fixture.
+Signed: APPROVED CYCLE ABANDONMENT
+EOF
+if [[ -x "$V19_STOP" ]]; then
+  out=$( ( cd "$TMP_V19T27" && echo '{"session_id":"x","hook_event_name":"Stop","stop_hook_active":false}' \
+    | bash "$V19_STOP" 2>&1 ) || true)
+  rc=$?
+  if [[ "$rc" -eq 0 ]] && ! printf '%s' "$out" | grep -qE 'block'; then
+    pass "v19_T27_stop_hook_allows_on_cycle_abandoned"
+  else
+    fail "v19_T27_stop_hook_allows_on_cycle_abandoned: CYCLE_ABANDONED.txt must allow stop (rc=$rc, out='$out')"
+  fi
+else
+  fail "v19_T27_stop_hook_allows_on_cycle_abandoned: $V19_STOP missing"
+fi
+rm -rf "$TMP_V19T27"
+
+# ─────────────────────────────────────────────────────────────────────
+# Transcript replay (T-28 through T-34) — closes the 2026-05-12 transcript bypasses.
+# ─────────────────────────────────────────────────────────────────────
+
+# T-28 (Skip #1 closure): Tier 2 production edit (supervisor.go) blocks first edit per base_git_sha.
+TMP_V19T28=$(mktemp -d)
+mkdir -p "$TMP_V19T28/internal/incident" "$TMP_V19T28/.tdd/exceptions" "$TMP_V19T28/.tdd/audit"
+( cd "$TMP_V19T28" && git init -q && git config user.email t@t && git config user.name t )
+cat > "$TMP_V19T28/.tdd/tdd-config.json" <<'EOF'
+{
+  "tier1_path_regexes": ["^internal/auth/"],
+  "second_opinion": {
+    "no_discretion": {
+      "enabled": true,
+      "required_for": {"plan_writes": true, "test_writes": true, "production_edits": true}
+    }
+  }
+}
+EOF
+echo "Cycle ID: v19t28" > "$TMP_V19T28/.tdd/current-plan.md"
+echo "package incident" > "$TMP_V19T28/internal/incident/supervisor.go"
+( cd "$TMP_V19T28" && git add . && git commit -q -m initial )
+if [[ -x "$V19_PROD_TRIGGER" ]]; then
+  PAYLOAD=$(jq -n --arg p "internal/incident/supervisor.go" \
+    --arg o "package incident" --arg n "package incident
+type Supervisor struct { cancelMu sync.Mutex; cancel context.CancelFunc }" \
+    '{tool_name:"Edit", tool_input:{file_path:$p, old_string:$o, new_string:$n}}')
+  out=$( ( cd "$TMP_V19T28" && printf '%s' "$PAYLOAD" | bash "$V19_PROD_TRIGGER" 2>&1 ) || true)
+  if printf '%s' "$out" | grep -qE 'PRODUCTION_EDIT_REVIEW_REQUIRED|deny'; then
+    pass "v19_T28_transcript_skip1_supervisor_edit_blocked"
+  else
+    fail "v19_T28_transcript_skip1_supervisor_edit_blocked: Tier 2 supervisor.go edit must block (got: '$out')"
+  fi
+else
+  fail "v19_T28_transcript_skip1_supervisor_edit_blocked: $V19_PROD_TRIGGER missing"
+fi
+rm -rf "$TMP_V19T28"
+
+# T-29 (Skip #2 closure): new supervisor_lifecycle_test.go blocked.
+TMP_V19T29=$(mktemp -d)
+mkdir -p "$TMP_V19T29/internal/incident" "$TMP_V19T29/.tdd/exceptions" "$TMP_V19T29/.tdd/audit"
+( cd "$TMP_V19T29" && git init -q && git config user.email t@t && git config user.name t )
+cp "$TMP_V19T28"/.tdd/tdd-config.json "$TMP_V19T29/.tdd/tdd-config.json" 2>/dev/null || \
+cat > "$TMP_V19T29/.tdd/tdd-config.json" <<'EOF'
+{
+  "tier1_path_regexes": ["^internal/auth/"],
+  "second_opinion": {
+    "no_discretion": {
+      "enabled": true,
+      "required_for": {"plan_writes": true, "test_writes": true, "production_edits": true}
+    }
+  }
+}
+EOF
+echo "Cycle ID: v19t29" > "$TMP_V19T29/.tdd/current-plan.md"
+echo "package incident" > "$TMP_V19T29/internal/incident/supervisor.go"
+( cd "$TMP_V19T29" && git add . && git commit -q -m initial )
+if [[ -x "$V19_TEST_TRIGGER" ]]; then
+  PAYLOAD=$(jq -n --arg p "internal/incident/supervisor_lifecycle_test.go" \
+    --arg c "package incident
+import \"testing\"
+func TestSupervisor_StartStopRace(t *testing.T) { /* race test */ }" \
+    '{tool_name:"Write", tool_input:{file_path:$p, content:$c}}')
+  out=$( ( cd "$TMP_V19T29" && printf '%s' "$PAYLOAD" | bash "$V19_TEST_TRIGGER" 2>&1 ) || true)
+  if printf '%s' "$out" | grep -qE 'TEST_REVIEW_REQUIRED|deny'; then
+    pass "v19_T29_transcript_skip2_lifecycle_test_create_blocked"
+  else
+    fail "v19_T29_transcript_skip2_lifecycle_test_create_blocked: new test file must block (got: '$out')"
+  fi
+else
+  fail "v19_T29_transcript_skip2_lifecycle_test_create_blocked: $V19_TEST_TRIGGER missing"
+fi
+rm -rf "$TMP_V19T29"
+
+# T-30 (Skip #3 confirmation): read-only inspection allowed.
+TMP_V19T30=$(mktemp -d)
+v19_make_cycle "$TMP_V19T30" "v19t30"
+# No hooks should fire on Grep/Read tools, OR if they do, they should allow.
+allowed=0
+for hook in "$V19_PROD_TRIGGER" "$V19_TEST_TRIGGER" "$V19_PLAN_TRIGGER"; do
+  [[ ! -x "$hook" ]] && continue
+  for tool in Grep Read; do
+    PAYLOAD=$(jq -n --arg t "$tool" '{tool_name:$t, tool_input:{pattern:"foo"}}')
+    out=$( ( cd "$TMP_V19T30" && printf '%s' "$PAYLOAD" | bash "$hook" 2>&1 ) || true)
+    rc=$?
+    if [[ "$rc" -eq 0 ]] && ! printf '%s' "$out" | grep -qE 'deny|REQUIRED'; then
+      allowed=$((allowed + 1))
+    fi
+  done
+done
+# Expect all 6 (3 hooks x 2 tools) to allow.
+if [[ "$allowed" -ge 6 ]] || [[ ! -x "$V19_PROD_TRIGGER" ]]; then
+  pass "v19_T30_transcript_skip3_readonly_allowed"
+else
+  fail "v19_T30_transcript_skip3_readonly_allowed: Grep/Read tool calls must pass through all hooks (allowed=$allowed/6)"
+fi
+rm -rf "$TMP_V19T30"
+
+# T-31 (Skip #4 closure): git commit without final-diff adjudication blocked.
+# Existing v1.8.0 gate-tier1-commit.sh enforces this; v1.9.0 doesn't change it.
+# T-31 is a meta-test: confirm gate-tier1-commit.sh is still present and registered.
+GATE_COMMIT="$PROJECT_ROOT/.claude/hooks/gate-tier1-commit.sh"
+if [[ -x "$GATE_COMMIT" ]]; then
+  pass "v19_T31_transcript_skip4_commit_gate_present"
+else
+  fail "v19_T31_transcript_skip4_commit_gate_present: v1.8.0 gate-tier1-commit.sh must remain in place"
+fi
+
+# T-32 (Cross-type reuse defense): plan_review_completion cannot satisfy test_review trigger.
+TMP_V19T32=$(mktemp -d)
+v19_make_cycle "$TMP_V19T32" "v19t32"
+cat > "$TMP_V19T32/.tdd/exceptions/post-red-test-edits.json" <<'EOF'
+{
+  "version": 1, "cycle_id": "v19t32", "phase": "red_confirmed",
+  "exceptions": [{
+    "id": "R-001",
+    "type": "plan_review_completion",
+    "status": "approved", "approved_by": "operator", "approved_at": "x",
+    "scope": {"paths": [".tdd/current-plan.md"]},
+    "binding": {"cycle_id": "v19t32", "scope_hash": "any"}
+  }]
+}
+EOF
+echo '{"ts":"x","event":"granted","exception_id":"R-001","cycle_id":"v19t32","prev_sha":""}' \
+  > "$TMP_V19T32/.tdd/audit/v19t32.jsonl"
+if [[ -x "$V19_TEST_TRIGGER" ]]; then
+  PAYLOAD=$(jq -n --arg p "internal/m/new_test.go" \
+    --arg c "package m
+import \"testing\"
+func TestX(t *testing.T) { require.Equal(t, 1, 1) }" \
+    '{tool_name:"Write", tool_input:{file_path:$p, content:$c}}')
+  out=$( ( cd "$TMP_V19T32" && printf '%s' "$PAYLOAD" | bash "$V19_TEST_TRIGGER" 2>&1 ) || true)
+  if printf '%s' "$out" | grep -qE 'TEST_REVIEW_REQUIRED|deny'; then
+    pass "v19_T32_cross_type_reuse_defended"
+  else
+    fail "v19_T32_cross_type_reuse_defended: plan_review_completion must NOT satisfy test_review trigger (got: '$out')"
+  fi
+else
+  fail "v19_T32_cross_type_reuse_defended: $V19_TEST_TRIGGER missing"
+fi
+rm -rf "$TMP_V19T32"
+
+# T-33 (Scope-widening defense): production completion for fileA must NOT cover fileB.
+TMP_V19T33=$(mktemp -d)
+v19_make_cycle "$TMP_V19T33" "v19t33"
+mkdir -p "$TMP_V19T33/internal/auth"
+echo "package incident" > "$TMP_V19T33/internal/incident/supervisor.go" 2>/dev/null || true
+mkdir -p "$TMP_V19T33/internal/incident"
+echo "package incident" > "$TMP_V19T33/internal/incident/supervisor.go"
+echo "package auth" > "$TMP_V19T33/internal/auth/decide.go"
+( cd "$TMP_V19T33" && git add . && git commit -q -m "add files" )
+base_sha=$( cd "$TMP_V19T33" && git rev-parse HEAD )
+if [[ -x "$V19_HASH_SCOPE" ]] && [[ -x "$V19_PROD_TRIGGER" ]]; then
+  computed=$( cd "$TMP_V19T33" && bash "$V19_HASH_SCOPE" production_edit v19t33 "$base_sha" tier2 2>/dev/null || echo MISSING )
+  if [[ "$computed" != "MISSING" ]] && [[ -n "$computed" ]]; then
+    cat > "$TMP_V19T33/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{
+  "version": 1, "cycle_id": "v19t33", "phase": "red_confirmed",
+  "exceptions": [{
+    "id": "R-001", "type": "production_edit_review_completion",
+    "status": "approved", "approved_by": "operator", "approved_at": "x",
+    "scope": {
+      "allowed_file_globs": ["internal/incident/supervisor.go"]
+    },
+    "binding": {
+      "cycle_id": "v19t33",
+      "base_git_sha": "$base_sha",
+      "tier_level": "tier2",
+      "scope_hash": "$computed"
+    }
+  }]
+}
+EOF
+    echo '{"ts":"x","event":"granted","exception_id":"R-001","cycle_id":"v19t33","prev_sha":""}' \
+      > "$TMP_V19T33/.tdd/audit/v19t33.jsonl"
+    # Edit a DIFFERENT file (auth/decide.go).
+    PAYLOAD=$(jq -n --arg p "internal/auth/decide.go" --arg o "package auth" --arg n "package auth
+func D() {}" \
+      '{tool_name:"Edit", tool_input:{file_path:$p, old_string:$o, new_string:$n}}')
+    out=$( ( cd "$TMP_V19T33" && printf '%s' "$PAYLOAD" | bash "$V19_PROD_TRIGGER" 2>&1 ) || true)
+    if printf '%s' "$out" | grep -qE 'PRODUCTION_SCOPE_DRIFT|REVIEW_SCOPE_MISMATCH|deny'; then
+      pass "v19_T33_scope_widening_defended"
+    else
+      fail "v19_T33_scope_widening_defended: editing internal/auth/decide.go under completion for internal/incident/supervisor.go must block (got: '$out')"
+    fi
+  else
+    fail "v19_T33_scope_widening_defended: hash-review-scope.sh missing"
+  fi
+else
+  fail "v19_T33_scope_widening_defended: prerequisites missing"
+fi
+rm -rf "$TMP_V19T33"
+
+# T-34 (Commit-boundary expiry): completion at base_sha=A; commit advances to B; next edit re-blocks.
+TMP_V19T34=$(mktemp -d)
+v19_make_cycle "$TMP_V19T34" "v19t34"
+sha_A=$( cd "$TMP_V19T34" && git rev-parse HEAD )
+if [[ -x "$V19_HASH_SCOPE" ]] && [[ -x "$V19_PROD_TRIGGER" ]]; then
+  computed_A=$( cd "$TMP_V19T34" && bash "$V19_HASH_SCOPE" production_edit v19t34 "$sha_A" tier2 2>/dev/null || echo MISSING )
+  if [[ "$computed_A" != "MISSING" ]]; then
+    cat > "$TMP_V19T34/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{
+  "version": 1, "cycle_id": "v19t34", "phase": "red_confirmed",
+  "exceptions": [{
+    "id": "R-001", "type": "production_edit_review_completion",
+    "status": "approved", "approved_by": "operator", "approved_at": "x",
+    "scope": {"allowed_file_globs": ["internal/m/**"]},
+    "binding": {
+      "cycle_id": "v19t34",
+      "base_git_sha": "$sha_A",
+      "tier_level": "tier2",
+      "scope_hash": "$computed_A"
+    }
+  }]
+}
+EOF
+    echo '{"ts":"x","event":"granted","exception_id":"R-001","cycle_id":"v19t34","prev_sha":""}' \
+      > "$TMP_V19T34/.tdd/audit/v19t34.jsonl"
+    # Commit lands; HEAD advances.
+    ( cd "$TMP_V19T34" && echo "new" > new_file.go && git add new_file.go && git commit -q -m green )
+    sha_B=$( cd "$TMP_V19T34" && git rev-parse HEAD )
+    if [[ "$sha_A" == "$sha_B" ]]; then
+      fail "v19_T34_commit_boundary_expiry: failed to advance SHA in fixture"
+    else
+      PAYLOAD=$(jq -n --arg p "internal/m/foo.go" --arg o "package m" --arg n "package m
+func F() {}" \
+        '{tool_name:"Edit", tool_input:{file_path:$p, old_string:$o, new_string:$n}}')
+      out=$( ( cd "$TMP_V19T34" && printf '%s' "$PAYLOAD" | bash "$V19_PROD_TRIGGER" 2>&1 ) || true)
+      if printf '%s' "$out" | grep -qE 'PRODUCTION_EDIT_REVIEW_REQUIRED|REVIEW_COMPLETION_EXPIRED|deny'; then
+        pass "v19_T34_commit_boundary_expiry"
+      else
+        fail "v19_T34_commit_boundary_expiry: completion at sha_A must expire when HEAD advances to sha_B (got: '$out')"
+      fi
+    fi
+  else
+    fail "v19_T34_commit_boundary_expiry: hash-review-scope.sh missing"
+  fi
+else
+  fail "v19_T34_commit_boundary_expiry: prerequisites missing"
+fi
+rm -rf "$TMP_V19T34"
+
+echo
+
+# ─────────────────────────────────────────────────────────────────────
+# v1.9.0 round-1 fixes (codex /second-opinion).
+# F1 (P0): Triggers must record pending obligation entries so the
+#          runner can read them and produce a matching completion.
+# F2 (P0): Hooks must validate audit-chain continuity on each
+#          completion match — forged direct edits to the artifact
+#          must be detected.
+# F3 (P0): Production hook must treat empty allowed_file_globs as
+#          INVALID (not unlimited). Runner must record file list.
+# F4 (P1): v1.8.0 typed-exception audit-gate must filter to test-edit
+#          types only (not review-completion types).
+# F5 (P1): Stop hook sees no pending obligations because triggers
+#          don't write them. Same fix as F1.
+# ─────────────────────────────────────────────────────────────────────
+
+# v19-r1-F1+F5: trigger hook records a pending obligation entry in
+# the artifact before emitting deny.
+TMP_V19R1F1=$(mktemp -d)
+v19_make_cycle "$TMP_V19R1F1" "v19r1f1"
+if [[ -x "$V19_PLAN_TRIGGER" ]]; then
+  PAYLOAD=$(jq -n --arg p ".tdd/current-plan.md" --arg c "modified plan" \
+    '{tool_name:"Write", tool_input:{file_path:$p, content:$c}}')
+  ( cd "$TMP_V19R1F1" && printf '%s' "$PAYLOAD" | bash "$V19_PLAN_TRIGGER" >/dev/null 2>&1 || true)
+  pending=$(jq -r '[.exceptions[]? | select(.status == "pending") | select(.type == "plan_review_completion")] | length' \
+    "$TMP_V19R1F1/.tdd/exceptions/post-red-test-edits.json" 2>/dev/null || echo 0)
+  if [[ "$pending" -ge 1 ]]; then
+    pass "v19_r1_F1_trigger_records_pending_obligation"
+  else
+    fail "v19_r1_F1_trigger_records_pending_obligation: deny must write a pending plan_review entry to the artifact (got pending=$pending)"
+  fi
+else
+  fail "v19_r1_F1_trigger_records_pending_obligation: plan trigger missing"
+fi
+rm -rf "$TMP_V19R1F1"
+
+# v19-r1-F2: forged completion entry (no valid audit chain) must be rejected.
+TMP_V19R1F2=$(mktemp -d)
+v19_make_cycle "$TMP_V19R1F2" "v19r1f2"
+if [[ -x "$V19_PLAN_TRIGGER" ]] && [[ -x "$V19_HASH_SCOPE" ]]; then
+  # Forge a completion with the right scope_hash but NO matching audit-log entry.
+  PAYLOAD=$(jq -n --arg p ".tdd/current-plan.md" --arg c "any content here" \
+    '{tool_name:"Write", tool_input:{file_path:$p, content:$c}}')
+  content_hash=$(printf '%s' "any content here" | sha256sum | awk '{print $1}')
+  scope_hash=$(bash "$V19_HASH_SCOPE" plan_review v19r1f2 ".tdd/current-plan.md" "$content_hash")
+  cat > "$TMP_V19R1F2/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{
+  "version": 1, "cycle_id": "v19r1f2", "phase": "red_confirmed",
+  "exceptions": [{
+    "id": "R-FORGED",
+    "type": "plan_review_completion",
+    "status": "approved",
+    "approved_by": "operator",
+    "scope": {},
+    "binding": {
+      "cycle_id": "v19r1f2",
+      "scope_hash": "$scope_hash",
+      "verdict": "approve",
+      "prev_audit_sha": "DOES_NOT_MATCH_AUDIT_LOG"
+    }
+  }]
+}
+EOF
+  # No audit log written → forged entry.
+  out=$( ( cd "$TMP_V19R1F2" && printf '%s' "$PAYLOAD" | bash "$V19_PLAN_TRIGGER" 2>&1 ) || true)
+  if printf '%s' "$out" | grep -qE 'PLAN_REVIEW_REQUIRED|forged|audit.*chain|deny'; then
+    pass "v19_r1_F2_forged_completion_rejected"
+  else
+    fail "v19_r1_F2_forged_completion_rejected: forged direct-edit completion without audit chain must be rejected (got: '$out')"
+  fi
+else
+  fail "v19_r1_F2_forged_completion_rejected: prerequisites missing"
+fi
+rm -rf "$TMP_V19R1F2"
+
+# v19-r1-F3: production completion with empty allowed_file_globs must
+# be treated as INVALID, not unlimited.
+TMP_V19R1F3=$(mktemp -d)
+v19_make_cycle "$TMP_V19R1F3" "v19r1f3"
+if [[ -x "$V19_PROD_TRIGGER" ]] && [[ -x "$V19_HASH_SCOPE" ]]; then
+  base_sha=$( cd "$TMP_V19R1F3" && git rev-parse HEAD )
+  scope_hash=$(bash "$V19_HASH_SCOPE" production_edit v19r1f3 "$base_sha" tier2)
+  cat > "$TMP_V19R1F3/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{
+  "version": 1, "cycle_id": "v19r1f3", "phase": "red_confirmed",
+  "exceptions": [{
+    "id": "R-001",
+    "type": "production_edit_review_completion",
+    "status": "approved",
+    "approved_by": "operator",
+    "scope": {},
+    "binding": {
+      "cycle_id": "v19r1f3",
+      "base_git_sha": "$base_sha",
+      "tier_level": "tier2",
+      "scope_hash": "$scope_hash",
+      "verdict": "approve",
+      "prev_audit_sha": ""
+    }
+  }]
+}
+EOF
+  echo '{"ts":"x","event":"obligation_completed","exception_id":"R-001","cycle_id":"v19r1f3","prev_sha":""}' \
+    > "$TMP_V19R1F3/.tdd/audit/v19r1f3.jsonl"
+  PAYLOAD=$(jq -n --arg p "internal/m/foo.go" --arg o "package m" --arg n "package m
+func F() {}" \
+    '{tool_name:"Edit", tool_input:{file_path:$p, old_string:$o, new_string:$n}}')
+  out=$( ( cd "$TMP_V19R1F3" && printf '%s' "$PAYLOAD" | bash "$V19_PROD_TRIGGER" 2>&1 ) || true)
+  if printf '%s' "$out" | grep -qE 'PRODUCTION.*INVALID|empty_scope|scope.*invalid|missing.*allowed_file_globs|PRODUCTION_SCOPE_DRIFT'; then
+    pass "v19_r1_F3_empty_scope_treated_as_invalid"
+  else
+    fail "v19_r1_F3_empty_scope_treated_as_invalid: completion with empty allowed_file_globs must not allow unlimited scope (got: '$out')"
+  fi
+else
+  fail "v19_r1_F3_empty_scope_treated_as_invalid: prerequisites missing"
+fi
+rm -rf "$TMP_V19R1F3"
+
+# v19-r1-F4: v1.8.0 typed-exception audit-gate must filter to test-edit
+# types only — review-completion entries must NOT poison the count.
+TMP_V19R1F4=$(mktemp -d)
+v19_make_cycle "$TMP_V19R1F4" "v19r1f4"
+base_sha=$( cd "$TMP_V19R1F4" && git rev-parse HEAD )
+red_h=$(echo "red proof" > "$TMP_V19R1F4/.tdd/red-proof.md"; sha256sum "$TMP_V19R1F4/.tdd/red-proof.md" | awk '{print $1}')
+plan_h=$(sha256sum "$TMP_V19R1F4/.tdd/current-plan.md" | awk '{print $1}')
+intent_h=$(printf 'v19r1f4|X|mechanical_signature_propagation|r|internal/m/*_test.go|edit_existing_tests' | sha256sum | awk '{print $1}')
+cat > "$TMP_V19R1F4/.tdd/exceptions/post-red-test-edits.json" <<EOF
+{
+  "version": 1, "cycle_id": "v19r1f4", "phase": "red_confirmed",
+  "exceptions": [
+    {"id":"R-001","type":"plan_review_completion","status":"approved","approved_by":"o","approved_at":"x","scope":{},"binding":{"cycle_id":"v19r1f4","scope_hash":"any","prev_audit_sha":""}},
+    {"id":"E-001","type":"mechanical_signature_propagation","status":"approved","approved_by":"o","approved_at":"x","operations":["edit_existing_tests"],"scope":{"paths":["internal/m/*_test.go"],"symbols":["X"]},"reason":"r","binding":{"cycle_id":"v19r1f4","plan_hash":"$plan_h","red_proof_hash":"$red_h","change_intent_hash":"$intent_h","head_at_approval":"$base_sha"}}
+  ]
+}
+EOF
+# Audit log has the 'granted' for E-001 (typed exception) but
+# obligation_completed for R-001 (review completion). v1.8.0 gate
+# must accept this — review completions are NOT typed exceptions.
+echo '{"ts":"x","event":"granted","exception_id":"E-001","cycle_id":"v19r1f4","prev_sha":""}' \
+  > "$TMP_V19R1F4/.tdd/audit/v19r1f4.jsonl"
+HOOK="$PROJECT_ROOT/.claude/hooks/require-tdd-state.sh"
+PAYLOAD=$(jq -n --arg p "internal/m/foo_test.go" --arg o "package m" --arg n "package m
+func TestX(t *testing.T) { _ = X(1) }" \
+  '{tool_name:"Edit", tool_input:{file_path:$p, old_string:$o, new_string:$n}}')
+out=$( ( cd "$TMP_V19R1F4" && printf '%s' "$PAYLOAD" | bash "$HOOK" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'missing.*granted.*event|granted.*event.*missing'; then
+  fail "v19_r1_F4_audit_gate_filters_to_typed_exceptions: review completions must NOT poison v1.8.0 typed-exception audit count (got: '$out')"
+else
+  pass "v19_r1_F4_audit_gate_filters_to_typed_exceptions"
+fi
+rm -rf "$TMP_V19R1F4"
 
 echo
 echo "Self-test: timeout wrapper kills a hanging hook within budget..."

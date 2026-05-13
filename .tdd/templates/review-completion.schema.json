@@ -1,0 +1,77 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ReviewCompletion",
+  "description": "Output schema for /second-opinion review completions (v1.9.0). The runner passes this to `codex exec --output-schema` AND independently verifies the output via jq because --output-schema is documented to be silently dropped under two conditions (openai/codex#4181 codex-family gating; #15451 MCP-active ignore).",
+  "type": "object",
+  "required": [
+    "review_type",
+    "cycle_id",
+    "scope_hash",
+    "verdict",
+    "findings",
+    "required_actions"
+  ],
+  "properties": {
+    "review_type": {
+      "type": "string",
+      "enum": ["plan_review", "test_review", "production_edit"]
+    },
+    "cycle_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "scope_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "lowercase hex sha256 of canonical-form scope inputs"
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["approve", "approve_with_changes", "block"]
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "severity",
+          "failure_mode",
+          "evidence",
+          "required_fix",
+          "test"
+        ],
+        "properties": {
+          "id": { "type": "string", "pattern": "^F[0-9]+$" },
+          "severity": {
+            "type": "string",
+            "enum": ["P0", "P1", "P2", "P3"]
+          },
+          "category": {
+            "type": "string",
+            "enum": ["correctness", "security", "tests", "api", "docs", "other"]
+          },
+          "failure_mode": { "type": "string", "minLength": 1 },
+          "evidence": { "type": "string", "minLength": 1 },
+          "required_fix": { "type": "string", "minLength": 1 },
+          "test": { "type": "string", "minLength": 1 },
+          "affected_invariant": { "type": "string" },
+          "location": { "type": "string" }
+        }
+      }
+    },
+    "required_actions": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "summary": {
+      "type": "string"
+    },
+    "codex_session_uuid": {
+      "type": "string"
+    },
+    "codex_model": {
+      "type": "string"
+    }
+  }
+}

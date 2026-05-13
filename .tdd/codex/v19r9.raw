@@ -1,0 +1,44 @@
+/tmp/run-second-opinion-v190.sh: line 207: failing-cmd: command not found
+## Second opinion (scope: Tier 1 (cycle modifies .tdd/tdd-config.json + .claude/hooks/require-tdd-state.sh), model: gpt-5.5)
+
+{
+  "summary": "Review found multiple P0 governance failures: Bash write bypasses, forgeable review completions, and production-review deadlocks around stale/drift pending obligations.",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P0",
+      "category": "security",
+      "title": "Mutating Bash can bypass plan/test review triggers entirely",
+      "evidence": "The Bash pretrigger only treats production .go and .tdd audit/exception paths as gated, explicitly excluding *_test.go and never matching .tdd/current-plan.md, .tdd/plans/**, or docs/specs/*.md. The PostToolUse backstop also skips *_test.go, .tdd/*, docs/*, and specs/*, so commands like `printf ... > internal/foo_test.go` or `cat > .tdd/current-plan.md` land without TEST_REVIEW_REQUIRED/PLAN_REVIEW_REQUIRED and without a pending obligation.",
+      "recommendation": "Extend both Bash pretrigger and posttool detection to the same path universe as the Edit/Write triggers, or deny all mutating Bash writes to gated paths and require Edit/Write/MultiEdit so the primary triggers run.",
+      "location": ".claude/hooks/second-opinion-bash-pretrigger.sh:54"
+    },
+    {
+      "id": "F2",
+      "severity": "P0",
+      "category": "security",
+      "title": "Review completions can be accepted with unscoped legacy audit rows",
+      "evidence": "Plan completion validation falls back from strict `obligation_completed` scope/review_type matching to any audit line containing the candidate exception_id, and then accepts empty `prev_audit_sha`. Review-completion entries are new v1.9 artifacts, so this legacy path lets a forged approved completion plus a weak audit row satisfy the hook without runner-written scope binding.",
+      "recommendation": "Remove legacy audit fallback for plan_review_completion, test_review_completion, and production_edit_review_completion. Require an `obligation_completed` row with matching exception_id, cycle_id, review_type, scope_hash, and a valid prev_sha chain link before allowing.",
+      "location": ".claude/hooks/second-opinion-plan-trigger.sh:151"
+    },
+    {
+      "id": "F3",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "Production drift approvals are shadowed by the original completion",
+      "evidence": "The production trigger selects the first approved completion whose scope_hash is either the normal production scope or the drift scope. Drift pending entries are appended after the original completion and the runner updates them in place, so retrying a drift-approved edit still selects the original normal-scope entry first and denies PRODUCTION_SCOPE_DRIFT again.",
+      "recommendation": "Prefer the exact drift scope_hash for the current file before considering the broad production scope, or filter matched entries by allowed_file_globs before choosing one.",
+      "location": ".claude/hooks/second-opinion-production-trigger.sh:104"
+    },
+    {
+      "id": "F4",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "Revised production edits re-review stale proposed payload",
+      "evidence": "Production scope_hash excludes proposed content and is only cycle/base_git_sha/tier_level. Once a pending production obligation exists, repeated denied attempts skip updating `proposed_payload_base64`, so if Codex blocks the first proposal, a revised production edit in the same commit boundary still sends the old payload to the runner.",
+      "recommendation": "Either include proposed payload hash in the pending production obligation identity until approval, or update the existing pending entry's proposed payload on each denied production attempt before invoking the runner.",
+      "location": ".claude/hooks/second-opinion-production-trigger.sh:285"
+    }
+  ]
+}

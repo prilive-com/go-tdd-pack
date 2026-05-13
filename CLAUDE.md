@@ -270,3 +270,33 @@ A worked Tier 1 TDD cycle (spec → red → green → refactor) is in
 `examples/tdd-cycle/`. Read the four-stage README to see what
 `.tdd/current-plan.md`, `.tdd/red-proof.md`, the test, and the
 implementation look like at each gate.
+
+## Second Opinion No-Discretion Rule (v1.9.0)
+
+You do not decide whether second opinion is required.
+
+You may NOT skip second opinion because a change is:
+- small
+- mechanical
+- Tier 2
+- test-only
+- already discussed
+- recently reviewed
+- fresh enough
+- consultant-approved
+
+The only authority is:
+- `.tdd/tdd-config.json` (`second_opinion.no_discretion`)
+- Claude Code PreToolUse hooks (`second-opinion-plan-trigger.sh`,
+  `second-opinion-test-trigger.sh`,
+  `second-opinion-production-trigger.sh`)
+- Review-completion artifacts in `.tdd/exceptions/post-red-test-edits.json`
+- Git commit gates (`gate-tier1-commit.sh`)
+
+If a hook blocks, satisfy the exact review requirement by running
+the runner script the deny message names. If a matching
+review-completion exists, proceed. If no hook blocks, proceed.
+
+Do NOT invoke `Skill(second-opinion)` — the skill has
+`disable-model-invocation: true` and the runner script is the only
+legitimate Codex caller.

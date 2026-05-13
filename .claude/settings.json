@@ -1,9 +1,9 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
-
   "enableAllProjectMcpServers": false,
-  "enabledMcpjsonServers": ["gopls"],
-
+  "enabledMcpjsonServers": [
+    "gopls"
+  ],
   "permissions": {
     "allow": [
       "Read",
@@ -73,12 +73,10 @@
       "Read(./**/id_ed25519*)",
       "Read(./**/*.pem)",
       "Read(./**/*.key)",
-
       "Edit(./.git/**)",
       "Write(./.git/**)",
       "Edit(.claude/settings.json)",
       "Write(.claude/settings.json)",
-
       "Bash(rm -rf /*)",
       "Bash(rm -rf ~*)",
       "Bash(rm -rf $HOME*)",
@@ -89,7 +87,6 @@
       "Bash(curl * | bash)",
       "Bash(wget * | sh)",
       "Bash(wget * | bash)",
-
       "Bash(* --no-verify *)",
       "Bash(*--no-verify)",
       "Bash(git commit --no-verify*)",
@@ -97,7 +94,6 @@
       "Bash(HUSKY=0 *)",
       "Bash(GIT_HOOKS=0 *)",
       "Bash(SKIP=* git commit *)",
-
       "Bash(git push * --force *)",
       "Bash(git push *--force)",
       "Bash(git push --force *)",
@@ -106,17 +102,26 @@
       "Bash(git filter-repo *)",
       "Bash(git filter-branch *)",
       "Bash(git reset --hard origin/*)",
-
       "Bash(* --accept-data-loss *)",
       "Bash(*--accept-data-loss)",
-
       "Bash(psql *production*)",
       "Bash(psql *prod-*)",
       "Bash(mysql *production*)",
-      "Bash(mongo *production*)"
+      "Bash(mongo *production*)",
+      "Edit(.tdd/CYCLE_ABANDONED.txt)",
+      "Write(.tdd/CYCLE_ABANDONED.txt)",
+      "MultiEdit(.tdd/CYCLE_ABANDONED.txt)",
+      "Edit(.tdd/exceptions/**)",
+      "Write(.tdd/exceptions/**)",
+      "MultiEdit(.tdd/exceptions/**)",
+      "Edit(.tdd/audit/**)",
+      "Write(.tdd/audit/**)",
+      "MultiEdit(.tdd/audit/**)",
+      "Bash(*CYCLE_ABANDONED*)",
+      "Bash(*.tdd/exceptions/*)",
+      "Bash(*.tdd/audit/*)"
     ]
   },
-
   "hooks": {
     "SessionStart": [
       {
@@ -163,6 +168,11 @@
             "type": "command",
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/gate-tier1-commit.sh",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/second-opinion-bash-pretrigger.sh",
+            "timeout": 10
           }
         ]
       },
@@ -190,6 +200,26 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/second-opinion-plan-trigger.sh",
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/second-opinion-test-trigger.sh",
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/second-opinion-production-trigger.sh",
+            "timeout": 30
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -205,6 +235,27 @@
             "type": "command",
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/detect-ai-bloat.sh",
             "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/second-opinion-posttool-backstop.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/session-stop-review.sh",
+            "timeout": 60
           }
         ]
       }

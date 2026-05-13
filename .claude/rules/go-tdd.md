@@ -423,6 +423,101 @@ Each consultation of `allow_after_red_confirmed` emits a stderr
 deprecation warning (rate-limited per hook invocation). Operators
 should migrate to typed exceptions before v2.0.0 ships.
 
+## v1.9.0 auto-review triggers (plan / test / production)
+
+v1.9.0 removes AI discretion over `/second-opinion`. The AI can no
+longer choose when to invoke it — three PreToolUse trigger hooks
+make the call mechanically. The AI satisfies a hook-created
+obligation, observes that no obligation exists and proceeds, or is
+blocked.
+
+### The three triggers
+
+| Trigger | File pattern | Scope-hash binding |
+|---|---|---|
+| **plan_review** | `.tdd/current-plan.md`, `.tdd/plans/**`, `docs/specs/*.md` | `sha256(cycle_id \| plan_path \| proposed_plan_content_hash)` |
+| **test_review** | `*_test.go` (v1.9.0 round-8 F4: ALL test edits — mechanical skip-through was REMOVED in round-6 because constructing a reliable unified diff from Edit `old_string`/`new_string` proved unsafe; v1.7.0 typed exceptions still gate at commit time via `require-tdd-state.sh`) | `sha256(cycle_id \| test_file_path \| package_files_hash \| proposed_content_hash)` |
+| **production_edit_review** | `*.go` outside test/governance/docs/scripts/vendor dirs | `sha256(cycle_id \| base_git_sha \| tier_level)` — one completion per commit-boundary |
+
+Read-only operations (Grep, Read, read-only Bash) never trigger.
+
+### Opt-in
+
+Triggers fire only when `second_opinion.no_discretion.enabled: true`
+in `.tdd/tdd-config.json`. Default is `false` for backwards
+compatibility. Recommended:
+
+```jsonc
+"second_opinion": {
+  "no_discretion": {
+    "enabled": true,
+    "required_for": {
+      "plan_writes": true,
+      "test_writes": true,
+      "production_edits": true
+    }
+  }
+}
+```
+
+### Workflow when a trigger fires
+
+1. Hook denies the tool call with a stable error code
+   (`PLAN_REVIEW_REQUIRED`, `TEST_REVIEW_REQUIRED`, or
+   `PRODUCTION_EDIT_REVIEW_REQUIRED`).
+2. Operator (or AI as a satisfaction action) runs
+   `scripts/tdd/run-second-opinion.sh <review-type> <cycle-id>`.
+3. Runner builds context pack, invokes Codex, verifies output
+   conformance via jq, writes a completion entry to
+   `.tdd/exceptions/post-red-test-edits.json`.
+4. AI retries the tool call. Matching scope_hash → allowed.
+
+### Stable error codes (added in v1.9.0)
+
+- `PLAN_REVIEW_REQUIRED` — plan write blocked.
+- `TEST_REVIEW_REQUIRED` — test write blocked.
+- `PRODUCTION_EDIT_REVIEW_REQUIRED` — production .go edit blocked.
+- `PRODUCTION_SCOPE_DRIFT` — edit names a file outside the completion's
+  recorded scope (file-list drift defense).
+- `REVIEW_SCOPE_MISMATCH` — completion `scope_hash` does not match
+  current scope (e.g., proposed plan content changed since review).
+- `REVIEW_TYPE_MISMATCH` — `plan_review_completion` cannot satisfy a
+  `test_review` trigger and vice versa. Cross-type reuse mechanically
+  impossible.
+- `REVIEW_COMPLETION_EXPIRED` — completion was for an older
+  `base_git_sha`. HEAD has advanced.
+- `CODEX_OUTPUT_NON_CONFORMANT` — Codex output failed jq schema
+  validation after re-prompt retries. See `.tdd/codex/` logs.
+- `CODEX_UNREACHABLE` — Codex CLI missing or auth failed.
+- `MODEL_NOT_SCHEMA_COMPATIBLE` — model is in codex-family which
+  silently drops `--output-schema` (openai/codex#4181). Pin to
+  `gpt-5.5`.
+
+### Stop gate
+
+A Stop hook (`session-stop-review.sh`) blocks session end when
+pending obligations exist for the current cycle, unless the
+operator explicitly abandons via
+`.tdd/CYCLE_ABANDONED.txt` containing `APPROVED CYCLE ABANDONMENT`.
+
+The Stop hook honors `stop_hook_active` per Anthropic docs: when
+true (Claude is already in a forced continuation from a prior
+Stop), the hook exits 0 immediately — prevents infinite
+review→block→review loops.
+
+### Why this exists
+
+A 2026-05-12 conversation transcript showed an AI developer
+skipping `/second-opinion` four consecutive times in a single
+cycle, each skip technically defensible under v1.8.0 rules
+("Tier 2 mechanical fix", "no policy change", "read-only
+investigation", "fresh from earlier plan review"). v1.9.0 makes
+the hooks the only authority and converts the AI's
+"non-trivial" judgment into a hook-decided fact.
+
+The full v1.9.0 spec is in `.tdd/disposition-matrix.md` (after
+the cycle ships).
+
 ## Bypass procedure
 
 For an emergency hotfix where the operator vouches for the change:

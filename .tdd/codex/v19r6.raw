@@ -1,0 +1,44 @@
+/tmp/run-second-opinion-v190.sh: line 207: failing-cmd: command not found
+## Second opinion (scope: Tier 1 (cycle modifies .tdd/tdd-config.json + .claude/hooks/require-tdd-state.sh), model: gpt-5.5)
+
+{
+  "summary": "The no-discretion layer still has governance bypasses: malformed review output can become an approval, audit checks can be satisfied by unrelated events, and test skip-through can allow unreviewed edits.",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P0",
+      "category": "security",
+      "title": "Review output is not actually schema-validated before writing an approval",
+      "evidence": "verify_conformance only checks that top-level keys exist and that verdict is one of three strings; it does not verify array/object types or required finding fields from review-completion.schema.json. A Codex output like findings:\"not json schema compliant\", required_actions:[] with verdict:\"approve\" passes and is written as an approved completion, after which the trigger hook allows the edit.",
+      "recommendation": "Replace the hand-rolled check with real schema validation, or at minimum jq-validate types and every finding's required fields before any completion is recorded. Also fail if findings is not an array.",
+      "location": "scripts/tdd/run-second-opinion.sh:113"
+    },
+    {
+      "id": "F2",
+      "severity": "P0",
+      "category": "security",
+      "title": "Completion audit checks accept unrelated audit events and empty prev links",
+      "evidence": "The production hook accepts a completion when the audit log merely contains the candidate id, and then sets chain_ok=true if binding.prev_audit_sha is empty. It does not require event == \"obligation_completed\", matching review_type, matching scope_hash, or that the audit line itself is the line produced by the runner. A forged approved completion can reuse an existing audited exception_id and an empty prev_audit_sha.",
+      "recommendation": "Parse audit lines with jq and require one event exactly matching obligation_completed, exception_id, review_type, scope_hash, and cycle_id. Run verify-audit-chain.sh for every trigger path and require binding.prev_audit_sha to match the predecessor of that completion event.",
+      "location": ".claude/hooks/second-opinion-production-trigger.sh:148"
+    },
+    {
+      "id": "F3",
+      "severity": "P0",
+      "category": "security",
+      "title": "Test mechanical skip-through can accept malformed proposed diffs as empty diffs",
+      "evidence": "The test trigger builds proposed_diff as only file headers plus raw old/new content, with no @@ hunk header and no +/- diff lines. The v1.7 validator and AST parser both key off unified diff hunks, so this can validate as an empty no-op diff and return {}, allowing the actual test edit without test_review.",
+      "recommendation": "Construct a real unified diff for old_string/new_string/MultiEdit content, or remove this skip-through from the v1.9 trigger and let require-tdd-state remain the only v1.7 typed-exception gate.",
+      "location": ".claude/hooks/second-opinion-test-trigger.sh:143"
+    },
+    {
+      "id": "F4",
+      "severity": "P1",
+      "category": "correctness",
+      "title": "PostToolUse backstop is referenced by the test plan but not installed or present",
+      "evidence": "The v1.9 smoke section defines V19_POSTTOOL as .claude/hooks/second-opinion-posttool-backstop.sh and labels AC7 as \"PostToolUse backstop + Stop gate\", but settings.json PostToolUse only runs gofmt-after-edit.sh and detect-ai-bloat.sh, and no second-opinion-posttool-backstop.sh file exists in the changed set.",
+      "recommendation": "Either implement and register the PostToolUse backstop, or remove the AC/test references and explicitly document that PreToolUse triggers are the only enforcement layer.",
+      "location": ".claude/settings.json:217"
+    }
+  ]
+}

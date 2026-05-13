@@ -1,0 +1,53 @@
+/tmp/run-second-opinion-v190.sh: line 207: failing-cmd: command not found
+## Second opinion (scope: Tier 1 (cycle modifies .tdd/tdd-config.json + .claude/hooks/require-tdd-state.sh), model: gpt-5.5)
+
+{
+  "summary": "The no-discretion flow has multiple governance-critical binding failures: reviews can be forged or review the wrong content, and satisfied obligations can still leave hooks blocking legitimate work.",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "Runner does not bind completions to the hook-created obligation scope",
+      "evidence": "The trigger records an expected scope_hash in the pending obligation, but the runner never reads that pending entry and instead copies `.scope_hash` from Codex output into the approved artifact. The prompt only says scope_hash is required, so completion matching is nondeterministic and model-controlled.",
+      "recommendation": "Have the runner select the matching pending obligation for review_type/cycle_id, compute or read the expected scope_hash itself, validate Codex output against it, and write the runner-computed value into the completion.",
+      "location": "scripts/tdd/run-second-opinion.sh:211"
+    },
+    {
+      "id": "F2",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "Production reviews written by the runner can never unlock production edits",
+      "evidence": "The runner writes approved review completions with `\"scope\": {}`, while the production trigger treats an empty `allowed_file_globs`/`paths` list as invalid and denies with PRODUCTION_SCOPE_DRIFT.",
+      "recommendation": "Populate production completion scope from the reviewed file set, at minimum carrying forward the pending first_seen_file into allowed_file_globs, and validate that the reviewed context matches that list before approving.",
+      "location": "scripts/tdd/run-second-opinion.sh:238"
+    },
+    {
+      "id": "F3",
+      "severity": "P0",
+      "category": "security",
+      "title": "Test review scope excludes the proposed test edit content",
+      "evidence": "The test trigger hashes only cycle_id, test_file_path, and the current package file hash; it does not include tool_input.content/new_string. The context pack then reviews `git diff HEAD`, which is empty for the blocked PreToolUse write, so any later content for the same file/package state can reuse the completion.",
+      "recommendation": "Bind test_review to the proposed test diff or proposed content hash, store that in the pending obligation, and include that exact proposed content in the runner context.",
+      "location": ".claude/hooks/second-opinion-test-trigger.sh:63"
+    },
+    {
+      "id": "F4",
+      "severity": "P0",
+      "category": "security",
+      "title": "Forged approved completions pass when prev_audit_sha is empty",
+      "evidence": "The plan/test/production hooks accept a matching approved completion when `prev_audit_sha` is empty and the audit log is absent. A direct artifact edit with the expected scope_hash and no audit log therefore satisfies the hook without a runner-created audit event.",
+      "recommendation": "Fail closed unless a runner-written audit event for the completion id and scope_hash exists, and call the audit-chain verifier instead of treating an absent log plus empty prev hash as valid.",
+      "location": ".claude/hooks/second-opinion-plan-trigger.sh:123"
+    },
+    {
+      "id": "F5",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "Completed reviews leave the original pending obligation behind, so Stop remains blocked",
+      "evidence": "The runner appends a new approved completion entry but never updates or removes the pending entry created by the trigger. The Stop hook counts every same-cycle `.status == \"pending\"`, so a satisfied obligation still blocks session end.",
+      "recommendation": "Update the matching pending entry to approved or superseded atomically when recording completion, or make the Stop hook ignore pending entries that have a matching approved completion for the same scope_hash.",
+      "location": "scripts/tdd/run-second-opinion.sh:232"
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+/tmp/run-second-opinion-v190.sh: line 207: failing-cmd: command not found
+## Second opinion (scope: Tier 1 (cycle modifies .tdd/tdd-config.json + .claude/hooks/require-tdd-state.sh), model: gpt-5.5)
+
+{
+  "summary": "Review found multiple governance bypasses and one production-review deadlock: audit matching is forgeable, test skip-through is overbroad, runner output is not bound, and multi-file production reviews cannot work as specified.",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P0",
+      "category": "security",
+      "title": "Review completions can be forged by adding any matching audit line",
+      "evidence": "The plan/test/production hooks accept a completion when the audit log merely contains the completion id, and if prev_audit_sha is empty they do not verify chain continuity or event semantics. A direct edit can add an approved completion plus a one-line audit entry containing that id and bypass the review gate.",
+      "recommendation": "Call the audit-chain verifier on the whole log and require a runner-written obligation_completed event whose prev_sha equals the artifact binding and whose own line is in a valid chain. Reject empty prev_audit_sha except for the first legitimate chain entry created by the runner.",
+      "location": ".claude/hooks/second-opinion-plan-trigger.sh:126"
+    },
+    {
+      "id": "F2",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "Mechanical test skip-through allows arbitrary test edits without review",
+      "evidence": "The test trigger returns allow for any approved mechanical_signature_propagation or import_only exception matching the file path. It does not validate binding hashes, audit chain, expiry, max_per_cycle, operations, or that the proposed edit is actually mechanical/import-only before bypassing TEST_REVIEW_REQUIRED.",
+      "recommendation": "Do not skip the second-opinion trigger solely from artifact metadata. Reuse the v1.8 typed-exception validator against the actual proposed diff, including binding/audit/cap checks, or remove this skip-through and require a test_review completion.",
+      "location": ".claude/hooks/second-opinion-test-trigger.sh:93"
+    },
+    {
+      "id": "F3",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "Runner records completions without binding Codex output to review type or scope",
+      "evidence": "verify_conformance only checks that required fields exist and verdict is in enum; it never checks review_type, cycle_id, or scope_hash against the pending obligation. The script defines validate-review-completion.sh but never calls it, then approves the pending entry using the pending scope regardless of Codex's returned binding.",
+      "recommendation": "After Codex output is produced, require review_type == requested type, cycle_id == requested cycle, scope_hash == pending binding.scope_hash, and strict P0/P1 policy before transitioning the pending entry to approved. Use the validator or remove it.",
+      "location": "scripts/tdd/run-second-opinion.sh:113"
+    },
+    {
+      "id": "F4",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "Production review deadlocks on the second file in the same commit boundary",
+      "evidence": "The production scope hash intentionally excludes file_path, but the runner converts the completion scope to only the first_seen_file. Later edits to a different production file at the same base_git_sha match the same completion, fail drift, and exit without creating a new pending obligation, while run-second-opinion requires a pending entry.",
+      "recommendation": "Either make production scope per reviewed file-set and create a fresh pending entry on drift, or implement the documented one-completion behavior by recording all reviewed files/globs and providing a scope-extension flow that creates a satisfiable pending obligation.",
+      "location": "scripts/tdd/run-second-opinion.sh:240"
+    }
+  ]
+}

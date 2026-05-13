@@ -1,0 +1,53 @@
+/tmp/run-second-opinion-v190.sh: line 207: failing-cmd: command not found
+## Second opinion (scope: Tier 1 (cycle modifies .tdd/tdd-config.json + .claude/hooks/require-tdd-state.sh), model: gpt-5.5)
+
+{
+  "summary": "The v1.9 hooks are not enforceable as written: the runner cannot produce matching bindings, direct artifact edits can bypass review, and production drift is disabled.",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "Runner cannot satisfy the trigger scope hashes it is supposed to unblock",
+      "evidence": "The triggers bind approvals to locally computed scope_hash values, but run-second-opinion.sh never computes the expected hash for the blocked tool call; it copies .scope_hash from Codex output into the artifact. The runner is invoked only as run-second-opinion.sh <review-type> <cycle-id>, so it lacks the plan path/content hash, test file path/package hash, or production tier/base binding needed to reproduce the hook's hash.",
+      "recommendation": "Make the hook-created obligation explicit: persist/pass review type, cycle_id, target path, content/package/base inputs, and expected scope_hash to the runner. The runner should compute or consume that local expected hash, validate Codex output against it, and write binding.scope_hash from local data, not model output.",
+      "location": "scripts/tdd/run-second-opinion.sh:211"
+    },
+    {
+      "id": "F2",
+      "severity": "P0",
+      "category": "security",
+      "title": "Forged review-completion entries bypass second-opinion enforcement",
+      "evidence": "The plan/test/production hooks allow based only on .type, .binding.cycle_id, .binding.scope_hash, and .status == approved. They do not call validate-review-completion.sh, do not verify the audit chain, and do not require evidence that the runner produced the entry. A direct edit to .tdd/exceptions/post-red-test-edits.json with the expected hash is enough to unblock the hook.",
+      "recommendation": "On every matched completion, run strict validation against the completion schema, require runner-authored audit continuity, and fail closed on missing/malformed audit data. Also protect direct writes to the completion artifact or route them through the same validator.",
+      "location": ".claude/hooks/second-opinion-plan-trigger.sh:92"
+    },
+    {
+      "id": "F3",
+      "severity": "P0",
+      "category": "security",
+      "title": "Production file-list drift detection is disabled for runner-created completions",
+      "evidence": "The production hook treats an empty allowed_file_globs/scope.paths list as no drift. The runner writes every completion with \"scope\": {}, so any matching production_edit_review_completion allows all production .go files in the same cycle/base/tier instead of only reviewed files.",
+      "recommendation": "Have the runner record the reviewed file set/globs in the completion, and make the production hook deny when scope is missing or empty. Empty scope should mean invalid completion, not unlimited scope.",
+      "location": ".claude/hooks/second-opinion-production-trigger.sh:120"
+    },
+    {
+      "id": "F4",
+      "severity": "P1",
+      "category": "correctness",
+      "title": "Review completions poison the legacy typed-exception audit gate",
+      "evidence": "require-tdd-state.sh counts every approved exception for the cycle and requires each ID to have a granted audit event. run-second-opinion.sh writes approved review-completion entries but appends audit event obligation_completed, not granted. After any review completion exists, typed test-edit exceptions in the same cycle can be disabled by the missing-grant check.",
+      "recommendation": "Filter the v1.8 typed-exception audit checks to only test-edit exception types, or update the audit verifier to understand review-completion event types separately.",
+      "location": ".claude/hooks/require-tdd-state.sh:290"
+    },
+    {
+      "id": "F5",
+      "severity": "P1",
+      "category": "correctness",
+      "title": "Stop hook cannot enforce unresolved review obligations because triggers never create pending obligations",
+      "evidence": "session-stop-review.sh only blocks when it finds artifact entries with status == pending, but the three PreToolUse triggers only emit deny JSON and never append a pending obligation entry. A blocked plan/test/production review therefore leaves no pending record for the Stop hook to find.",
+      "recommendation": "Either have trigger hooks atomically record pending obligations before denying, or have the Stop hook recompute outstanding obligations from current cycle state and recent denials instead of relying on pending artifact entries.",
+      "location": ".claude/hooks/session-stop-review.sh:54"
+    }
+  ]
+}

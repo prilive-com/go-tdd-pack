@@ -1,48 +1,44 @@
 ---
 name: second-opinion
 description: |
-  Get a cross-model second opinion on a plan or code change before
-  implementing it. Calls OpenAI Codex CLI (read-only) to review the
-  current plan, the current diff, or a specific snippet. Returns
-  honest findings — not blocking, advisory only. Use BEFORE any
-  non-trivial code change (Tier 1 or not), or when the user says
-  "second opinion", "ask codex", "what would another model think",
-  or "/second-opinion".
-when_to_use: |
-  Auto-invoke before any non-trivial code change, regardless of Tier:
-    - Implementing a new feature, function, type, or significant logic.
-    - Fixing a bug whose root cause you are not 100% sure of.
-    - Any cross-package or cross-file change.
-    - Any architecture / API design decision.
-    - Refactor that touches >30 lines or changes public API surface.
-    - Any change on a Tier 1 path (always, regardless of size; uses a
-      stronger model for these — see Step 3).
-  Manually invoke when the user says:
-    - "second opinion" / "ask codex" / "what would another model say"
-    - "/second-opinion plan" / "/second-opinion diff" / "/second-opinion file <path>"
-  Skip when (the truly trivial cases):
-    - The change is a typo, formatting, or doc-only edit.
-    - The change is a single-line bugfix with a mechanically obvious cause.
-    - The change is to non-code project files (.gitignore, .editorconfig,
-      CHANGELOG, README cosmetic edits) with no behavior impact.
-    - You already have explicit user APPROVED on a Tier 1 plan and
-      are mid-implementation (the spec gate already cleared it).
-    - The user said "skip second opinion" or "/second-opinion off".
-    - SECOND_OPINION_DISABLE=1 is set, OR `codex` is not installed.
+  Reference for the cross-model review runner. The hooks invoke the
+  runner script; the model does not invoke this skill. Documents the
+  Codex CLI contract, the --output-schema conformance fallback, the
+  context-pack contents, and the typed-exception codes.
+disable-model-invocation: true
+user-invokable: true
 license: MIT
-version: 1.2.0
+version: 1.9.0
 ---
 
-# Second Opinion (cross-model review via Codex CLI)
+# Second Opinion (reference for the runner)
 
-Sends a plan, diff, or snippet to OpenAI Codex CLI as a **read-only
-external reviewer**. Returns structured findings. You stay the final
-adjudicator — Codex is a peer reviewer, not authority.
+**The model never decides whether second opinion is required.** The
+authority lives in `.tdd/tdd-config.json`, the second-opinion trigger
+hooks (`second-opinion-plan-trigger.sh`,
+`second-opinion-test-trigger.sh`,
+`second-opinion-production-trigger.sh`), the review-completion
+artifact validator, and the Git commit gates. `Skill(second-opinion)`
+is blocked at the Claude Code runtime level by
+`disable-model-invocation: true`. The only legitimate invocation path
+is `scripts/tdd/run-second-opinion.sh <review-type> <cycle-id>`,
+called by the hooks or by the operator's `/second-opinion` slash
+command.
 
-This skill exists because two models from different families catch
-different blind spots. Anthropic and OpenAI training corpora and
-RLHF pipelines diverge enough that "what Codex notices" is a real
-signal, not noise.
+If you (the model) find yourself reading this skill body without a
+hook having injected it, that is a bug — surface to the operator.
+
+## Why the runner exists
+
+The runner sends a plan, diff, or snippet to OpenAI Codex CLI as a
+**read-only external reviewer**. Returns structured findings. The
+operator stays the final adjudicator — Codex is a peer reviewer,
+not authority.
+
+This mechanism exists because two models from different families
+catch different blind spots. Anthropic and OpenAI training corpora
+and RLHF pipelines diverge enough that "what Codex notices" is a
+real signal, not noise.
 
 ## Data flow (what gets sent to OpenAI)
 
@@ -85,7 +81,7 @@ The user must already have:
 If `codex` is missing or not authenticated, surface the missing
 piece and stop. Do NOT try to install or configure anything yourself.
 
-## Workflow (this is what you, Claude, do)
+## Runner workflow (what scripts/tdd/run-second-opinion.sh does, for reference)
 
 ### Step 1 — Resolve what to review
 
@@ -105,7 +101,7 @@ Send the target + minimal context. **Include code snippets when you have them** 
 
 The prompt MUST tell Codex to be skeptical and honest, not agreeable. Use the template below verbatim (it's tuned for anti-sycophancy).
 
-### Step 3 — Run the review
+### Step 3 — How the runner executes the review (reference)
 
 Execute via Bash:
 

@@ -287,8 +287,19 @@ if [[ ${#TIER1_TESTS[@]} -gt 0 ]]; then
         _audit_log_path="$PROJECT_DIR/.tdd/audit/${_audit_chain_cycle}.jsonl"
         _approved_for_cycle=0
         if [[ -f "$EXC_ARTIFACT" ]]; then
+          # v1.9.0 round-8 F3: filter to v1.7/v1.8 test-edit
+          # exception types ONLY. v1.9.0 review-completion entries
+          # (plan_review_completion / test_review_completion /
+          # production_edit_review_completion) live in the same
+          # artifact but use different audit event types
+          # (obligation_completed, not granted). Treating them as
+          # typed exceptions would poison the v1.8.0 audit gate.
           _approved_for_cycle="$(jq -r --arg cid "$_audit_chain_cycle" '
-            [.exceptions[]? | select(.status == "approved") | select(.binding.cycle_id == $cid)] | length
+            [.exceptions[]?
+             | select(.type | IN("mechanical_signature_propagation","import_only","compile_fix_only","schema_predicate_correction"))
+             | select(.status == "approved")
+             | select(.binding.cycle_id == $cid)
+            ] | length
           ' "$EXC_ARTIFACT" 2>/dev/null || echo 0)"
           [[ -z "$_approved_for_cycle" ]] && _approved_for_cycle=0
         fi
@@ -307,7 +318,9 @@ if [[ ${#TIER1_TESTS[@]} -gt 0 ]]; then
           ' "$_audit_log_path" 2>/dev/null \
             | sort -u \
             | comm -23 <(jq -r --arg cid "$_audit_chain_cycle" '
-                .exceptions[]? | select(.status == "approved")
+                .exceptions[]?
+                | select(.type | IN("mechanical_signature_propagation","import_only","compile_fix_only","schema_predicate_correction"))
+                | select(.status == "approved")
                 | select(.binding.cycle_id == $cid)
                 | .id
               ' "$EXC_ARTIFACT" 2>/dev/null | sort -u) - \
@@ -374,9 +387,15 @@ if [[ ${#TIER1_TESTS[@]} -gt 0 ]]; then
       _max_per_cycle="$(jq -r '.test_file_policy.post_red_mechanical_update.max_per_cycle // 5' "$CONFIG" 2>/dev/null || echo 5)"
       [[ -z "$_max_per_cycle" ]] && _max_per_cycle=5
       if [[ "$_max_per_cycle" -gt 0 ]] && [[ -n "$_current_cycle_id" ]]; then
-        _approved_count="$(jq -r --arg cid "$_current_cycle_id" \
-          '[.exceptions[]? | select(.status == "approved") | select(.binding.cycle_id == $cid)] | length' \
-          "$EXC_ARTIFACT" 2>/dev/null || echo 0)"
+        # v1.9.0 round-8 F3: cap applies to v1.7/v1.8 test-edit
+        # exceptions only; v1.9.0 review-completions are separate.
+        _approved_count="$(jq -r --arg cid "$_current_cycle_id" '
+          [.exceptions[]?
+           | select(.type | IN("mechanical_signature_propagation","import_only","compile_fix_only","schema_predicate_correction"))
+           | select(.status == "approved")
+           | select(.binding.cycle_id == $cid)
+          ] | length
+        ' "$EXC_ARTIFACT" 2>/dev/null || echo 0)"
         [[ -z "$_approved_count" ]] && _approved_count=0
         if [[ "$_approved_count" -gt "$_max_per_cycle" ]]; then
           echo "[require-tdd-state] BLOCKED: max_per_cycle exceeded — $_approved_count approved exceptions for cycle '$_current_cycle_id' (cap: $_max_per_cycle)." >&2

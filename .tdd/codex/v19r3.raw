@@ -1,0 +1,44 @@
+/tmp/run-second-opinion-v190.sh: line 207: failing-cmd: command not found
+## Second opinion (scope: Tier 1 (cycle modifies .tdd/tdd-config.json + .claude/hooks/require-tdd-state.sh), model: gpt-5.5)
+
+{
+  "summary": "The no-discretion gate can approve unreviewed edits, forged completions, and model-created abandonment; several core governance invariants are not mechanically enforced.",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "Runner reviews the pre-edit worktree, not the denied proposed change",
+      "evidence": "The trigger denies before the edit lands, but the runner context is built from `git diff HEAD` and current snapshots. The pending entries store only hashes/path/first_seen_file, not the proposed diff/content, so Codex can approve an empty or stale context and the retry can land the unreviewed change.",
+      "recommendation": "Persist the exact proposed content/diff in the pending obligation or apply it in a temporary worktree, send that diff to Codex, bind the completion to its hash, and revalidate the retry against the reviewed content.",
+      "location": "scripts/tdd/runner-context-pack.sh:55"
+    },
+    {
+      "id": "F2",
+      "severity": "P0",
+      "category": "security",
+      "title": "Forged completions only need a matching exception_id string in the audit log",
+      "evidence": "The production hook accepts any non-empty audit log containing the completion id, and if `prev_audit_sha` is empty it sets `chain_ok=true`. The plan/test hooks use the same pattern. They do not run `verify-audit-chain.sh`, verify event type, verify scope_hash, or verify the exact audit entry linkage.",
+      "recommendation": "Parse the audit JSON, require an `obligation_completed` entry for the exact id/review_type/scope_hash, verify its `prev_sha`, and run full `verify-audit-chain.sh` before accepting any completion.",
+      "location": ".claude/hooks/second-opinion-production-trigger.sh:140"
+    },
+    {
+      "id": "F3",
+      "severity": "P0",
+      "category": "security",
+      "title": "The Stop gate can be bypassed by writing the abandonment phrase",
+      "evidence": "The Stop hook allows session end whenever `.tdd/CYCLE_ABANDONED.txt` contains `APPROVED CYCLE ABANDONMENT`. There is no operator-only signature, no audit entry, and the new PreToolUse triggers do not protect that path.",
+      "recommendation": "Make abandonment an operator-only audited action: protect this file from model writes, bind it to cycle_id and audit-chain state, or require a separate trusted command/env approval outside normal Write/Edit tools.",
+      "location": ".claude/hooks/session-stop-review.sh:45"
+    },
+    {
+      "id": "F4",
+      "severity": "P1",
+      "category": "correctness",
+      "title": "P1 findings can still transition an obligation to approved",
+      "evidence": "The runner blocks P0 findings, but P1 findings are allowed when Codex returns `verdict == approve_with_changes`. The schema has no resolution/adjudication fields, so unresolved P1 findings can still become an approved completion and unblock the edit.",
+      "recommendation": "Do not write a completion while any P0/P1 finding exists, or add explicit per-finding resolution/adjudication fields and verify them before transitioning the pending entry to approved.",
+      "location": "scripts/tdd/run-second-opinion.sh:172"
+    }
+  ]
+}

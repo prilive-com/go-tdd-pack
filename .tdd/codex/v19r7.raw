@@ -1,0 +1,44 @@
+/tmp/run-second-opinion-v190.sh: line 207: failing-cmd: command not found
+## Second opinion (scope: Tier 1 (cycle modifies .tdd/tdd-config.json + .claude/hooks/require-tdd-state.sh), model: gpt-5.5)
+
+{
+  "summary": "Review found multiple governance bypasses: Bash can mutate protected state/Go files outside review, audit links are under-bound, and Codex can self-clear P1 findings.",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P0",
+      "category": "security",
+      "title": "Model can create the abandonment file via allowed Bash despite Edit/Write denies",
+      "evidence": ".claude/settings.json allows Bash(cat *) but only denies Edit/Write/MultiEdit for .tdd/CYCLE_ABANDONED.txt; session-stop-review.sh then trusts that file if it contains the magic phrase and cycle id.",
+      "recommendation": "Add Bash-level protected-path guards for .tdd/CYCLE_ABANDONED.txt, .tdd/exceptions/**, and .tdd/audit/**, including redirection/tee/heredoc cases, or route all Bash commands touching these paths through a strict deny hook.",
+      "location": ".claude/settings.json:27"
+    },
+    {
+      "id": "F2",
+      "severity": "P0",
+      "category": "security",
+      "title": "Review-completion audit checks do not bind the audit event to review_type and scope_hash",
+      "evidence": "The runner writes audit events with review_type and scope_hash, but production lookup only checks event/id/cycle, and plan/test lookups only grep for exception_id. A tampered artifact can reuse an existing audit line for the same id/cycle while changing the approved binding/scope.",
+      "recommendation": "For every trigger, jq-parse the audit log, run verify-audit-chain.sh, and require a matching obligation_completed event whose exception_id, cycle_id, review_type, and scope_hash exactly match the candidate completion.",
+      "location": ".claude/hooks/second-opinion-production-trigger.sh:154"
+    },
+    {
+      "id": "F3",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "Codex can self-mark P1 findings as accepted and unblock the completion",
+      "evidence": "run-second-opinion.sh counts P1 findings with accepted_with_evidence == true as resolved, but that field comes from the same Codex output being evaluated; there is no separate operator adjudication or post-fix verification before writing the approved completion.",
+      "recommendation": "Do not accept accepted_with_evidence from Codex output. Treat all P0/P1 findings as blocking until a separate operator-controlled disposition or a later clean review after fixes clears them.",
+      "location": "scripts/tdd/run-second-opinion.sh:251"
+    },
+    {
+      "id": "F4",
+      "severity": "P0",
+      "category": "security",
+      "title": "Bash backstop misses production Go files outside cmd/internal/pkg/api",
+      "evidence": "The production trigger claims to cover any production *.go file outside excluded dirs, but the Bash PostToolUse backstop only detects command strings containing cmd/, internal/, pkg/, or api/. A Bash write to main.go or service/foo.go can avoid creating a review obligation.",
+      "recommendation": "After Bash, inspect git diff --name-only and apply the same production path classifier as second-opinion-production-trigger.sh instead of parsing only selected command-string path prefixes.",
+      "location": ".claude/hooks/second-opinion-posttool-backstop.sh:42"
+    }
+  ]
+}

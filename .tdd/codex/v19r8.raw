@@ -1,0 +1,44 @@
+/tmp/run-second-opinion-v190.sh: line 207: failing-cmd: command not found
+## Second opinion (scope: Tier 1 (cycle modifies .tdd/tdd-config.json + .claude/hooks/require-tdd-state.sh), model: gpt-5.5)
+
+{
+  "summary": "The no-discretion layer still has both bypass and false-denial paths: mutating Bash lands changes before review, audit validation is weak, and review completions interfere with typed exceptions.",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P0",
+      "category": "security",
+      "title": "Mutating Bash can land production changes before the review gate runs",
+      "evidence": "The PostToolUse backstop explicitly says it is not primary enforcement and cannot undo the already-written file. Because the no-discretion production gate is registered only for Edit/Write/MultiEdit, a Bash write such as a heredoc or redirect can modify a production .go file before any review completion exists; the backstop only creates a pending obligation afterward.",
+      "recommendation": "Add a PreToolUse Bash classifier/deny for mutating commands that target gated paths, or restrict mutating Bash broadly while no_discretion is enabled. Keep PostToolUse only as defense-in-depth.",
+      "location": ".claude/hooks/second-opinion-posttool-backstop.sh:10"
+    },
+    {
+      "id": "F2",
+      "severity": "P0",
+      "category": "security",
+      "title": "Review-completion audit checks accept unbound legacy events",
+      "evidence": "The production trigger accepts audit events where event is either obligation_completed or granted and only checks exception_id/cycle_id. If binding.prev_audit_sha is empty, chain_ok becomes true without requiring review_type or scope_hash to match. Plan/test have similar weaker fallbacks, so an approved completion can be paired with an unrelated legacy-style audit line.",
+      "recommendation": "For review-completion types, require a valid full audit chain plus an obligation_completed event whose exception_id, cycle_id, review_type, and scope_hash exactly match the candidate. Do not accept granted legacy events for v1.9 review completions.",
+      "location": ".claude/hooks/second-opinion-production-trigger.sh:154"
+    },
+    {
+      "id": "F3",
+      "severity": "P0",
+      "category": "correctness",
+      "title": "Review completions poison the typed test-edit exception gate",
+      "evidence": "require-tdd-state counts every approved exception for the cycle, with no type filter, then requires every approved id to have a granted audit event. v1.9 review completions are approved entries in the same artifact, but the runner writes obligation_completed events, so a normal second-opinion completion can disable legitimate typed test-edit exceptions or push the cycle over max_per_cycle.",
+      "recommendation": "Filter all typed-exception audit, grant-set, and max_per_cycle queries to v1.7 test-edit exception types only; exclude plan_review_completion, test_review_completion, and production_edit_review_completion.",
+      "location": ".claude/hooks/require-tdd-state.sh:290"
+    },
+    {
+      "id": "F4",
+      "severity": "P1",
+      "category": "correctness",
+      "title": "Mechanical typed test edits no longer skip test review despite the documented contract",
+      "evidence": "The rule table says test_review applies to *_test.go except pure-mechanical v1.7 typed diffs, but the hook states the mechanical skip-through was removed and now requires test_review_completion at edit time for all test writes. That regresses the documented typed-exception workflow and adds another review gate to changes the system says are already mechanically covered.",
+      "recommendation": "Either restore the typed-exception skip-through by consulting the v1.7 validator before denying, or update the contract/docs/tests to make the extra test_review gate explicit and intentional.",
+      "location": ".claude/hooks/second-opinion-test-trigger.sh:93"
+    }
+  ]
+}

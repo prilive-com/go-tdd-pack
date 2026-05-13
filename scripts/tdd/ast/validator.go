@@ -86,6 +86,8 @@ func main() {
 		runCompileFixScopeCheck(args, os.Stdin)
 	case "schema-predicate-check":
 		runSchemaPredicateCheck(args, os.Stdin)
+	case "review-completion-check":
+		runReviewCompletionCheck(args, os.Stdin)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", cmd)
 		os.Exit(2)
@@ -998,4 +1000,111 @@ func isPureRename(old, new []string, oldName, newName string) bool {
 		}
 	}
 	return true
+}
+
+// ─── review-completion-check (v1.9.0) ────────────────────────────────
+//
+// Validates a v1.9.0 review-completion artifact against:
+//   - schema conformance (review_type, cycle_id, scope_hash, verdict,
+//     findings[], required_actions[]);
+//   - scope_hash binding (if --scope-hash provided);
+//   - type-match (if --type provided);
+//   - prev_audit_sha format (sha256 hex, 64 chars lowercase).
+//
+// Inputs:
+//   --type <plan_review|test_review|production_edit>  optional
+//   --scope-hash <hex>                                optional
+//   --completion <path>                               required
+//
+// Exit codes: 0 valid, 1 invalid, 2 parse error.
+
+func runReviewCompletionCheck(args []string, _ io.Reader) {
+	fs := flag.NewFlagSet("review-completion-check", flag.ContinueOnError)
+	reviewType := fs.String("type", "", "expected review_type")
+	scopeHash := fs.String("scope-hash", "", "expected scope_hash (lowercase hex sha256)")
+	completionPath := fs.String("completion", "", "path to completion.json")
+	pathsCSV := fs.String("paths", "", "(reserved; not used here)")
+	_ = pathsCSV
+	if err := fs.Parse(args); err != nil {
+		emit(Report{OK: false, Reason: "flag_parse_error", Evidence: []string{err.Error()}})
+		os.Exit(2)
+	}
+	if *completionPath == "" {
+		emit(Report{OK: false, Reason: "missing_completion_path", Evidence: []string{"use --completion <path>"}})
+		os.Exit(2)
+	}
+	src, err := os.ReadFile(*completionPath)
+	if err != nil {
+		emit(Report{OK: false, Reason: "completion_read_failed", Evidence: []string{err.Error()}})
+		os.Exit(2)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(src, &obj); err != nil {
+		emit(Report{OK: false, Reason: "completion_not_json", Evidence: []string{err.Error()}})
+		os.Exit(2)
+	}
+
+	missing := []string{}
+	for _, f := range []string{"review_type", "cycle_id", "scope_hash", "verdict", "findings", "required_actions"} {
+		if _, ok := obj[f]; !ok {
+			missing = append(missing, f)
+		}
+	}
+	if len(missing) > 0 {
+		emit(Report{OK: false, Reason: "missing_required_fields", Evidence: missing})
+		os.Exit(1)
+	}
+
+	verdict, _ := obj["verdict"].(string)
+	switch verdict {
+	case "approve", "approve_with_changes", "block":
+	default:
+		emit(Report{OK: false, Reason: "invalid_verdict", Evidence: []string{verdict}})
+		os.Exit(1)
+	}
+
+	if *reviewType != "" {
+		actual, _ := obj["review_type"].(string)
+		if actual != *reviewType {
+			emit(Report{OK: false, Reason: "REVIEW_TYPE_MISMATCH", Evidence: []string{
+				fmt.Sprintf("expected: %s", *reviewType),
+				fmt.Sprintf("got: %s", actual),
+			}})
+			os.Exit(1)
+		}
+	}
+
+	if *scopeHash != "" {
+		actual, _ := obj["scope_hash"].(string)
+		if actual != *scopeHash {
+			emit(Report{OK: false, Reason: "REVIEW_SCOPE_MISMATCH", Evidence: []string{
+				fmt.Sprintf("expected: %s", *scopeHash),
+				fmt.Sprintf("got: %s", actual),
+			}})
+			os.Exit(1)
+		}
+	}
+
+	if rawPrev, ok := obj["prev_audit_sha"]; ok {
+		prev, _ := rawPrev.(string)
+		if prev != "" {
+			if len(prev) != 64 {
+				emit(Report{OK: false, Reason: "malformed_prev_audit_sha", Evidence: []string{
+					fmt.Sprintf("expected 64-char hex, got len=%d: %q", len(prev), prev),
+				}})
+				os.Exit(1)
+			}
+			for _, r := range prev {
+				if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+					emit(Report{OK: false, Reason: "malformed_prev_audit_sha", Evidence: []string{
+						fmt.Sprintf("expected lowercase hex, got %q", prev),
+					}})
+					os.Exit(1)
+				}
+			}
+		}
+	}
+
+	emit(Report{OK: true, Reason: "review_completion_valid"})
+	os.Exit(0)
 }
