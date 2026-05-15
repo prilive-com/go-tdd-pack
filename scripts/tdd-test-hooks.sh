@@ -433,6 +433,92 @@ else
   fail "v196_bash_pretrigger_message_explains_abandonment_path: bash-pretrigger deny message must explain the abandonment path for CYCLE_ABANDONED.txt"
 fi
 
+# v1.9.7: cycle abandonment must DURABLY mark pending entries as
+# abandoned, append a SHA-chained audit-log entry, and rotate the
+# abandonment file. Pre-v1.9.7 the hook only allowed Stop; the entry
+# stayed pending forever and a stale file could leak across cycles.
+V197_HOOK=".claude/hooks/session-stop-review.sh"
+
+# T1: first abandonment transitions entries, audits, rotates file.
+TMP_V197T1=$(mktemp -d)
+mkdir -p "$TMP_V197T1/.tdd/exceptions" "$TMP_V197T1/.tdd/audit"
+cat > "$TMP_V197T1/.tdd/current-plan.md" <<'EOF'
+Cycle ID: v197t1
+EOF
+cat > "$TMP_V197T1/.tdd/CYCLE_ABANDONED.txt" <<'EOF'
+APPROVED CYCLE ABANDONMENT
+v197t1
+EOF
+cat > "$TMP_V197T1/.tdd/exceptions/post-red-test-edits.json" <<'EOF'
+{
+  "version": 1, "phase": "red", "cycle_id": "v197t1",
+  "exceptions": [
+    {"id":"R-001","type":"plan_review_completion","status":"pending",
+     "binding":{"cycle_id":"v197t1","scope_hash":"a"}}
+  ]
+}
+EOF
+out=$(echo '{"hook_event_name":"Stop","stop_hook_active":false}' \
+  | CLAUDE_PROJECT_DIR="$TMP_V197T1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$V197_HOOK" 2>/dev/null; echo "rc=$?")
+status=$(jq -r '.exceptions[0].status' "$TMP_V197T1/.tdd/exceptions/post-red-test-edits.json" 2>/dev/null)
+audit_count=$(wc -l < "$TMP_V197T1/.tdd/audit/v197t1.jsonl" 2>/dev/null || echo 0)
+audit_event=$(tail -1 "$TMP_V197T1/.tdd/audit/v197t1.jsonl" 2>/dev/null | jq -r '.event' 2>/dev/null)
+rotated_count=$(ls "$TMP_V197T1/.tdd/abandoned/" 2>/dev/null | wc -l)
+abandoned_gone=$([ ! -f "$TMP_V197T1/.tdd/CYCLE_ABANDONED.txt" ] && echo true || echo false)
+if [[ "$out" == *"rc=0"* ]] \
+   && [[ "$status" == "abandoned" ]] \
+   && [[ "$audit_count" -ge 1 ]] \
+   && [[ "$audit_event" == "cycle_abandoned" ]] \
+   && [[ "$rotated_count" -ge 1 ]] \
+   && [[ "$abandoned_gone" == "true" ]]; then
+  pass "v197_abandonment_transitions_audits_and_rotates"
+else
+  fail "v197_abandonment_transitions_audits_and_rotates: rc='$out' status='$status' audit_count=$audit_count audit_event='$audit_event' rotated=$rotated_count gone=$abandoned_gone"
+fi
+
+# T2: second /exit on the same cycle (file already rotated, entries
+# already abandoned) — Stop hook silent, no block.
+out=$(echo '{"hook_event_name":"Stop","stop_hook_active":false}' \
+  | CLAUDE_PROJECT_DIR="$TMP_V197T1" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$V197_HOOK" 2>/dev/null; echo "rc=$?")
+if [[ "$out" == *"rc=0"* ]] && [[ "$out" != *"block"* ]] && [[ "$out" != *"BLOCKED"* ]]; then
+  pass "v197_second_exit_silent_after_abandonment"
+else
+  fail "v197_second_exit_silent_after_abandonment (got: '$out')"
+fi
+rm -rf "$TMP_V197T1"
+
+# T3: stale abandonment file referencing a different cycle_id must
+# NOT satisfy Stop for the current cycle.
+TMP_V197T3=$(mktemp -d)
+mkdir -p "$TMP_V197T3/.tdd/exceptions"
+cat > "$TMP_V197T3/.tdd/current-plan.md" <<'EOF'
+Cycle ID: v197t3-current
+EOF
+cat > "$TMP_V197T3/.tdd/CYCLE_ABANDONED.txt" <<'EOF'
+APPROVED CYCLE ABANDONMENT
+v197t3-OLD
+EOF
+cat > "$TMP_V197T3/.tdd/exceptions/post-red-test-edits.json" <<'EOF'
+{
+  "version": 1, "phase": "red", "cycle_id": "v197t3-current",
+  "exceptions": [
+    {"id":"R-001","type":"plan_review_completion","status":"pending",
+     "binding":{"cycle_id":"v197t3-current","scope_hash":"a"}}
+  ]
+}
+EOF
+out=$(echo '{"hook_event_name":"Stop","stop_hook_active":false}' \
+  | CLAUDE_PROJECT_DIR="$TMP_V197T3" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$V197_HOOK" 2>/dev/null; echo "rc=$?")
+if [[ "$out" == *"block"* ]] && [[ "$out" == *"v197t3-current"* ]]; then
+  pass "v197_stale_abandonment_for_different_cycle_does_not_satisfy_stop"
+else
+  fail "v197_stale_abandonment_for_different_cycle_does_not_satisfy_stop (got: '$out')"
+fi
+rm -rf "$TMP_V197T3"
+
 # PARTIAL discipline check (trial-feedback hardening): every 'stance: PARTIAL' must have a
 # substantive 'rejected:' field. Catches the sycophancy-theatre failure
 # mode where Claude labels PARTIAL while functionally accepting 100%.

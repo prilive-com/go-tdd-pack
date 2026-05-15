@@ -51,7 +51,68 @@ abandoned_file="$PROJECT_DIR/.tdd/CYCLE_ABANDONED.txt"
 if [[ -f "$abandoned_file" ]] \
    && grep -qE 'APPROVED CYCLE ABANDONMENT' "$abandoned_file" 2>/dev/null \
    && grep -qF "$cycle_id" "$abandoned_file" 2>/dev/null; then
-  # Audit-log entry could be appended here; for v1.9.0 allow stop.
+
+  # v1.9.7: durably mark matching pending entries as abandoned,
+  # append a SHA-chained audit-log entry, and rotate the file.
+  #
+  # Pre-v1.9.7 this branch only allowed Stop and exited. The
+  # obligation entries stayed semantically `pending` forever in
+  # `.tdd/exceptions/post-red-test-edits.json`. The audit log never
+  # showed clean closure. A later cycle that happened to share the
+  # cycle_id would inherit the stale abandonment file and leak the
+  # signal. Real adopter session at 2026-05-15 reported having to
+  # re-write the file every session — root cause was almost
+  # certainly cycle_id mismatch (new plan → new id), but the
+  # underlying defect (no durable closure record) was real.
+  ts="$(date -u +%FT%TZ 2>/dev/null || echo unknown)"
+  unix_ts="$(date -u +%s 2>/dev/null || echo 0)"
+
+  # 1. Transition matching pending entries to status:"abandoned".
+  if [[ -f "$ARTIFACT" ]]; then
+    tmp="$(mktemp 2>/dev/null || echo "/tmp/sstop.$$.json")"
+    if jq --arg cid "$cycle_id" --arg ts "$ts" '
+          .exceptions = (.exceptions | map(
+            if .binding.cycle_id == $cid and .status == "pending" then
+              .status = "abandoned"
+              | .abandoned_by = "operator"
+              | .abandoned_at = $ts
+              | .reason = "operator wrote .tdd/CYCLE_ABANDONED.txt"
+            else . end
+          ))' "$ARTIFACT" > "$tmp" 2>/dev/null; then
+      mv "$tmp" "$ARTIFACT" 2>/dev/null || true
+    else
+      rm -f "$tmp" 2>/dev/null || true
+    fi
+  fi
+
+  # 2. Append SHA-chained audit-log entry (same pattern as runner).
+  audit_log="$PROJECT_DIR/.tdd/audit/${cycle_id}.jsonl"
+  mkdir -p "$(dirname "$audit_log")" 2>/dev/null || true
+  prev_audit_sha=""
+  if [[ -s "$audit_log" ]]; then
+    last_line="$(tail -1 "$audit_log")"
+    if command -v sha256sum >/dev/null 2>&1; then
+      prev_audit_sha="$(printf '%s' "$last_line" | sha256sum | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+      prev_audit_sha="$(printf '%s' "$last_line" | shasum -a 256 | awk '{print $1}')"
+    fi
+  fi
+  jq -c -n \
+    --arg ts "$ts" \
+    --arg event "cycle_abandoned" \
+    --arg cycle "$cycle_id" \
+    --arg prev "$prev_audit_sha" \
+    '{ts:$ts, event:$event, cycle_id:$cycle, abandoned_by:"operator", prev_sha:$prev}' \
+    >> "$audit_log" 2>/dev/null || true
+
+  # 3. Rotate the abandonment file. Preserves durable record AND
+  # prevents a fresh cycle that happens to share the cycle_id from
+  # inheriting a stale "abandoned" signal.
+  rotated_dir="$PROJECT_DIR/.tdd/abandoned"
+  mkdir -p "$rotated_dir" 2>/dev/null || true
+  rotated_file="$rotated_dir/${cycle_id}-${unix_ts}.txt"
+  mv "$abandoned_file" "$rotated_file" 2>/dev/null || true
+
   exit 0
 fi
 
