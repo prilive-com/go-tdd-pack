@@ -166,7 +166,18 @@
     "size_threshold_lines": 50,
 
     "_require_hash_binding_tier1_doc": "F5: bind /second-opinion adjudication to specific diff/plan content. When true AND path is Tier 1, require-second-opinion.sh denies if recorded diff_sha256 (sha of `git diff HEAD --cached`) or plan_sha256 (sha of .tdd/current-plan.md) doesn't match current. Closes the bypass where a fresh adjudication for one diff silently covers later unrelated work. Killswitch env var: SECOND_OPINION_HASH_DISABLE=1.",
-    "require_hash_binding_tier1": false
+    "require_hash_binding_tier1": false,
+
+    "_no_discretion_doc": "v1.9.0+ no-discretion mode. When enabled:true, the v1.9 trigger hooks (plan/test/production triggers + bash pretrigger + posttool backstop + session-stop-review) own the review gate. Since v1.9.4, the legacy require-second-opinion.sh defers entirely in this mode. scripts/tdd/run-second-opinion.sh is the only legitimate Codex caller. required_for sub-flags gate which write classes create a pending obligation; max_review_rounds_per_cycle (since v1.9.1, default 4) caps iterations to prevent fix-introduces-regression spirals. ENABLED ON THE STARTER PACK ITSELF AS OF v1.9.5 — the pack now self-enforces.",
+    "no_discretion": {
+      "enabled": true,
+      "max_review_rounds_per_cycle": 4,
+      "required_for": {
+        "plan_writes": true,
+        "test_writes": true,
+        "production_edits": true
+      }
+    }
   },
 
   "_enforcement_mode_doc": "F6: graduated enforcement for the 4 process-discipline gates (gate-tier1-commit, require-second-opinion, require-tdd-state, guard-bash-pipefail). Values: 'strict' (default; deny + exit 2), 'warn' (stderr advisory + allow exit 0), 'off' (silent passthrough). Per-hook override in enforcement_mode_overrides wins over global. Invalid values fall back to 'strict' with a stderr warning (typo can't soften). Security gates (guard-dangerous-bash, guard-protected-files, scan-for-secrets) ignore this — strict-only by design.",
