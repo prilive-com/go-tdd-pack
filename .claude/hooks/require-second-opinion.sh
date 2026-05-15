@@ -192,6 +192,37 @@ DIRECTIVE
   fi
 fi
 
+# v1.9.4: defer entirely when no-discretion mode is active.
+#
+# In no-discretion mode (`second_opinion.no_discretion.enabled: true`),
+# the v1.9 trigger hooks (second-opinion-{plan,test,production}-trigger.sh
+# + bash-pretrigger + posttool-backstop + session-stop-review) own the
+# review gate. They check `.tdd/exceptions/post-red-test-edits.json` for
+# typed completion entries.
+#
+# This legacy hook predates v1.9 and only knows about
+# `.tdd/second-opinion-completed.md`, which the v1.9 runner does not
+# write. The legacy `/second-opinion` skill that DID write it is now
+# `disable-model-invocation: true` so the model cannot invoke it. With
+# both gates active and the legacy artifact unsatisfiable from a model
+# session, every Edit/Write/Bash deadlocked until killswitch.
+#
+# Discovered: real adopter session at 2026-05-15. The smoke suite never
+# caught this because each hook tests in isolation, not as a stack with
+# the v1.9 trigger configuration active.
+#
+# Defer here; the v1.9 stack provides the gate. In legacy mode
+# (no_discretion absent or false), this hook continues to fire as
+# before — the operator's `/second-opinion` slash command writes the
+# legacy artifact.
+if [[ -f "$TDD_CONFIG" ]] && command -v jq >/dev/null 2>&1; then
+  no_discretion="$(jq -r '.second_opinion.no_discretion.enabled // false' "$TDD_CONFIG" 2>/dev/null || echo false)"
+  if [[ "$no_discretion" == "true" ]]; then
+    audit "no_discretion_defer"
+    allow
+  fi
+fi
+
 # F6: enforcement_mode resolver. Returns "strict"|"warn"|"off". Per-hook
 # override (.enforcement_mode_overrides[hook]) wins over global; invalid
 # values fall back to "strict" (defense-in-depth — typo can't soften).

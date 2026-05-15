@@ -337,6 +337,62 @@ else
   fail "killswitch should bypass (got: '$out')"
 fi
 
+# v1.9.4: defer when no_discretion.enabled=true. The legacy hook must
+# step out of the way so the v1.9 trigger hooks own the gate. Tests
+# both the "defer" and "still-fires-when-off" branches.
+TMPROOT_V194=$(mktemp -d)
+mkdir -p "$TMPROOT_V194/.tdd" "$TMPROOT_V194/.claude"
+
+# Branch A: no_discretion enabled → must defer (allow), even WITHOUT a
+# fresh adjudication artifact.
+cat > "$TMPROOT_V194/.tdd/tdd-config.json" <<'EOF'
+{
+  "second_opinion": { "no_discretion": { "enabled": true } },
+  "tier1_path_regexes": [ "(^|/)cmd/.*\\.go$" ]
+}
+EOF
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"cmd/status/main.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V194" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:0"* ]]; then
+  pass "v194_legacy_hook_defers_when_no_discretion_enabled"
+else
+  fail "v194_legacy_hook_defers_when_no_discretion_enabled (got: '$out')"
+fi
+
+# Branch B: no_discretion explicitly false → must still fire on Tier 1
+# without an adjudication artifact (legacy behavior preserved).
+cat > "$TMPROOT_V194/.tdd/tdd-config.json" <<'EOF'
+{
+  "second_opinion": { "no_discretion": { "enabled": false } },
+  "tier1_path_regexes": [ "(^|/)cmd/.*\\.go$" ]
+}
+EOF
+rm -f "$TMPROOT_V194/.tdd/second-opinion-completed.md"
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"cmd/status/main.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V194" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:2"* ]]; then
+  pass "v194_legacy_hook_still_fires_when_no_discretion_off"
+else
+  fail "v194_legacy_hook_still_fires_when_no_discretion_off (got: '$out')"
+fi
+
+# Branch C: no_discretion field absent (default false) → legacy behavior.
+cat > "$TMPROOT_V194/.tdd/tdd-config.json" <<'EOF'
+{
+  "tier1_path_regexes": [ "(^|/)cmd/.*\\.go$" ]
+}
+EOF
+out=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"cmd/status/main.go"}}' \
+  | CLAUDE_PROJECT_DIR="$TMPROOT_V194" timeout "${HOOK_TIMEOUT:-5}" \
+    bash .claude/hooks/require-second-opinion.sh 2>/dev/null; echo "exit:$?")
+if [[ "$out" == *"exit:2"* ]]; then
+  pass "v194_legacy_hook_still_fires_when_no_discretion_absent"
+else
+  fail "v194_legacy_hook_still_fires_when_no_discretion_absent (got: '$out')"
+fi
+
 # PARTIAL discipline check (trial-feedback hardening): every 'stance: PARTIAL' must have a
 # substantive 'rejected:' field. Catches the sycophancy-theatre failure
 # mode where Claude labels PARTIAL while functionally accepting 100%.
