@@ -80,7 +80,7 @@ jq -n --arg cmd "$(printf '%s' "$command_str" | head -c 200)" --arg targets "$ta
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: "deny",
-      permissionDecisionReason: ("PRODUCTION_EDIT_REVIEW_REQUIRED (Bash classifier). Mutating Bash command targets gated path(s): " + $targets + ". Mutating production files or audit/exception artifacts via Bash bypasses the Edit/Write trigger. Run: scripts/tdd/run-second-opinion.sh production_edit " + $cid + " after using Edit/Write for the file change.")
+      permissionDecisionReason: ("PRODUCTION_EDIT_REVIEW_REQUIRED (Bash classifier). Mutating Bash command targets gated path(s): " + $targets + ". Mutating production files or audit/exception artifacts via Bash bypasses the Edit/Write trigger. Run: scripts/tdd/run-second-opinion.sh production_edit " + $cid + " after using Edit/Write for the file change. NOTE if target is .tdd/CYCLE_ABANDONED.txt: this gate is intentional — the operator must abandon from a real shell outside Claude Code; the agent has no path to do it. Tell the operator to run: echo \"APPROVED CYCLE ABANDONMENT\" > .tdd/CYCLE_ABANDONED.txt")
     }
   }'
 exit 0

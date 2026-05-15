@@ -416,6 +416,23 @@ else
   fail "v194_legacy_hook_still_fires_when_no_discretion_absent (got: '$out')"
 fi
 
+# v1.9.6: CYCLE_ABANDONED.txt deny messages must direct the operator to a
+# real shell outside Claude Code. Pre-v1.9.6, the message implied the
+# agent could write the file. Real adopter session at 2026-05-15 hit
+# the dead-end: agent told operator "abandon," tried Edit, denied
+# by settings.json; tried Bash, denied by bash-pretrigger; had to
+# explain "leave Claude and write from your terminal."
+if grep -q 'real shell prompt outside Claude Code' .claude/hooks/session-stop-review.sh; then
+  pass "v196_stop_review_message_directs_operator_to_external_shell"
+else
+  fail "v196_stop_review_message_directs_operator_to_external_shell: session-stop-review.sh deny message must point operator to external shell"
+fi
+if grep -q 'operator must abandon from a real shell outside Claude Code' .claude/hooks/second-opinion-bash-pretrigger.sh; then
+  pass "v196_bash_pretrigger_message_explains_abandonment_path"
+else
+  fail "v196_bash_pretrigger_message_explains_abandonment_path: bash-pretrigger deny message must explain the abandonment path for CYCLE_ABANDONED.txt"
+fi
+
 # PARTIAL discipline check (trial-feedback hardening): every 'stance: PARTIAL' must have a
 # substantive 'rejected:' field. Catches the sycophancy-theatre failure
 # mode where Claude labels PARTIAL while functionally accepting 100%.

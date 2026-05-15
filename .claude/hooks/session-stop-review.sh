@@ -71,7 +71,7 @@ if [[ "$pending" -gt 0 ]]; then
   jq -n --arg cid "$cycle_id" --arg n "$pending" '
     {
       decision: "block",
-      reason: ("Session cannot end with " + $n + " pending /second-opinion obligation(s) for cycle " + $cid + ". Complete them with scripts/tdd/run-second-opinion.sh, OR explicitly abandon the cycle by writing .tdd/CYCLE_ABANDONED.txt containing the phrase \"APPROVED CYCLE ABANDONMENT\".")
+      reason: ("Session cannot end with " + $n + " pending /second-opinion obligation(s) for cycle " + $cid + ". Either (a) complete the obligation with scripts/tdd/run-second-opinion.sh, OR (b) operator (human) abandons the cycle from a real shell prompt outside Claude Code — Claude itself cannot write this file, it is denied by .claude/settings.json (Edit/Write/MultiEdit) AND by the Bash pretrigger classifier, by design. To abandon: in your terminal, run: echo \"APPROVED CYCLE ABANDONMENT\" > .tdd/CYCLE_ABANDONED.txt — then retry /exit.")
     }'
   exit 0
 fi
