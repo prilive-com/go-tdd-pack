@@ -139,83 +139,83 @@ For each P0/P1 finding produce:
 - `test` (the test that would catch it)
 EOF
 
-  # v1.9.11: rewrite the "supporting files" section. v1.9.9/v1.9.10
-  # trained Codex to emit "missing context: <path>" findings and ask
-  # the operator to paste files into the plan. That was a design
-  # error: Codex runs under `codex exec --sandbox read-only --cd
-  # <project_root>`, which means it can ls/cat/grep any file inside
-  # the project root using its own tool calls. Asking the operator
-  # to paste files Codex can read itself burned ~300K tokens per
-  # adopter cycle. v1.9.11 inverts the default: Codex MUST try to
-  # read the file itself first; MC findings are only a fallback for
-  # genuine read failures (file outside project root, file genuinely
-  # missing on disk, sandbox error).
-  printf '\n## When you need to see a file that is not in the context pack\n\n'
+  # v1.10.0: tell Codex its actual environment. The runner now invokes
+  # `codex exec --sandbox danger-full-access --ask-for-approval never
+  # --cd <project_root>`, which gives Codex the same environment Claude
+  # Code itself runs in: real files, real OS, real network, real
+  # commands. ONE rule, enforced by this prompt + Codex's cooperation:
+  # do not write or modify any files. This is a code review, not an
+  # implementation cycle.
+  printf '\n## Your environment\n\n'
   cat <<'EOF'
-**Your invocation has read-only sandbox access to the entire
-project root** (`codex exec --sandbox read-only --cd <project_root>`).
-You can `ls`, `cat`, `grep`, and `find` any file inside the project
-without needing the operator to paste anything.
+You are running with FULL access to the real project at the path
+given by `--cd`. You can:
 
-The context pack contains files that appear in `git diff HEAD`. It
-does NOT contain unchanged supporting files (test fixtures, imported
-helpers, configuration the change depends on, files referenced by
-the diff). If you need to see such a file, **read it yourself with
-your sandbox tools first**.
+- Read any file in the project (and outside it if you need to).
+- Run any shell command: `cat`, `ls`, `grep`, `rg`, `find`,
+  `git log`, `git show`, `git diff`, `go vet`, `go list -json`,
+  `go test -count=1 -run '<pattern>'`, `gofmt -l`, `staticcheck`, etc.
+- Access the network if you genuinely need it (rare for code review).
+- Use any tool the OS provides.
 
-Examples:
+This is the same environment Claude Code itself runs in. You are a
+peer reviewer with full repo and command access, not a sandboxed
+process with limited capabilities. Use that access freely to give
+the best possible review:
 
-- A changed `_test.go` references `testdata/echoed-refused.txt` —
-  cat the fixture, evaluate the test against its real content.
-- An import resolves to `internal/helpers/util.go` — cat it to
-  understand what the changed code is calling.
-- A config struct is defined in `internal/config/config.go` — cat
-  it to verify field names match what the change uses.
+- If a changed `_test.go` references `testdata/foo.txt` — cat it,
+  evaluate the test against its real content.
+- If an import resolves to `internal/helpers/util.go` — cat it to
+  see what the changed code is calling.
+- If you want to know whether tests pass — `go test ./...`.
+- If you want to see how a function evolved — `git log -p <file>`.
+- If you need the contract of a third-party dep — `cat go.sum`,
+  `go list -m all`, etc.
 
-Only emit a context-request finding if the read itself fails:
+## The one inviolable rule
 
-- The path resolves outside the project root (sandbox denies the
-  read).
-- The file you expect to exist genuinely does not (e.g. `cat
-  testdata/foo.txt` returns "No such file or directory").
-- The file exists but is too large to evaluate in your token
-  budget (rare — note the size, not the path).
+**DO NOT WRITE OR MODIFY ANY FILES.** This includes:
 
-When you DO need to emit a context-request finding, use this shape:
+- No `Edit` or `Write` of any kind (you are not running under a tool
+  layer that gates these — the responsibility is yours).
+- No `>`, `>>`, `tee`, `cp`, `mv`, `rm`, `mkdir`, `touch`, `chmod`,
+  `chown`, `ln`, `truncate`, `sed -i`, `awk -i`, or any other
+  command whose effect modifies the filesystem.
+- No `git commit`, `git add`, `git reset`, `git checkout`, `git
+  branch`, `git stash`, `git rebase`, `git merge`, or any other
+  git operation that mutates repo state.
+- No `go mod tidy`, `go mod download`, `go generate`, `gofmt -w`,
+  `goimports -w`, or any tool invocation with a write side-effect.
+- No package install, `apt`, `brew`, `pip`, `npm install`, etc.
 
-- `verdict`: `block`
-- `findings`: one or more findings, ALL of the following shape:
-  - `failure_mode`: **MUST start with the literal prefix
-    `missing context: `** followed by the file path AND a one-clause
-    reason why your read failed
-    (e.g. `missing context: testdata/echoed-refused.txt — file does
-    not exist on disk; expected by parser_test.go:42`).
-    The prefix is load-bearing; the runner detects context requests
-    by this prefix on `failure_mode`.
-  - `severity`: `P1`
-  - `category`: `other`
-  - `evidence`: short description of what you tried
-    (e.g. `tried: cat testdata/echoed-refused.txt; got: No such file
-    or directory`)
-  - `required_fix`: `operator: create/commit the missing file, OR
-    paste its intended content into .tdd/current-plan.md under "##
-    Additional context" and re-run the runner`
-  - `test`: `(none — informational, no test applies)`
-  - `id`: any valid id from your normal sequence (`F1`, `F2`, ...
-    is fine — the id prefix is not load-bearing)
+You are a reviewer. The implementer (Claude Code) writes the code;
+you give findings on it. If your review requires file mutation to
+verify (e.g., "I want to run `go fix`"), express that as a
+finding's `required_fix`, not by performing the mutation.
 
-When ALL findings in your response follow this pattern, the runner
-recognizes the round as a context request, surfaces the requested
-paths to the operator, and does NOT count the round toward
-`max_review_rounds_per_cycle`. Mixing context-request findings with
-real defect findings disables the context-request recognition; if
-you have BOTH a context blind spot AND a clear defect, emit only
-the context-request findings first.
+Violating this rule defeats the entire `/second-opinion` workflow.
+The operator has explicitly extended trust based on you respecting
+this single boundary.
 
-Do not use this pattern to evade a difficult review. **Default to
-reading the file yourself.** Context-request findings are for
-genuine read failures, not "I would prefer the operator paste it
-for me."
+## If you genuinely cannot read a file
+
+Edge cases only — the file is outside the project root, was just
+deleted, the path is on a network mount that's unreachable, etc.
+In that rare case, emit a context-request finding:
+
+- `failure_mode`: starts with literal prefix `missing context: `
+  followed by the path AND a one-clause reason
+  (e.g. `missing context: testdata/foo.txt — does not exist on disk`)
+- `evidence`: what you tried (e.g. `cat testdata/foo.txt → ENOENT`)
+- `severity`: `P1`, `category`: `other`, `test`: `(none — informational)`
+- `required_fix`: tell the operator how to make the file available
+
+When ALL findings follow this shape the runner treats the round as
+a context request, does NOT count it toward
+`max_review_rounds_per_cycle`, and surfaces the missing paths to
+the operator. Default to reading the file yourself first — this
+fallback is only for genuine read failures, not "I'd prefer the
+operator paste it for me."
 EOF
 } > "$output_dir/review-request.md"
 

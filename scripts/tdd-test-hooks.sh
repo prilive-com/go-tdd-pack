@@ -441,7 +441,7 @@ fi
 # HEAD; Codex had no way to request supporting files and burned
 # adopter Codex quota with each round.
 RC_PACK="scripts/tdd/runner-context-pack.sh"
-if grep -q 'When you need to see a file that is not in the context pack' "$RC_PACK" \
+if grep -q 'If you genuinely cannot read a file' "$RC_PACK" \
    && grep -q 'missing context: ' "$RC_PACK" \
    && grep -q 'failure_mode' "$RC_PACK"; then
   pass "v199_prompt_template_documents_missing_context_pattern"
@@ -449,17 +449,31 @@ else
   fail "v199_prompt_template_documents_missing_context_pattern: runner-context-pack.sh prompt must document missing-context convention"
 fi
 
-# v1.9.11: prompt must tell Codex it has sandbox tools and should
-# read files itself BEFORE emitting MC findings. v1.9.9/v1.9.10
-# trained the wrong default (ask operator to paste) — wasted ~300K
-# tokens per adopter cycle. v1.9.11 inverts: Codex reads first; MC
-# is a fallback for genuine read failures.
-if grep -q 'read-only sandbox access to the entire' "$RC_PACK" \
-   && grep -q 'read it yourself with' "$RC_PACK" \
-   && grep -q 'Default to' "$RC_PACK"; then
-  pass "v1911_prompt_template_tells_codex_to_read_files_itself_first"
+# v1.10.0: prompt must tell Codex it has FULL real-environment access
+# (same as Claude Code), AND must state the ONE rule: do not write
+# files. v1.9.9/.10/.11 all got this layer wrong — v1.9.9/.10 told
+# Codex to ask the operator; v1.9.11 told Codex to spawn shell commands
+# under read-only sandbox (Codex refuses spawned commands under
+# read-only per OpenAI docs). v1.10.0 inverts the runner invocation
+# to danger-full-access and tells Codex the truth.
+if grep -q 'FULL access to the real project' "$RC_PACK" \
+   && grep -q 'DO NOT WRITE OR MODIFY ANY FILES' "$RC_PACK" \
+   && grep -q 'same environment Claude Code itself runs in' "$RC_PACK"; then
+  pass "v1100_prompt_template_grants_full_env_with_write_prohibition"
 else
-  fail "v1911_prompt_template_tells_codex_to_read_files_itself_first: prompt must instruct Codex to use sandbox tools before emitting MC findings"
+  fail "v1100_prompt_template_grants_full_env_with_write_prohibition: prompt must grant full env + state no-write rule"
+fi
+
+# v1.10.0: runner must invoke codex with danger-full-access
+# (real files, real commands) — not the pre-v1.10 read-only mode
+# that blocked spawned commands per OpenAI's documented semantics.
+V1100_RUNNER="scripts/tdd/run-second-opinion.sh"
+if grep -q -- '--sandbox danger-full-access' "$V1100_RUNNER" \
+   && grep -q -- '--ask-for-approval never' "$V1100_RUNNER" \
+   && ! grep -qE -- '--sandbox read-only' "$V1100_RUNNER"; then
+  pass "v1100_runner_uses_danger_full_access_not_read_only"
+else
+  fail "v1100_runner_uses_danger_full_access_not_read_only: runner must invoke codex with danger-full-access + ask-for-approval never"
 fi
 
 # v1.9.9: runner must recognize context-request responses (failure_mode

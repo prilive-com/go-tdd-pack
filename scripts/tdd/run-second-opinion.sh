@@ -261,14 +261,31 @@ authoritative_scope_hash=$(printf '%s' "$pending_entry" | jq -r '.binding.scope_
 pending_scope=$(printf '%s' "$pending_entry" | jq -c '.scope // {}')
 
 # Re-prompt up to 2 times on non-conformance.
+#
+# v1.10.0: --sandbox danger-full-access. Pre-v1.10 used --sandbox
+# read-only against the real project root. Per OpenAI's documented
+# semantics (developers.openai.com/codex/concepts/sandboxing),
+# read-only blocks BOTH writes AND spawned shell commands: "Codex
+# can inspect files, but it cannot edit files or run commands
+# without approval." Net effect on adopters: Codex could not cat /
+# ls / grep / git log / go vet / go test anything; every supporting
+# file became a context-request round.
+#
+# v1.10.0 grants Codex the same environment as Claude Code itself:
+# real project files, full command execution, real OS, real network.
+# Codex behaves as a read-only reviewer by prompt instruction + model
+# cooperation (same trust model the Claude CLI uses for its own tools).
+# This is an explicit operator decision documented per call: Codex is
+# a code reviewer, not an implementer; the prompt forbids writes.
 attempt=0
 max_attempts=3
 codex_succeeded=0
 while [[ $attempt -lt $max_attempts ]]; do
   attempt=$((attempt + 1))
-  echo "[run-second-opinion] Codex attempt $attempt of $max_attempts (model: $codex_model)..." >&2
+  echo "[run-second-opinion] Codex attempt $attempt of $max_attempts (model: $codex_model, sandbox: danger-full-access)..." >&2
   if ! codex exec \
-      --sandbox read-only \
+      --sandbox danger-full-access \
+      --ask-for-approval never \
       --ephemeral \
       --json \
       --output-schema "$schema" \
