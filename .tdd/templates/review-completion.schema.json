@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "ReviewCompletion",
-  "description": "Output schema for /second-opinion review completions (v1.9.3). The runner passes this to `codex exec --output-schema` AND independently verifies the output via jq because --output-schema is documented to be silently dropped under two conditions (openai/codex#4181 codex-family gating; #15451 MCP-active ignore). OpenAI strict response_format requires: (1) additionalProperties:false at every object level, (2) `required` to enumerate every key in `properties`. category is an enum so the model always picks one; affected_invariant and location are free-text and the model emits empty strings when not applicable. Our jq verify_conformance still only enforces the semantically-required 6 (id, severity, failure_mode, evidence, required_fix, test) — the other 3 are required at the API contract level only.",
+  "description": "Output schema for /second-opinion review completions (v1.9.8). The runner passes this to `codex exec --output-schema` AND independently verifies the output via jq because --output-schema is documented to be silently dropped under two conditions (openai/codex#4181 codex-family gating; #15451 MCP-active ignore). OpenAI strict response_format requires: (1) additionalProperties:false at every object level, (2) `required` to enumerate every key in `properties` AT EVERY LEVEL. v1.9.3 fixed findings.items.required but missed the ROOT required, leaving summary/codex_model/codex_session_uuid out — same bug class, half-fixed. v1.9.8 closes the gap. Our jq verify_conformance still only enforces the semantically-required 6 (id, severity, failure_mode, evidence, required_fix, test) per finding — the other API-required fields (category, affected_invariant, location, summary, codex_model, codex_session_uuid) exist for strict-mode contract compliance only.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -10,7 +10,10 @@
     "scope_hash",
     "verdict",
     "findings",
-    "required_actions"
+    "required_actions",
+    "summary",
+    "codex_session_uuid",
+    "codex_model"
   ],
   "properties": {
     "review_type": {

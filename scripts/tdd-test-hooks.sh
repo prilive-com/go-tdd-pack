@@ -433,6 +433,61 @@ else
   fail "v196_bash_pretrigger_message_explains_abandonment_path: bash-pretrigger deny message must explain the abandonment path for CYCLE_ABANDONED.txt"
 fi
 
+# v1.9.8: schema invariant — OpenAI strict response_format requires
+# `required` to enumerate every key in `properties` AT EVERY LEVEL.
+# v1.9.3 fixed findings.items.required but missed root required;
+# OpenAI rejected with 400 on 'summary' missing. The smoke didn't
+# catch it because canned fixtures don't go through OpenAI strict.
+# Author-time invariant test catches this class of bug going forward.
+SCHEMA_FILE=".tdd/templates/review-completion.schema.json"
+missing_root=$(jq -c '(.properties|keys) - .required' "$SCHEMA_FILE" 2>/dev/null)
+if [[ "$missing_root" == "[]" ]]; then
+  pass "v198_schema_root_required_enumerates_every_property"
+else
+  fail "v198_schema_root_required_enumerates_every_property: missing $missing_root"
+fi
+missing_findings=$(jq -c '(.properties.findings.items.properties|keys) - .properties.findings.items.required' "$SCHEMA_FILE" 2>/dev/null)
+if [[ "$missing_findings" == "[]" ]]; then
+  pass "v198_schema_findings_items_required_enumerates_every_property"
+else
+  fail "v198_schema_findings_items_required_enumerates_every_property: missing $missing_findings"
+fi
+
+# v1.9.8: jq verifier must iterate findings elements, not the whole
+# array. Pre-v1.9.8 used `all(.; ...)` (two-arg form, generator=`.`)
+# which emits the array as a single value, so inner `.id` failed with
+# "Cannot index array with string id". Empty findings hid the bug
+# via vacuous truth; only real Codex output triggered it. This test
+# pins the actual jq pattern used in run-second-opinion.sh against a
+# non-empty findings fixture.
+non_empty_fixture='{
+  "findings": [
+    {"id":"F1","severity":"P0","failure_mode":"x","evidence":"y","required_fix":"z","test":"t"}
+  ]
+}'
+if printf '%s' "$non_empty_fixture" | jq -e '
+  .findings | all(.[];
+    (.id | type) == "string"
+    and (.severity | type) == "string"
+    and (.failure_mode | type) == "string"
+    and (.evidence | type) == "string"
+    and (.required_fix | type) == "string"
+    and (.test | type) == "string"
+    and (.severity | IN("P0","P1","P2","P3"))
+  )
+' >/dev/null 2>&1; then
+  pass "v198_jq_verifier_iterates_findings_elements_correctly"
+else
+  fail "v198_jq_verifier_iterates_findings_elements_correctly: jq pattern rejects valid non-empty findings"
+fi
+# And the pattern in the runner itself must match (not the legacy buggy form).
+if grep -qE 'all\(\.\[\];' scripts/tdd/run-second-opinion.sh \
+   && ! grep -qE '\.findings \| all\(\.;' scripts/tdd/run-second-opinion.sh; then
+  pass "v198_runner_uses_correct_two_arg_all_form"
+else
+  fail "v198_runner_uses_correct_two_arg_all_form: run-second-opinion.sh still has the buggy all(.;...) form"
+fi
+
 # v1.9.7: cycle abandonment must DURABLY mark pending entries as
 # abandoned, append a SHA-chained audit-log entry, and rotate the
 # abandonment file. Pre-v1.9.7 the hook only allowed Stop; the entry

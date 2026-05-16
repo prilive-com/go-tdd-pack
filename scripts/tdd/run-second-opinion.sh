@@ -189,7 +189,7 @@ verify_conformance() {
   fi
   # Each finding must have the required fields with correct types.
   if ! jq -e '
-    .findings | all(.;
+    .findings | all(.[];
       (.id | type) == "string"
       and (.severity | type) == "string"
       and (.failure_mode | type) == "string"
