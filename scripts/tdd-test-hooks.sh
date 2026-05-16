@@ -441,12 +441,25 @@ fi
 # HEAD; Codex had no way to request supporting files and burned
 # adopter Codex quota with each round.
 RC_PACK="scripts/tdd/runner-context-pack.sh"
-if grep -q 'When supporting files are not in the context pack' "$RC_PACK" \
+if grep -q 'When you need to see a file that is not in the context pack' "$RC_PACK" \
    && grep -q 'missing context: ' "$RC_PACK" \
    && grep -q 'failure_mode' "$RC_PACK"; then
   pass "v199_prompt_template_documents_missing_context_pattern"
 else
   fail "v199_prompt_template_documents_missing_context_pattern: runner-context-pack.sh prompt must document missing-context convention"
+fi
+
+# v1.9.11: prompt must tell Codex it has sandbox tools and should
+# read files itself BEFORE emitting MC findings. v1.9.9/v1.9.10
+# trained the wrong default (ask operator to paste) — wasted ~300K
+# tokens per adopter cycle. v1.9.11 inverts: Codex reads first; MC
+# is a fallback for genuine read failures.
+if grep -q 'read-only sandbox access to the entire' "$RC_PACK" \
+   && grep -q 'read it yourself with' "$RC_PACK" \
+   && grep -q 'Default to' "$RC_PACK"; then
+  pass "v1911_prompt_template_tells_codex_to_read_files_itself_first"
+else
+  fail "v1911_prompt_template_tells_codex_to_read_files_itself_first: prompt must instruct Codex to use sandbox tools before emitting MC findings"
 fi
 
 # v1.9.9: runner must recognize context-request responses (failure_mode

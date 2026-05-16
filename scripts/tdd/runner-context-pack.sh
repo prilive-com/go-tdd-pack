@@ -139,52 +139,83 @@ For each P0/P1 finding produce:
 - `test` (the test that would catch it)
 EOF
 
-  # v1.9.9: explicit instructions for the "I need to see an unchanged
-  # file" case. Pre-v1.9.9 Codex would flag fixtures/imports as
-  # "missing" and the operator would burn another 50K-token round
-  # debugging context blindness. Now Codex is told: name the file
-  # paths it needs, use a recognizable convention, and the runner
-  # will surface them clearly to the operator without counting the
-  # round toward the cap (these rounds never reach the approve
-  # transition, so the cap was already not incrementing — but the
-  # operator-facing message was confusing).
-  printf '\n## When supporting files are not in the context pack\n\n'
+  # v1.9.11: rewrite the "supporting files" section. v1.9.9/v1.9.10
+  # trained Codex to emit "missing context: <path>" findings and ask
+  # the operator to paste files into the plan. That was a design
+  # error: Codex runs under `codex exec --sandbox read-only --cd
+  # <project_root>`, which means it can ls/cat/grep any file inside
+  # the project root using its own tool calls. Asking the operator
+  # to paste files Codex can read itself burned ~300K tokens per
+  # adopter cycle. v1.9.11 inverts the default: Codex MUST try to
+  # read the file itself first; MC findings are only a fallback for
+  # genuine read failures (file outside project root, file genuinely
+  # missing on disk, sandbox error).
+  printf '\n## When you need to see a file that is not in the context pack\n\n'
   cat <<'EOF'
-The context pack contains ONLY files that appear in `git diff HEAD`.
-If you cannot evaluate the change because supporting files are
-missing (test fixtures referenced by changed test files, imported
-helpers, configuration the change depends on), DO NOT invent
-defects. Instead, return a single context-request response:
+**Your invocation has read-only sandbox access to the entire
+project root** (`codex exec --sandbox read-only --cd <project_root>`).
+You can `ls`, `cat`, `grep`, and `find` any file inside the project
+without needing the operator to paste anything.
+
+The context pack contains files that appear in `git diff HEAD`. It
+does NOT contain unchanged supporting files (test fixtures, imported
+helpers, configuration the change depends on, files referenced by
+the diff). If you need to see such a file, **read it yourself with
+your sandbox tools first**.
+
+Examples:
+
+- A changed `_test.go` references `testdata/echoed-refused.txt` —
+  cat the fixture, evaluate the test against its real content.
+- An import resolves to `internal/helpers/util.go` — cat it to
+  understand what the changed code is calling.
+- A config struct is defined in `internal/config/config.go` — cat
+  it to verify field names match what the change uses.
+
+Only emit a context-request finding if the read itself fails:
+
+- The path resolves outside the project root (sandbox denies the
+  read).
+- The file you expect to exist genuinely does not (e.g. `cat
+  testdata/foo.txt` returns "No such file or directory").
+- The file exists but is too large to evaluate in your token
+  budget (rare — note the size, not the path).
+
+When you DO need to emit a context-request finding, use this shape:
 
 - `verdict`: `block`
 - `findings`: one or more findings, ALL of the following shape:
   - `failure_mode`: **MUST start with the literal prefix
-    `missing context: `** followed by the file path you need to see
-    (e.g. `missing context: testdata/echoed-refused.txt`).
-    This prefix is load-bearing — the runner detects context
-    requests by this prefix on `failure_mode`. Without it your
-    response is treated as a normal blocking review.
+    `missing context: `** followed by the file path AND a one-clause
+    reason why your read failed
+    (e.g. `missing context: testdata/echoed-refused.txt — file does
+    not exist on disk; expected by parser_test.go:42`).
+    The prefix is load-bearing; the runner detects context requests
+    by this prefix on `failure_mode`.
   - `severity`: `P1`
   - `category`: `other`
-  - `evidence`: `requested file not present in the context pack`
-  - `required_fix`: `operator: paste the file content into
-    .tdd/current-plan.md under "## Additional context" and re-run
-    the runner`
+  - `evidence`: short description of what you tried
+    (e.g. `tried: cat testdata/echoed-refused.txt; got: No such file
+    or directory`)
+  - `required_fix`: `operator: create/commit the missing file, OR
+    paste its intended content into .tdd/current-plan.md under "##
+    Additional context" and re-run the runner`
   - `test`: `(none — informational, no test applies)`
   - `id`: any valid id from your normal sequence (`F1`, `F2`, ...
-    is fine — the id prefix is not load-bearing in v1.9.10+)
+    is fine — the id prefix is not load-bearing)
 
-When ALL findings in your response follow this MC pattern, the
-runner recognizes the round as a context request — surfaces the
-requested files to the operator with paste-into-plan instructions,
-and does NOT count the round toward
-`max_review_rounds_per_cycle`. Mixing MC findings with real
-defect findings disables the context-request recognition; if you
-have BOTH a context blind spot AND a clear defect, emit only the
-MC findings first.
+When ALL findings in your response follow this pattern, the runner
+recognizes the round as a context request, surfaces the requested
+paths to the operator, and does NOT count the round toward
+`max_review_rounds_per_cycle`. Mixing context-request findings with
+real defect findings disables the context-request recognition; if
+you have BOTH a context blind spot AND a clear defect, emit only
+the context-request findings first.
 
-Do not use this pattern to evade a difficult review. Only use it
-when a file you genuinely need is not in the context pack.
+Do not use this pattern to evade a difficult review. **Default to
+reading the file yourself.** Context-request findings are for
+genuine read failures, not "I would prefer the operator paste it
+for me."
 EOF
 } > "$output_dir/review-request.md"
 
