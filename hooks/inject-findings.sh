@@ -66,9 +66,15 @@ case "${STATUS}" in
     # Codex returned findings. Inject for Claude's next turn.
     ;;
   escalated)
-    # Codex and Claude couldn't converge. Surface escalation to user.
-    # MVP: emit a simple message. Phase 2 swaps in runner/escalate.sh.
-    emit_context "[Codex review escalation — cycle ${CYCLE_ID}, round ${ROUND}] Claude and Codex did not converge after ${ROUND} rounds. Run /show-review for details and tell me how to proceed."
+    # v2.0 Phase 2: delegate to runner/escalate.sh, which renders the
+    # full A/B/V message with Claude's + Codex's final positions.
+    ESCALATE="${PROJECT_DIR}/runner/escalate.sh"
+    if [[ -x "${ESCALATE}" ]]; then
+      "${ESCALATE}" "${CYCLE_ID}" "${PROJECT_DIR}"
+    else
+      # Fallback if escalate.sh is missing.
+      emit_context "[Codex review escalation — cycle ${CYCLE_ID}, round ${ROUND}] Claude and Codex did not converge. Tell me how to proceed."
+    fi
     exit 0
     ;;
   *)

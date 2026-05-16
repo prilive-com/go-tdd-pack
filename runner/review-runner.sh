@@ -106,11 +106,63 @@ if [[ "${VERDICT}" == "approve" ]]; then
   exit 0
 fi
 
-# request_changes — MVP STOPS HERE (Phase 2 adds rounds 2+).
-# For MVP, the findings are injected into Claude's next turn via
-# inject-findings.sh. The cycle stays in `request_changes` state until
-# an operator manually finalizes via /abandon or the Phase 2 runner
-# orchestrates rounds 2+.
+# request_changes after round 1 → leave state.json saying so. The Stop
+# hook (stop-fingerprint.sh) will capture Claude's response and fire a
+# new runner instance, which will detect the continuation via the
+# orchestrate_rounds_2_plus() function below.
 update_state "${CYCLE_ID}" "request_changes" 1
+
+# v2.0 Phase 2: if we got here AND there's already a claude-response-2
+# file (Stop hook may have captured it before re-firing us), proceed
+# into rounds 2+. Otherwise exit; we'll be re-fired by Stop later.
+if [[ ! -f "${CYCLE_DIR}/claude-response-2.txt" ]]; then
+  exit 0
+fi
+
+# ---- Phase 2 orchestration: rounds 2..MAX ----
+
+MAX_ROUNDS=$(awk -F' = ' '/^max_rounds =/ {print $2; exit}' "${CONFIG}" | tr -d ' ')
+MAX_ROUNDS="${MAX_ROUNDS:-4}"
+
+for ROUND in $(seq 2 "${MAX_ROUNDS}"); do
+  RESPONSE_FILE="${CYCLE_DIR}/claude-response-${ROUND}.txt"
+  if [[ ! -f "${RESPONSE_FILE}" ]]; then
+    # No response yet for this round — Stop hook hasn't captured it.
+    # Leave state in request_changes; we'll be re-fired by Stop on
+    # Claude's next turn.
+    update_state "${CYCLE_ID}" "request_changes" "$((ROUND - 1))"
+    exit 0
+  fi
+
+  update_state "${CYCLE_ID}" "reviewing" "${ROUND}"
+  log_event "${ROUND}" "started"
+
+  if ! "${PROJECT_DIR}/runner/codex-round-n.sh" "${CYCLE_ID}" "${PROJECT_DIR}" "${ROUND}"; then
+    STATUS_DETAIL=$(cat "${CYCLE_DIR}/.status" 2>/dev/null || echo "failed")
+    update_state "${CYCLE_ID}" "failed" "${ROUND}"
+    log_event "${ROUND}" "${STATUS_DETAIL}"
+    exit 0
+  fi
+
+  VERDICT=$(${PROJECT_DIR}/runner/extract-verdict.sh "${CYCLE_DIR}/round-${ROUND}.txt")
+  log_event "${ROUND}" "verdict:${VERDICT}"
+
+  case "${VERDICT}" in
+    approve)
+      update_state "${CYCLE_ID}" "converged" "${ROUND}"
+      log_event "${ROUND}" "converged"
+      exit 0
+      ;;
+    request_changes|unclear)
+      # Stay in request_changes; Stop hook will re-fire after Claude responds.
+      update_state "${CYCLE_ID}" "request_changes" "${ROUND}"
+      exit 0
+      ;;
+  esac
+done
+
+# Reached max_rounds without convergence — escalate.
+update_state "${CYCLE_ID}" "escalated" "${MAX_ROUNDS}"
+log_event "${MAX_ROUNDS}" "escalated"
 
 exit 0

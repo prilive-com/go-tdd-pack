@@ -1,6 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
-  "_v2_cutover_note": "Cut over from v1.x ceremony hooks to v2.0 MVP at 2026-05-16. v1.x backup at .claude/settings.json.v1.x.backup. v1.x hook scripts remain on disk at .claude/hooks/* but are no longer registered. Phase 2 will add Stop and SessionStart hooks.",
+  "_v2_cutover_note": "Cut over from v1.x ceremony hooks to v2.0 MVP at 2026-05-16. v1.x backup at .claude/settings.json.v1.x.backup. v1.x hook scripts remain on disk at .claude/hooks/* but are no longer registered. Phase 2 (2026-05-16) added Stop + SessionStart hooks for rounds 2+ orchestration and resume notification.",
   "enableAllProjectMcpServers": false,
   "enabledMcpjsonServers": [
     "gopls"
@@ -192,6 +192,28 @@
           {
             "type": "command",
             "command": "$CLAUDE_PROJECT_DIR/hooks/inject-findings.sh",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/hooks/stop-fingerprint.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/hooks/session-start.sh",
             "timeout": 3
           }
         ]
