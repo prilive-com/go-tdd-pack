@@ -47,19 +47,25 @@ USER_PROMPT=$(
 rm -f "${TREE_FILE}"
 
 # --- build codex flags ---
-# v2.0.1 fix: --search is a TOP-LEVEL codex flag, not a `codex exec` flag.
-# To enable live web search via `codex exec`, use the config override
-# instead: -c web_search="live". This works on all subcommands and
-# matches Codex's own internal config key name.
+# v2.0.2 fix: --ask-for-approval and --search are TOP-LEVEL codex flags,
+# not `codex exec` flags. Use --dangerously-bypass-approvals-and-sandbox
+# instead — single flag that bypasses BOTH the sandbox AND approvals,
+# which is exactly the semantics we want (no sandbox + no approval gates,
+# matching Claude's environment). Web search uses the -c config override
+# that works on any subcommand.
+#
+# Verified via `codex exec --help` on codex-cli 0.129.0:
+#   * --sandbox <SANDBOX_MODE>                          (subcommand flag)
+#   * --dangerously-bypass-approvals-and-sandbox        (subcommand flag)
+#   * --ask-for-approval                                NOT a subcommand flag
+#   * --search                                          NOT a subcommand flag
 CODEX_FLAGS=()
 [[ -n "${MODEL}" ]] && CODEX_FLAGS+=(--model "${MODEL}")
 [[ "${WEB_SEARCH}" == "live" ]] && CODEX_FLAGS+=(-c "web_search=\"live\"")
 CODEX_FLAGS+=(-c "model_reasoning_effort=\"${REASONING}\"")
-# ★ CRITICAL: --sandbox danger-full-access is the CLI's way of saying
-# "no sandbox". Without it, codex exec defaults to --sandbox read-only
-# which blocks all command execution. See V2_IMPLEMENTATION_SPEC.md §8.
-CODEX_FLAGS+=(--sandbox danger-full-access)
-CODEX_FLAGS+=(--ask-for-approval never)
+# ★ CRITICAL: bypass sandbox AND approvals. Single flag, same semantics
+# as user's "Codex runs in real environment like Claude" requirement.
+CODEX_FLAGS+=(--dangerously-bypass-approvals-and-sandbox)
 CODEX_FLAGS+=(--output-schema "${SCHEMA}")
 CODEX_FLAGS+=(-o "${CYCLE_DIR}/round-1.json")
 CODEX_FLAGS+=(--skip-git-repo-check)
