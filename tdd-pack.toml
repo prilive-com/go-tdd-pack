@@ -1,0 +1,81 @@
+# Prilive Go TDD Pack v2.0 — default configuration
+#
+# Copied into adopter projects on install. Edit to suit. Defaults are tuned
+# for "smartest available Codex, full access except no project writes".
+
+[review]
+# Maximum debate rounds before escalating to the user.
+# Min 2, max 8. Default 4.
+max_rounds = 4
+
+# Wait this long after the last edit before firing review (milliseconds).
+# Coalesces bursty edits into one cycle.
+coalesce_ms = 5000
+
+# Also fire the runner when the Stop hook sees the working tree changed
+# since the last review. Belt-and-suspenders for PostToolUse not firing.
+stop_hook_fingerprint = true
+
+# Hard cap on Codex calls per cycle. Prevents runaway loops.
+max_codex_calls_per_cycle = 8
+
+# Hard cap on cycle wall time (minutes). xhigh reasoning is slow.
+max_cycle_minutes = 30
+
+[codex]
+# Model selection.
+#
+# DEFAULT: model = "" — the runner does NOT pass --model to codex exec, so
+# Codex CLI picks its own current default. As OpenAI ships newer Codex
+# models, the reviewer automatically uses the latest without config edits.
+#
+# TO PIN A SPECIFIC MODEL: set model = "gpt-5-codex" (or whatever you want).
+# Use this only if you have a reason to lock in a specific version.
+model = ""
+
+# Reasoning effort: low | medium | high | xhigh
+# Default "high" — documented and supported by all Codex auth profiles.
+# "xhigh" is undocumented but reportedly supported by ChatGPT Plus/Pro/Team
+# auth. Opt up at your own risk; on unsupported auth you may get an error.
+reasoning_effort = "high"
+
+# Live web search. "live" enables --search; "disabled" omits the flag.
+# Use "disabled" only if your environment forbids outbound traffic.
+web_search = "live"
+
+# NOTE: No sandbox setting here. The runner always passes
+# --sandbox danger-full-access --ask-for-approval never to give Codex the
+# same access Claude has. The "no project writes" rule is enforced in the
+# system prompt at prompts/codex-system.md (see also smoke test
+# test/smoke-codex-respects-no-write-rule.sh).
+
+[tdd]
+# How TDD discipline is enforced.
+# "criterion" = Codex flags missing tests as findings (default; non-blocking)
+# "off"       = TDD is not checked at all
+enforce_as = "criterion"
+
+[severity]
+# Minimum severity to surface to Claude. "nit"-level findings are dropped.
+# blocker | major | minor | nit
+min_surface = "minor"
+
+# Severity at which a finding becomes a "must address" — the cycle cannot
+# converge if Codex returns a finding at this level or above.
+must_address = "major"
+
+[gate]
+# OPT-IN shell git hooks. Default false (no blocking).
+# Set true to install pre-commit / pre-push hooks that block git commit/push
+# until the latest review cycle has converged.
+git_pre_commit = false
+git_pre_push = false
+
+[audit]
+debates_jsonl = ".tdd/reviews/debates.jsonl"
+keep_transcripts = true
+
+[disable]
+# Single emergency switch. If PRILIVE_REVIEW_DISABLE=1 in the environment,
+# the entire pack becomes a no-op. Use only as kill switch, not daily.
+env_var = "PRILIVE_REVIEW_DISABLE"

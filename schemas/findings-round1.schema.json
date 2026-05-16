@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Findings (round 1)",
+  "description": "Codex output for round 1 of a v2.0 review cycle. Strict-mode compatible: additionalProperties:false on every object, every property in required.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "summary_one_sentence",
+    "summary_one_paragraph",
+    "findings",
+    "files_read",
+    "questions_for_human"
+  ],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["approve", "request_changes"]
+    },
+    "summary_one_sentence": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "summary_one_paragraph": {
+      "type": "string",
+      "maxLength": 800
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "severity",
+          "category",
+          "title",
+          "body",
+          "file",
+          "line"
+        ],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": ["blocker", "major", "minor", "nit"]
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "correctness",
+              "test_quality",
+              "design",
+              "security",
+              "maintainability",
+              "docs",
+              "other"
+            ]
+          },
+          "title": { "type": "string", "maxLength": 120 },
+          "body":  { "type": "string", "maxLength": 800 },
+          "file":  { "type": "string" },
+          "line":  { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "files_read": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "questions_for_human": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}
