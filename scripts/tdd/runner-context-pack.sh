@@ -138,6 +138,50 @@ For each P0/P1 finding produce:
 - `required_fix`
 - `test` (the test that would catch it)
 EOF
+
+  # v1.9.9: explicit instructions for the "I need to see an unchanged
+  # file" case. Pre-v1.9.9 Codex would flag fixtures/imports as
+  # "missing" and the operator would burn another 50K-token round
+  # debugging context blindness. Now Codex is told: name the file
+  # paths it needs, use a recognizable convention, and the runner
+  # will surface them clearly to the operator without counting the
+  # round toward the cap (these rounds never reach the approve
+  # transition, so the cap was already not incrementing — but the
+  # operator-facing message was confusing).
+  printf '\n## When supporting files are not in the context pack\n\n'
+  cat <<'EOF'
+The context pack contains ONLY files that appear in `git diff HEAD`.
+If you cannot evaluate the change because supporting files are
+missing (test fixtures referenced by changed test files, imported
+helpers, configuration the change depends on), DO NOT invent
+defects. Instead, return a single context-request response:
+
+- `verdict`: `block`
+- `findings`: one or more findings, ALL of the following shape:
+  - `id`: `MC-1`, `MC-2`, ... (MC = "missing context")
+  - `severity`: `P1`
+  - `category`: `other`
+  - `failure_mode`: starts with the literal prefix `missing context: `
+    followed by the file path you need to see
+    (e.g. `missing context: testdata/echoed-refused.txt`)
+  - `evidence`: `requested file not present in the context pack`
+  - `required_fix`: `operator: paste the file content into
+    .tdd/current-plan.md under "## Additional context" and re-run
+    the runner`
+  - `test`: `(none — informational, no test applies)`
+
+When ALL findings in your response follow this MC pattern, the
+runner recognizes the round as a context request — surfaces the
+requested files to the operator with paste-into-plan instructions,
+and does NOT count the round toward
+`max_review_rounds_per_cycle`. Mixing MC findings with real
+defect findings disables the context-request recognition; if you
+have BOTH a context blind spot AND a clear defect, emit only the
+MC findings first.
+
+Do not use this pattern to evade a difficult review. Only use it
+when a file you genuinely need is not in the context pack.
+EOF
 } > "$output_dir/review-request.md"
 
 # Assemble the Codex prompt.

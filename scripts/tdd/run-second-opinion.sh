@@ -305,6 +305,45 @@ verdict=$(jq -r '.verdict' "$output_path")
 # All P0 + P1 findings block until addressed in code OR a clean
 # subsequent review returns zero unresolved P0/P1.
 if [[ "$verdict" == "block" ]] || (( p0_count > 0 )) || (( p1_count > 0 )); then
+
+  # v1.9.9: detect "context request" responses. If every P0+P1
+  # finding has `id` starting with "MC-" AND `failure_mode` starting
+  # with "missing context:", treat the round as a context request
+  # rather than a defect-blocking round. The cap was already not
+  # incrementing (no transition to approved) — this change improves
+  # the operator-facing message and surfaces the requested file
+  # paths so the operator knows the next action without grepping
+  # findings by hand.
+  total_blocking=$(( p0_count + p1_count ))
+  mc_count=0
+  if (( total_blocking > 0 )); then
+    mc_count=$(jq '[.findings[]?
+                    | select(.severity == "P0" or .severity == "P1")
+                    | select(.id | startswith("MC-"))
+                    | select(.failure_mode | startswith("missing context:"))
+                   ] | length' "$output_path")
+  fi
+  if (( total_blocking > 0 )) && (( mc_count == total_blocking )); then
+    echo "[run-second-opinion] CONTEXT REQUEST: Codex needs unchanged supporting files to complete the review." >&2
+    echo "[run-second-opinion] This round does NOT count toward max_review_rounds_per_cycle (pending entry stays pending)." >&2
+    echo "[run-second-opinion]" >&2
+    echo "[run-second-opinion] Files Codex requested:" >&2
+    jq -r '.findings[]
+           | select(.id | startswith("MC-"))
+           | "  - " + (.failure_mode | sub("^missing context:[[:space:]]*"; ""))' \
+       "$output_path" >&2 2>/dev/null || true
+    echo "[run-second-opinion]" >&2
+    echo "[run-second-opinion] Operator action: add each file to .tdd/current-plan.md under" >&2
+    echo "[run-second-opinion]   ## Additional context" >&2
+    echo "[run-second-opinion]     ### <file path>" >&2
+    echo "[run-second-opinion]     \`\`\`" >&2
+    echo "[run-second-opinion]     <paste file content>" >&2
+    echo "[run-second-opinion]     \`\`\`" >&2
+    echo "[run-second-opinion] then re-run: scripts/tdd/run-second-opinion.sh $review_type $cycle_id" >&2
+    echo "[run-second-opinion] Review artifacts: $reviews_dir" >&2
+    exit 1
+  fi
+
   echo "[run-second-opinion] Review verdict=$verdict, P0=$p0_count, P1=$p1_count. Completion NOT written until ALL P0/P1 findings addressed in code AND a subsequent clean review returns zero P0/P1. Codex self-clear via accepted_with_evidence is NOT honored in v1.9.0." >&2
   echo "[run-second-opinion] Review artifacts: $reviews_dir" >&2
   exit 1

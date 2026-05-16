@@ -433,6 +433,93 @@ else
   fail "v196_bash_pretrigger_message_explains_abandonment_path: bash-pretrigger deny message must explain the abandonment path for CYCLE_ABANDONED.txt"
 fi
 
+# v1.9.9: prompt template must instruct Codex on the "missing
+# context" pattern so it can request unchanged supporting files
+# (test fixtures, imports, configs) rather than fabricating
+# blocking findings about "fixtures referenced but not shown".
+# Pre-v1.9.9 the context pack only included files in git diff
+# HEAD; Codex had no way to request supporting files and burned
+# adopter Codex quota with each round.
+RC_PACK="scripts/tdd/runner-context-pack.sh"
+if grep -q 'When supporting files are not in the context pack' "$RC_PACK" \
+   && grep -q 'MC-1' "$RC_PACK" \
+   && grep -q 'missing context: ' "$RC_PACK"; then
+  pass "v199_prompt_template_documents_missing_context_pattern"
+else
+  fail "v199_prompt_template_documents_missing_context_pattern: runner-context-pack.sh prompt must document MC- convention"
+fi
+
+# v1.9.9: runner must recognize all-MC responses as context requests
+# (not defect-blocking rounds) and surface the requested file paths
+# to the operator. Smoke verifies the recognition logic exists in
+# the runner source (full end-to-end test would require Codex,
+# which is the v1.10 backlog item).
+V199_RUNNER="scripts/tdd/run-second-opinion.sh"
+if grep -q 'CONTEXT REQUEST: Codex needs unchanged supporting files' "$V199_RUNNER" \
+   && grep -q 'startswith("MC-")' "$V199_RUNNER" \
+   && grep -q 'startswith("missing context:")' "$V199_RUNNER" \
+   && grep -q 'does NOT count toward max_review_rounds_per_cycle' "$V199_RUNNER"; then
+  pass "v199_runner_recognizes_context_request_pattern"
+else
+  fail "v199_runner_recognizes_context_request_pattern: run-second-opinion.sh must detect MC findings + emit context-request message"
+fi
+
+# Behavioral test: feed a synthesized all-MC Codex output to the
+# detection jq pattern and confirm the count matches total blocking.
+mc_fixture='{
+  "findings": [
+    {"id":"MC-1","severity":"P1","category":"other",
+     "failure_mode":"missing context: testdata/echoed-refused.txt",
+     "evidence":"requested file not present in the context pack",
+     "required_fix":"operator: paste file into plan",
+     "test":"(none — informational, no test applies)"},
+    {"id":"MC-2","severity":"P1","category":"other",
+     "failure_mode":"missing context: testdata/broad-placeholder.txt",
+     "evidence":"requested file not present in the context pack",
+     "required_fix":"operator: paste file into plan",
+     "test":"(none — informational, no test applies)"}
+  ]
+}'
+total=$(printf '%s' "$mc_fixture" | jq '[.findings[] | select(.severity=="P0" or .severity=="P1")] | length')
+mc=$(printf '%s' "$mc_fixture" | jq '[.findings[]
+                                       | select(.severity=="P0" or .severity=="P1")
+                                       | select(.id | startswith("MC-"))
+                                       | select(.failure_mode | startswith("missing context:"))
+                                      ] | length')
+if [[ "$total" -gt 0 ]] && [[ "$total" == "$mc" ]]; then
+  pass "v199_jq_pattern_correctly_identifies_pure_context_request"
+else
+  fail "v199_jq_pattern_correctly_identifies_pure_context_request: total=$total mc=$mc"
+fi
+
+# Negative: a mixed response (real defect + MC) must NOT be
+# identified as a context request — the real defect must block.
+mixed_fixture='{
+  "findings": [
+    {"id":"F1","severity":"P1","category":"correctness",
+     "failure_mode":"nil deref in parser.go:42",
+     "evidence":"parser.go:42",
+     "required_fix":"add nil check",
+     "test":"TestNilInput"},
+    {"id":"MC-1","severity":"P1","category":"other",
+     "failure_mode":"missing context: testdata/foo.txt",
+     "evidence":"requested file not present",
+     "required_fix":"operator paste",
+     "test":"(none)"}
+  ]
+}'
+total=$(printf '%s' "$mixed_fixture" | jq '[.findings[] | select(.severity=="P0" or .severity=="P1")] | length')
+mc=$(printf '%s' "$mixed_fixture" | jq '[.findings[]
+                                          | select(.severity=="P0" or .severity=="P1")
+                                          | select(.id | startswith("MC-"))
+                                          | select(.failure_mode | startswith("missing context:"))
+                                         ] | length')
+if [[ "$total" == "2" ]] && [[ "$mc" == "1" ]]; then
+  pass "v199_jq_pattern_rejects_mixed_context_and_defect"
+else
+  fail "v199_jq_pattern_rejects_mixed_context_and_defect: total=$total mc=$mc (expected 2/1)"
+fi
+
 # v1.9.8: schema invariant — OpenAI strict response_format requires
 # `required` to enumerate every key in `properties` AT EVERY LEVEL.
 # v1.9.3 fixed findings.items.required but missed root required;
