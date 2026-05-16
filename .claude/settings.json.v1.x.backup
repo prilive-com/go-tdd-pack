@@ -1,6 +1,5 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
-  "_v2_cutover_note": "Cut over from v1.x ceremony hooks to v2.0 MVP at 2026-05-16. v1.x backup at .claude/settings.json.v1.x.backup. v1.x hook scripts remain on disk at .claude/hooks/* but are no longer registered. Phase 2 will add Stop and SessionStart hooks.",
   "enableAllProjectMcpServers": false,
   "enabledMcpjsonServers": [
     "gopls"
@@ -78,9 +77,6 @@
       "Write(./.git/**)",
       "Edit(.claude/settings.json)",
       "Write(.claude/settings.json)",
-      "Edit(.tdd/reviews/**)",
-      "Write(.tdd/reviews/**)",
-      "MultiEdit(.tdd/reviews/**)",
       "Bash(rm -rf /*)",
       "Bash(rm -rf ~*)",
       "Bash(rm -rf $HOME*)",
@@ -111,10 +107,44 @@
       "Bash(psql *production*)",
       "Bash(psql *prod-*)",
       "Bash(mysql *production*)",
-      "Bash(mongo *production*)"
+      "Bash(mongo *production*)",
+      "Edit(.tdd/CYCLE_ABANDONED.txt)",
+      "Write(.tdd/CYCLE_ABANDONED.txt)",
+      "MultiEdit(.tdd/CYCLE_ABANDONED.txt)",
+      "Edit(.tdd/exceptions/**)",
+      "Write(.tdd/exceptions/**)",
+      "MultiEdit(.tdd/exceptions/**)",
+      "Edit(.tdd/audit/**)",
+      "Write(.tdd/audit/**)",
+      "MultiEdit(.tdd/audit/**)",
+      "Bash(*CYCLE_ABANDONED*)",
+      "Bash(*.tdd/exceptions/*)",
+      "Bash(*.tdd/audit/*)"
     ]
   },
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/session-context.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/route-to-tdd.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash",
@@ -128,6 +158,21 @@
             "type": "command",
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/guard-bash-pipefail.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/require-second-opinion.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/gate-tier1-commit.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/second-opinion-bash-pretrigger.sh",
+            "timeout": 10
           }
         ]
       },
@@ -143,6 +188,36 @@
             "type": "command",
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/scan-for-secrets.sh",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/require-tdd-state.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/require-second-opinion.sh",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/second-opinion-plan-trigger.sh",
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/second-opinion-test-trigger.sh",
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/second-opinion-production-trigger.sh",
+            "timeout": 30
           }
         ]
       }
@@ -160,17 +235,6 @@
             "type": "command",
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/detect-ai-bloat.sh",
             "timeout": 10
-          },
-          {
-            "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/hooks/post-edit-review.sh",
-            "async": true,
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/hooks/inject-findings.sh",
-            "timeout": 3
           }
         ]
       },
@@ -179,20 +243,19 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/hooks/post-edit-review.sh",
-            "async": true,
-            "timeout": 5
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/second-opinion-posttool-backstop.sh",
+            "timeout": 30
           }
         ]
       }
     ],
-    "UserPromptSubmit": [
+    "Stop": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/hooks/inject-findings.sh",
-            "timeout": 3
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/session-stop-review.sh",
+            "timeout": 60
           }
         ]
       }
