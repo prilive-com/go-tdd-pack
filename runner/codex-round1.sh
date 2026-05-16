@@ -30,23 +30,30 @@ WEB_SEARCH=$(toml_val "web_search")
 REASONING="${REASONING:-high}"
 
 # --- build user prompt by substituting templates ---
-REPO_TREE=$(cd "${PROJECT_DIR}" && git ls-files 2>/dev/null | head -50)
-# jq -Rs handles arbitrary characters safely.
-DIFF_JSON=$(jq -Rs . < "${DIFF}")
-TREE_JSON=$(printf '%s' "${REPO_TREE}" | jq -Rs .)
+# v2.0.1 fix: use jq --rawfile instead of awk -v.
+# awk -v passed via command line hits ARG_MAX for large diffs (~128KB on Linux,
+# smaller on macOS). Real diffs commonly exceed this. jq --rawfile reads file
+# content in jq's memory, no command-line size limit.
+TREE_FILE=$(mktemp)
+cd "${PROJECT_DIR}" && git ls-files 2>/dev/null | head -50 > "${TREE_FILE}"
+
 USER_PROMPT=$(
-  awk -v diff="${DIFF_JSON}" -v tree="${TREE_JSON}" '
-    { gsub(/{{DIFF}}/, diff); gsub(/{{REPO_TREE}}/, tree); print }
-  ' "${USER_TPL}"
+  jq -rn \
+    --rawfile diff "${DIFF}" \
+    --rawfile tree "${TREE_FILE}" \
+    --rawfile tpl  "${USER_TPL}" \
+    '$tpl | gsub("\\{\\{DIFF\\}\\}"; $diff) | gsub("\\{\\{REPO_TREE\\}\\}"; $tree)'
 )
-# Strip the leading/trailing quote that jq -Rs adds (we want raw text inline).
-USER_PROMPT="${USER_PROMPT#\"}"
-USER_PROMPT="${USER_PROMPT%\"}"
+rm -f "${TREE_FILE}"
 
 # --- build codex flags ---
+# v2.0.1 fix: --search is a TOP-LEVEL codex flag, not a `codex exec` flag.
+# To enable live web search via `codex exec`, use the config override
+# instead: -c web_search="live". This works on all subcommands and
+# matches Codex's own internal config key name.
 CODEX_FLAGS=()
 [[ -n "${MODEL}" ]] && CODEX_FLAGS+=(--model "${MODEL}")
-[[ "${WEB_SEARCH}" == "live" ]] && CODEX_FLAGS+=(--search)
+[[ "${WEB_SEARCH}" == "live" ]] && CODEX_FLAGS+=(-c "web_search=\"live\"")
 CODEX_FLAGS+=(-c "model_reasoning_effort=\"${REASONING}\"")
 # ★ CRITICAL: --sandbox danger-full-access is the CLI's way of saying
 # "no sandbox". Without it, codex exec defaults to --sandbox read-only
