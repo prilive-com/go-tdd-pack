@@ -158,17 +158,21 @@ defects. Instead, return a single context-request response:
 
 - `verdict`: `block`
 - `findings`: one or more findings, ALL of the following shape:
-  - `id`: `MC-1`, `MC-2`, ... (MC = "missing context")
+  - `failure_mode`: **MUST start with the literal prefix
+    `missing context: `** followed by the file path you need to see
+    (e.g. `missing context: testdata/echoed-refused.txt`).
+    This prefix is load-bearing — the runner detects context
+    requests by this prefix on `failure_mode`. Without it your
+    response is treated as a normal blocking review.
   - `severity`: `P1`
   - `category`: `other`
-  - `failure_mode`: starts with the literal prefix `missing context: `
-    followed by the file path you need to see
-    (e.g. `missing context: testdata/echoed-refused.txt`)
   - `evidence`: `requested file not present in the context pack`
   - `required_fix`: `operator: paste the file content into
     .tdd/current-plan.md under "## Additional context" and re-run
     the runner`
   - `test`: `(none — informational, no test applies)`
+  - `id`: any valid id from your normal sequence (`F1`, `F2`, ...
+    is fine — the id prefix is not load-bearing in v1.9.10+)
 
 When ALL findings in your response follow this MC pattern, the
 runner recognizes the round as a context request — surfaces the

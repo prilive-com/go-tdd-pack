@@ -306,20 +306,21 @@ verdict=$(jq -r '.verdict' "$output_path")
 # subsequent review returns zero unresolved P0/P1.
 if [[ "$verdict" == "block" ]] || (( p0_count > 0 )) || (( p1_count > 0 )); then
 
-  # v1.9.9: detect "context request" responses. If every P0+P1
-  # finding has `id` starting with "MC-" AND `failure_mode` starting
-  # with "missing context:", treat the round as a context request
-  # rather than a defect-blocking round. The cap was already not
-  # incrementing (no transition to approved) — this change improves
-  # the operator-facing message and surfaces the requested file
-  # paths so the operator knows the next action without grepping
-  # findings by hand.
+  # v1.9.9: detect "context request" responses. v1.9.10 loosens to
+  # match on `failure_mode` prefix alone — the `id` prefix check was
+  # over-restrictive. Real Codex output complied with the
+  # `failure_mode: "missing context: ..."` convention but kept the
+  # standard `id: "F1"` naming because that's what the rest of the
+  # schema expects. Adopter session at 2026-05-16 (HEAD 8cbddfb) hit
+  # this: 2 findings tagged "missing context: testdata/..." went
+  # unrecognized because their ids were F1/F2 not MC-1/MC-2. The
+  # `failure_mode` prefix is the semantic signal; the `id` prefix
+  # was decorative. Drop it.
   total_blocking=$(( p0_count + p1_count ))
   mc_count=0
   if (( total_blocking > 0 )); then
     mc_count=$(jq '[.findings[]?
                     | select(.severity == "P0" or .severity == "P1")
-                    | select(.id | startswith("MC-"))
                     | select(.failure_mode | startswith("missing context:"))
                    ] | length' "$output_path")
   fi
@@ -329,7 +330,7 @@ if [[ "$verdict" == "block" ]] || (( p0_count > 0 )) || (( p1_count > 0 )); then
     echo "[run-second-opinion]" >&2
     echo "[run-second-opinion] Files Codex requested:" >&2
     jq -r '.findings[]
-           | select(.id | startswith("MC-"))
+           | select(.failure_mode | startswith("missing context:"))
            | "  - " + (.failure_mode | sub("^missing context:[[:space:]]*"; ""))' \
        "$output_path" >&2 2>/dev/null || true
     echo "[run-second-opinion]" >&2

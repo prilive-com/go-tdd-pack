@@ -442,30 +442,36 @@ fi
 # adopter Codex quota with each round.
 RC_PACK="scripts/tdd/runner-context-pack.sh"
 if grep -q 'When supporting files are not in the context pack' "$RC_PACK" \
-   && grep -q 'MC-1' "$RC_PACK" \
-   && grep -q 'missing context: ' "$RC_PACK"; then
+   && grep -q 'missing context: ' "$RC_PACK" \
+   && grep -q 'failure_mode' "$RC_PACK"; then
   pass "v199_prompt_template_documents_missing_context_pattern"
 else
-  fail "v199_prompt_template_documents_missing_context_pattern: runner-context-pack.sh prompt must document MC- convention"
+  fail "v199_prompt_template_documents_missing_context_pattern: runner-context-pack.sh prompt must document missing-context convention"
 fi
 
-# v1.9.9: runner must recognize all-MC responses as context requests
-# (not defect-blocking rounds) and surface the requested file paths
-# to the operator. Smoke verifies the recognition logic exists in
-# the runner source (full end-to-end test would require Codex,
-# which is the v1.10 backlog item).
+# v1.9.9: runner must recognize context-request responses (failure_mode
+# starts with "missing context:") and surface requested file paths to
+# the operator. v1.9.10 loosened the detection to drop the id-prefix
+# requirement (real Codex output kept F1/F2 ids). The required
+# signals now: failure_mode prefix check + the recognizable operator
+# message + the cap-non-counting note.
 V199_RUNNER="scripts/tdd/run-second-opinion.sh"
 if grep -q 'CONTEXT REQUEST: Codex needs unchanged supporting files' "$V199_RUNNER" \
-   && grep -q 'startswith("MC-")' "$V199_RUNNER" \
    && grep -q 'startswith("missing context:")' "$V199_RUNNER" \
    && grep -q 'does NOT count toward max_review_rounds_per_cycle' "$V199_RUNNER"; then
   pass "v199_runner_recognizes_context_request_pattern"
 else
-  fail "v199_runner_recognizes_context_request_pattern: run-second-opinion.sh must detect MC findings + emit context-request message"
+  fail "v199_runner_recognizes_context_request_pattern: run-second-opinion.sh must detect missing-context findings + emit context-request message"
 fi
 
-# Behavioral test: feed a synthesized all-MC Codex output to the
-# detection jq pattern and confirm the count matches total blocking.
+# v1.9.10: the detection pattern matches on `failure_mode` prefix
+# alone, NOT id prefix. v1.9.9 required BOTH id startswith "MC-"
+# AND failure_mode startswith "missing context:". Real Codex output
+# complied with failure_mode but kept F1/F2 ids (because the rest of
+# the schema asks for F-prefix). Adopter session 2026-05-16 (HEAD
+# 8cbddfb) hit this. v1.9.10 drops the id requirement.
+
+# Behavioral T1: pure context request with MC- ids — still detected.
 mc_fixture='{
   "findings": [
     {"id":"MC-1","severity":"P1","category":"other",
@@ -483,13 +489,40 @@ mc_fixture='{
 total=$(printf '%s' "$mc_fixture" | jq '[.findings[] | select(.severity=="P0" or .severity=="P1")] | length')
 mc=$(printf '%s' "$mc_fixture" | jq '[.findings[]
                                        | select(.severity=="P0" or .severity=="P1")
-                                       | select(.id | startswith("MC-"))
                                        | select(.failure_mode | startswith("missing context:"))
                                       ] | length')
 if [[ "$total" -gt 0 ]] && [[ "$total" == "$mc" ]]; then
   pass "v199_jq_pattern_correctly_identifies_pure_context_request"
 else
   fail "v199_jq_pattern_correctly_identifies_pure_context_request: total=$total mc=$mc"
+fi
+
+# Behavioral T2 (v1.9.10 regression test): pure context request with
+# F- ids (real Codex output shape) — MUST be detected. This is the
+# exact adopter symptom from 2026-05-16.
+mc_fprefix_fixture='{
+  "findings": [
+    {"id":"F1","severity":"P1","category":"other",
+     "failure_mode":"missing context: testdata/echoed-refused.txt",
+     "evidence":"requested file not present in the context pack",
+     "required_fix":"operator: paste file into plan",
+     "test":"(none — informational, no test applies)"},
+    {"id":"F2","severity":"P1","category":"other",
+     "failure_mode":"missing context: testdata/broad-placeholder.txt",
+     "evidence":"requested file not present in the context pack",
+     "required_fix":"operator: paste file into plan",
+     "test":"(none — informational, no test applies)"}
+  ]
+}'
+total=$(printf '%s' "$mc_fprefix_fixture" | jq '[.findings[] | select(.severity=="P0" or .severity=="P1")] | length')
+mc=$(printf '%s' "$mc_fprefix_fixture" | jq '[.findings[]
+                                                | select(.severity=="P0" or .severity=="P1")
+                                                | select(.failure_mode | startswith("missing context:"))
+                                               ] | length')
+if [[ "$total" -gt 0 ]] && [[ "$total" == "$mc" ]]; then
+  pass "v1910_jq_pattern_recognizes_F_prefix_with_missing_context_failure_mode"
+else
+  fail "v1910_jq_pattern_recognizes_F_prefix_with_missing_context_failure_mode: total=$total mc=$mc"
 fi
 
 # Negative: a mixed response (real defect + MC) must NOT be
@@ -501,7 +534,7 @@ mixed_fixture='{
      "evidence":"parser.go:42",
      "required_fix":"add nil check",
      "test":"TestNilInput"},
-    {"id":"MC-1","severity":"P1","category":"other",
+    {"id":"F2","severity":"P1","category":"other",
      "failure_mode":"missing context: testdata/foo.txt",
      "evidence":"requested file not present",
      "required_fix":"operator paste",
@@ -511,13 +544,20 @@ mixed_fixture='{
 total=$(printf '%s' "$mixed_fixture" | jq '[.findings[] | select(.severity=="P0" or .severity=="P1")] | length')
 mc=$(printf '%s' "$mixed_fixture" | jq '[.findings[]
                                           | select(.severity=="P0" or .severity=="P1")
-                                          | select(.id | startswith("MC-"))
                                           | select(.failure_mode | startswith("missing context:"))
                                          ] | length')
 if [[ "$total" == "2" ]] && [[ "$mc" == "1" ]]; then
   pass "v199_jq_pattern_rejects_mixed_context_and_defect"
 else
   fail "v199_jq_pattern_rejects_mixed_context_and_defect: total=$total mc=$mc (expected 2/1)"
+fi
+
+# v1.9.10: runner source must use the loosened detection (no id check).
+if grep -q 'failure_mode | startswith("missing context:")' "$V199_RUNNER" \
+   && ! grep -E 'select\(\.id \| startswith\("MC-"\)\)' "$V199_RUNNER" | grep -q startswith; then
+  pass "v1910_runner_uses_failure_mode_only_detection"
+else
+  fail "v1910_runner_uses_failure_mode_only_detection: runner still has id-prefix check"
 fi
 
 # v1.9.8: schema invariant — OpenAI strict response_format requires
