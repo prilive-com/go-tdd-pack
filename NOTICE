@@ -1,0 +1,23 @@
+go-claude-forge
+Copyright 2026 Anton Dvornikov and contributors
+
+This product is licensed under the Apache License, Version 2.0.
+See the LICENSE file for the full text.
+
+This product includes derivative work, design patterns, or interface
+contracts from the following projects (all also under permissive
+licenses; consult each project for its own NOTICE):
+
+- Anthropic Claude Code (https://code.claude.com)
+  Hook architecture, plugin manifest format, MCP integration patterns.
+
+- Sigstore (https://www.sigstore.dev/)
+  Keyless signing patterns referenced in release workflow templates.
+
+- SLSA Framework (https://slsa.dev/)
+  Build provenance attestation patterns referenced in release workflow.
+
+No content from external projects is bundled in source form within this
+repository. Cross-model review via OpenAI Codex CLI is invoked at
+runtime when the operator chooses; the Codex CLI is not redistributed
+here.

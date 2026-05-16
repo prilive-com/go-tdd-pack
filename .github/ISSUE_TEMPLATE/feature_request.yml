@@ -1,0 +1,90 @@
+name: Feature request
+description: Propose a new feature, enhancement, or workflow change
+title: "[feature] "
+labels: [enhancement, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing. Significant changes to hooks, schema,
+        or `/second-opinion` workflow should also be discussed in
+        [Discussions](https://github.com/prilive-com/go-claude-forge/discussions)
+        first — issues are for tracked, scoped work.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can't you do today? What workflow does this address?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: |
+        Concrete proposal. Be specific about config keys, file paths,
+        hook behavior, command-line flags. Vague proposals get vague
+        triage.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What other approaches did you weigh? What did you reject and why?
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Where would this live?
+      description: Pick the closest match. Multiple selections welcome — just pick the primary.
+      options:
+        - Hook (.claude/hooks/)
+        - Skill (.claude/skills/)
+        - Agent (.claude/agents/)
+        - Rule (.claude/rules/)
+        - Runner script (scripts/tdd/)
+        - AST validator (scripts/tdd/ast/)
+        - Schema (.tdd/templates/)
+        - Preset (.tdd/presets/)
+        - Documentation
+        - CI / GitHub Actions
+        - Plugin manifest / marketplace
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: backwards_compat
+    attributes:
+      label: Backwards compatibility
+      description: Would adopting this break existing pack users?
+      options:
+        - "Non-breaking — purely additive"
+        - "Behavior change — opt-in via config"
+        - "Behavior change — opt-out via config"
+        - "Breaking — requires major version bump"
+        - "I don't know — please advise"
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives_already_in_pack
+    attributes:
+      label: Have you checked existing skills, hooks, or rules?
+      description: |
+        The pack ships 17 hooks, 14 skills, 6 agents, 10 rules. Many
+        common asks are already covered or partially covered. Quick
+        check helps triage:
+        ```
+        ls .claude/hooks .claude/skills .claude/agents .claude/rules
+        ```
+
+  - type: textarea
+    id: ai_disclosure
+    attributes:
+      label: AI assistance disclosure (optional)
+      description: If AI tools helped draft this proposal, name them.

@@ -1,0 +1,111 @@
+name: Bug report
+description: A reproducible defect in the pack
+title: "[bug] "
+labels: [bug, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Before submitting, please confirm:
+
+        - This is **not a security issue**. Security issues use [Private Vulnerability Reporting](https://github.com/prilive-com/go-claude-forge/security/advisories/new) instead.
+        - You searched [open issues](https://github.com/prilive-com/go-claude-forge/issues) for an existing report.
+        - You are running pack version v1.9.4 or later. Earlier versions have known deadlocks (see CHANGELOG).
+
+  - type: input
+    id: pack_version
+    attributes:
+      label: Pack version
+      description: From `git rev-parse --short HEAD` of your pack checkout, OR the tag (e.g. `v1.9.8`).
+      placeholder: v1.9.8 or 2a88ff7
+    validations:
+      required: true
+
+  - type: input
+    id: claude_code_version
+    attributes:
+      label: Claude Code version
+      description: Output of `claude --version`. The pack requires ≥ 2.1.89.
+      placeholder: "2.1.89"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS / platform
+      placeholder: macOS 14.5 (arm64), Ubuntu 24.04, etc.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: |
+        Smallest commands and JSON inputs that reproduce the bug.
+        Include hook input JSON if relevant. Use code blocks.
+      render: bash
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: |
+        What happened instead? Include full hook output, exit codes,
+        and any audit-log entries (`.tdd/audit/<cycle_id>.jsonl`).
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        Paste content from `.tdd/audit/<cycle_id>.jsonl`,
+        `.tdd/exceptions/post-red-test-edits.json`, or
+        `.tdd/second-opinion-debug.log` if relevant. Sanitize first.
+      render: text
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant config
+      description: |
+        Output of:
+        ```
+        jq '{enforcement_mode, second_opinion}' .tdd/tdd-config.json
+        ```
+        (Or paste the relevant tier1_path_regexes if applicable.)
+      render: jsonc
+
+  - type: dropdown
+    id: ai_assisted_diagnosis
+    attributes:
+      label: AI-assisted diagnosis
+      description: Was this report drafted with AI assistance?
+      options:
+        - "No"
+        - "Yes — disclosed in the body below"
+    validations:
+      required: false
+
+  - type: textarea
+    id: ai_disclosure
+    attributes:
+      label: AI assistance disclosure (if applicable)
+      description: |
+        If AI assisted in drafting this report or analyzing the
+        bug, name the tool and what it contributed. Optional but
+        appreciated for transparency.

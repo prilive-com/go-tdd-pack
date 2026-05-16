@@ -1,0 +1,31 @@
+# .github/CODEOWNERS
+#
+# Triggers automatic review requests; required reviewers can be
+# enforced via repository ruleset.
+#
+# Replace @YOUR-GITHUB-HANDLE with the maintainer's actual handle
+# before the public push.
+
+# Default: lead maintainer reviews everything.
+*                                  @YOUR-GITHUB-HANDLE
+
+# Hooks are security-critical — explicit ownership.
+/.claude/hooks/                    @YOUR-GITHUB-HANDLE
+/scripts/tdd/                      @YOUR-GITHUB-HANDLE
+/scripts/git-hooks/                @YOUR-GITHUB-HANDLE
+/scripts/install-git-hooks.sh      @YOUR-GITHUB-HANDLE
+
+# Schema, presets, and ceremony config — review every change.
+/.tdd/templates/                   @YOUR-GITHUB-HANDLE
+/.tdd/presets/                     @YOUR-GITHUB-HANDLE
+/.tdd/tdd-config.json              @YOUR-GITHUB-HANDLE
+
+# Governance / community files.
+/CODE_OF_CONDUCT.md                @YOUR-GITHUB-HANDLE
+/SECURITY.md                       @YOUR-GITHUB-HANDLE
+/MAINTAINERS.md                    @YOUR-GITHUB-HANDLE
+/CONTRIBUTING.md                   @YOUR-GITHUB-HANDLE
+/.github/                          @YOUR-GITHUB-HANDLE
+
+# CHANGELOG must be updated alongside any user-visible change.
+/CHANGELOG.md                      @YOUR-GITHUB-HANDLE

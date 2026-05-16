@@ -1,0 +1,46 @@
+# .github/dependabot.yml
+#
+# Dependabot config for go-claude-forge. Conservative grouping:
+# weekly, batched, with security updates separated so they get
+# faster attention.
+
+version: 2
+updates:
+  # GitHub Actions used in workflows. Pin to commit SHAs in workflow
+  # files; Dependabot updates the SHAs and version comments.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      actions-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+      actions-major:
+        patterns: ["*"]
+        update-types: [major]
+    commit-message:
+      prefix: "chore(deps)"
+      include: scope
+
+  # Go modules — once we ship Go validators / helpers as a real
+  # module, this group activates. Today the AST validator is a
+  # single-file Go program; once a go.mod lands, weekly updates.
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      go-deps-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+      go-deps-major:
+        patterns: ["*"]
+        update-types: [major]
+    commit-message:
+      prefix: "chore(deps)"
+      include: scope
