@@ -47,41 +47,51 @@ paths a personal mailbox does not.
 
 ## Severity rubric
 
-We treat the following as **P0** (drop everything):
+We rate reports on a four-band prose scale anchored to **CVSS v4.0**
+ranges (FIRST.org's current standard since November 2023, what
+GitHub Security Advisories emit). The prose band is the user-facing
+label; the numeric range is the rubric, not a substitute for a
+per-report assessment.
 
-- Any way an AI agent can bypass a Tier 1 hook gate without operator
-  approval.
-- Any way the SHA-chained audit log can be silently tampered with
-  while preserving validation.
-- Any path that lets `--no-verify` reach the Tier 1 commit gate.
-- Secret-scanner false-negative on a known credential pattern shipped
-  in the canonical regex set.
-- Hook script remote code execution from untrusted input.
+| Band | CVSS v4.0 | Typical examples for this project |
+|---|---|---|
+| **Critical** | 9.0 – 10.0 | A shipped hook that executes attacker-controlled code without operator approval; supply-chain compromise of a published tag; secret-scanner false-negative on a credential pattern in the canonical regex set; any path that lets `--no-verify` reach the Tier 1 commit gate. |
+| **High** | 7.0 – 8.9 | A hook that leaks credentials, files outside the repo, or environment variables; `scripts/*.sh` path traversal; SHA-chained audit log silently tamperable while preserving validation; runner records `obligation_completed` for a scope it did not actually review. |
+| **Medium** | 4.0 – 6.9 | Hook misclassification (Tier 2 path treated as Tier 1, or vice versa) that meaningfully shifts the protection envelope; logic flaw in a hook that requires unusual configuration to exploit. |
+| **Low** | 0.1 – 3.9 | Defence-in-depth hardening opportunities, documentation gaps with security implications, hook performance problems on large repos with no exploitability impact. |
 
-**P1** (next release):
+CVSS v3.1 scores may be quoted alongside where downstream consumers
+require them — v3.1 remains the more widely-issued version in NVD
+enrichment volume as of May 2026, even though v4.0 is the current
+FIRST standard.
 
-- Hook misclassification (Tier 2 path treated as Tier 1, or vice
-  versa) that meaningfully shifts the protection envelope.
-- Audit log entries with mis-chained `prev_sha` that pass current
-  validation.
-- Any way for the runner to record an `obligation_completed` event
-  for a scope it did not actually review.
-
-**P2 / P3**: usability defects, documentation accuracy bugs that
-mislead operators, hook performance problems on large repos.
+Because this is a single-maintainer project, the maintainer's CVSS
+assessment may be imprecise. The prose band governs public
+communication; the numeric score is informational.
 
 ## Disclosure timeline
+
+Our default coordinated-disclosure window is **90 days** from
+acknowledgment of a valid report.
 
 | Stage | Target |
 |---|---|
 | Acknowledgment of report | within 72 hours |
 | Severity triage + ETA shared | within 14 days |
-| P0/P1 fix released | within 90 days |
+| Critical/High fix released | within 90 days |
 | Coordinated public disclosure (CVE if applicable) | per reporter agreement |
 
-If we cannot meet a target we will tell you and propose a revised
-timeline. If a vulnerability is being actively exploited in the wild,
-we shorten timelines accordingly.
+Two documented levers on the 90-day window:
+
+- **Shorten** the window (down to immediate disclosure-with-patch) if
+  there is credible evidence of active exploitation in the wild.
+- **Extend** the window by up to **30 days** (one-time) if a
+  high-quality patch is imminent but not yet ready AND the reporter
+  agrees in writing.
+
+When the embargo lifts we publish a GitHub Security Advisory, request
+a CVE via GitHub's CNA where applicable, and credit the reporter
+unless they prefer to remain anonymous.
 
 ## Out of scope
 
@@ -98,19 +108,41 @@ The following are **not** treated as security issues:
   env vars" — yes, by design. The killswitches exist for emergencies
   and are audit-logged. That is not a vulnerability.
 
-## Trust note for adopters
+## Trust note for adopters — required upstream context
 
 This pack defines hooks that **execute shell scripts** on every
 Bash/Edit/Write tool call. Only install from sources you trust, and
 review `.claude/hooks/*.sh` the same way you would review any code
 that runs on your machine.
 
-Relevant prior incident: [CVE-2025-59536](https://nvd.nist.gov/vuln/detail/CVE-2025-59536)
-— a Claude Code vulnerability where untrusted project settings could
-trigger code execution before the user accepted the trust dialog.
-Fixed upstream in Claude Code 1.0.111. We require Claude Code ≥
-2.1.89 (which supersedes that fix and addresses related defer-mode
-gaps). Verify with `claude --version`.
+Two Claude Code vulnerabilities directly inform our defensive posture
+and are required reading for anyone shipping or auditing a plugin
+like this one. Both were originally disclosed by Check Point Research
+(Aviv Donenfeld and Oded Vanunu) in their 2026 "Caught in the Hook"
+write-up.
+
+- **[CVE-2025-59536](https://nvd.nist.gov/vuln/detail/CVE-2025-59536)**
+  (GHSA-4fgq-fpq9-mr3g, CVSS v4.0 = 8.7 High, CWE-94) — Claude Code
+  prior to **1.0.111** executed code from project files (hooks, MCP
+  server commands) **before** the user accepted the startup trust
+  dialog. Fixed October 2025.
+- **[CVE-2026-21852](https://nvd.nist.gov/vuln/detail/CVE-2026-21852)**
+  (GHSA-jh7p-qr78-84p7, CVSS v4.0 = 5.3 Medium, CWE-522) — Claude
+  Code prior to **2.0.65** honored an `ANTHROPIC_BASE_URL` value
+  from a repository's `.claude/settings.json` and issued API calls
+  (carrying the user's Anthropic API key) to the configured endpoint
+  before the trust prompt was shown. Fixed early 2026.
+
+**Required runtime**: Claude Code ≥ **2.1.89** — supersedes both
+fixes above AND addresses related defer-mode gaps. Verify with
+`claude --version`.
+
+What this pack does to harden against the failure modes those CVEs
+exposed: we deliberately do not set `ANTHROPIC_BASE_URL`; we do not
+ship MCP server configurations beyond the local `gopls`; every
+hook's deny patterns cite the CVE or incident that motivated them
+in the source (see `CONTRIBUTING.md` "Adding a deny pattern").
+Review `.claude/` before first run if you cloned from a fork.
 
 ## Vulnerability disclosure history
 

@@ -1,86 +1,82 @@
-# Code of Conduct
+# Contributor Covenant 3.0 Code of Conduct
 
-This project adopts the [Contributor Covenant version 3.0][cc3]
-verbatim. The full text of the Covenant lives at the canonical URL
-below; we incorporate it here by reference rather than re-vendoring
-the text, so we automatically track upstream clarifications.
+## Our Pledge
 
-[cc3]: https://www.contributor-covenant.org/version/3/0/code_of_conduct/
+We pledge to make our community welcoming, safe, and equitable for all.
 
-## Adoption
+We are committed to fostering an environment that respects and promotes the dignity, rights, and contributions of all individuals, regardless of characteristics including race, ethnicity, caste, color, age, physical characteristics, neurodiversity, disability, sex or gender, gender identity or expression, sexual orientation, language, philosophy or religion, national or social origin, socio-economic position, level of education, or other status. The same privileges of participation are extended to everyone who participates in good faith and in accordance with this Covenant.
 
-go-claude-forge adopts Contributor Covenant 3.0 as published by the
-Organization for Ethical Source. Any subsequent point release of
-Covenant 3.x applies; we will explicitly acknowledge any move to
-Covenant 4.x or later in CHANGELOG.md under `Changed`.
+## Encouraged Behaviors
 
-## Our pledge (summary, non-binding — see canonical text)
+While acknowledging differences in social norms, we all strive to meet our community's expectations for positive behavior. We also understand that our words and actions may be interpreted differently than we intend based on culture, background, or native language.
 
-We pledge to make participation in our community a harassment-free
-experience for everyone, regardless of personal characteristics, and
-to act in ways that contribute to an open, welcoming, diverse,
-inclusive, and healthy community.
+With these considerations in mind, we agree to behave mindfully toward each other and act in ways that center our shared values, including:
 
-## Standards (summary)
+1. Respecting the **purpose of our community**, our activities, and our ways of gathering.
+2. Engaging **kindly and honestly** with others.
+3. Respecting **different viewpoints** and experiences.
+4. **Taking responsibility** for our actions and contributions.
+5. Gracefully giving and accepting **constructive feedback**.
+6. Committing to **repairing harm** when it occurs.
+7. Behaving in other ways that promote and sustain the **well-being of our community**.
 
-Examples of behavior that contributes to a positive environment:
+## Restricted Behaviors
 
-- Demonstrating empathy and kindness toward other people
-- Being respectful of differing opinions, viewpoints, and experiences
-- Giving and gracefully accepting constructive feedback
-- Accepting responsibility and apologizing for mistakes
-- Focusing on what is best for the overall community
+We agree to restrict the following behaviors in our community. Instances, threats, and promotion of these behaviors are violations of this Code of Conduct.
 
-Examples of unacceptable behavior:
+1. **Harassment.** Violating explicitly expressed boundaries or engaging in unnecessary personal attention after any clear request to stop.
+2. **Character attacks.** Making insulting, demeaning, or pejorative comments directed at a community member or group of people.
+3. **Stereotyping or discrimination.** Characterizing anyone's personality or behavior on the basis of immutable identities or traits.
+4. **Sexualization.** Behaving in a way that would generally be considered inappropriately intimate in the context or purpose of the community.
+5. **Violating confidentiality**. Sharing or acting on someone's personal or private information without their permission.
+6. **Endangerment.** Causing, encouraging, or threatening violence or other harm toward any person or group.
+7. Behaving in other ways that **threaten the well-being** of our community.
 
-- The use of sexualized language or imagery, and sexual attention or
-  advances of any kind
-- Trolling, insulting or derogatory comments, and personal or
-  political attacks
-- Public or private harassment
-- Publishing others' private information without permission
-- Other conduct which could reasonably be considered inappropriate
-  in a professional setting
+### Other Restrictions
 
-For the binding text, see the [canonical Covenant 3.0 page][cc3].
+1. **Misleading identity.** Impersonating someone else for any reason, or pretending to be someone else to evade enforcement actions.
+2. **Failing to credit sources.** Not properly crediting the sources of content you contribute.
+3. **Promotional materials**. Sharing marketing or other commercial content in a way that is outside the norms of the community.
+4. **Irresponsible communication.** Failing to responsibly present content which includes, links or describes any other restricted behaviors.
 
-## Enforcement
+## Reporting an Issue
 
-### Reporting
+Tensions can occur between community members even when they are trying their best to collaborate. Not every conflict represents a code of conduct violation, and this Code of Conduct reinforces encouraged behaviors and norms that can help avoid conflicts and minimize harm.
 
-Report Code of Conduct violations privately via one of these channels:
+When an incident does occur, it is important to report it promptly. To report a possible violation, use one of the following private channels:
 
 1. **GitHub Private Vulnerability Reporting** —
    <https://github.com/prilive-com/go-claude-forge/security/advisories/new>
    (yes, the same channel as security reports; PVR is the most private
    and well-tracked communication path GitHub provides for repos.
    Mark the report `Code of Conduct` so triage routes it correctly.)
-
 2. **GitHub abuse report** —
    <https://github.com/contact/report-abuse?report=prilive-com%2Fgo-claude-forge>
-   (use this if the reportable conduct involves a maintainer, OR if
-   you would prefer your report bypass project maintainers entirely).
+   (use this if the reportable conduct involves the project maintainer,
+   OR if you would prefer your report bypass project maintainers
+   entirely; GitHub Trust & Safety can act on the repository
+   independently of project maintainers).
 
-We do not currently operate a dedicated Code of Conduct email
-address. This is a deliberate choice — GitHub's PVR and abuse channels
-have audit trails, message preservation, and escalation paths that a
-single mailbox does not.
+We do not operate a dedicated Code of Conduct email address. This is a
+deliberate choice — GitHub's PVR and abuse channels have audit
+trails, message preservation, and escalation paths a single mailbox
+does not.
+
+Community Moderators take reports of violations seriously and will make every effort to respond in a timely manner. They will investigate all reports of code of conduct violations, reviewing messages, logs, and recordings, or interviewing witnesses and other participants. Community Moderators will keep investigation and enforcement actions as transparent as possible while prioritizing safety and confidentiality. In order to honor these values, enforcement actions are carried out in private with the involved parties, but communicating to the whole community may be part of a mutually agreed upon resolution.
 
 ### Maintainer team and limitations (honesty disclosure)
 
 This project currently has **a single active maintainer** (see
 [`MAINTAINERS.md`](MAINTAINERS.md)). Contributor Covenant typically
-assumes ≥2 enforcers so that a report against one can be escalated
-to another. We are open about this limitation:
+assumes ≥2 Community Moderators so that a report against one can be
+escalated to another. We are open about this limitation:
 
 - If your report **involves the project maintainer**, use the GitHub
-  abuse channel above. GitHub Trust & Safety can act on the repository
-  independent of project maintainers.
+  abuse channel above. GitHub Trust & Safety operates independently.
 - We are actively looking for a second maintainer to make CoC
-  enforcement more robust. If you would consider helping with this
-  responsibility, open a Discussion thread or contact the maintainer.
-- Until a second maintainer is added, we will document this status
-  honestly here rather than imply enforcement capacity we do not have.
+  enforcement more robust. See `MAINTAINERS.md` for the path.
+- Until a second maintainer is added, we document this status
+  honestly rather than imply enforcement capacity we do not have.
 
 ### What to expect after reporting
 
@@ -90,33 +86,37 @@ to another. We are open about this limitation:
 | Initial assessment | within 7 days |
 | Resolution or status update | within 30 days |
 
-All complaints will be reviewed and investigated promptly and fairly.
-All community leaders are obligated to respect the privacy and
-security of the reporter of any incident.
+## Addressing and Repairing Harm
 
-### Enforcement guidelines
+If an investigation by the Community Moderators finds that this Code of Conduct has been violated, the following enforcement ladder may be used to determine how best to repair harm, based on the incident's impact on the individuals involved and the community as a whole. Depending on the severity of a violation, lower rungs on the ladder may be skipped.
 
-We follow the four-stage enforcement ladder defined in Contributor
-Covenant 3.0:
+1) **Warning**
+   1) Event: A violation involving a single incident or series of incidents.
+   2) Consequence: A private, written warning from the Community Moderators.
+   3) Repair: Examples of repair include a private written apology, acknowledgement of responsibility, and seeking clarification on expectations.
+2) **Temporarily Limited Activities**
+   1) Event: A repeated incidence of a violation that previously resulted in a warning, or the first incidence of a more serious violation.
+   2) Consequence: A private, written warning with a time-limited cooldown period designed to underscore the seriousness of the situation and give the community members involved time to process the incident. The cooldown period may be limited to particular communication channels or interactions with particular community members.
+   3) Repair: Examples of repair may include making an apology, using the cooldown period to reflect on actions and impact, and being thoughtful about re-entering community spaces after the period is over.
+3) **Temporary Suspension**
+   1) Event: A pattern of repeated violation which the Community Moderators have tried to address with warnings, or a single serious violation.
+   2) Consequence: A private written warning with conditions for return from suspension. In general, temporary suspensions give the person being suspended time to reflect upon their behavior and possible corrective actions.
+   3) Repair: Examples of repair include respecting the spirit of the suspension, meeting the specified conditions for return, and being thoughtful about how to reintegrate with the community when the suspension is lifted.
+4) **Permanent Ban**
+   1) Event: A pattern of repeated code of conduct violations that other steps on the ladder have failed to resolve, or a violation so serious that the Community Moderators determine there is no way to keep the community safe with this person as a member.
+   2) Consequence: Access to all community spaces, tools, and communication channels is removed. In general, permanent bans should be rarely used, should have strong reasoning behind them, and should only be resorted to if working through other remedies has failed to change the behavior.
+   3) Repair: There is no possible repair in cases of this severity.
 
-1. **Correction** — private written warning, clarification of the
-   violation, public apology if requested.
-2. **Warning** — public warning with consequences for continued
-   behavior, no interaction with affected parties for a specified
-   period.
-3. **Temporary ban** — temporary ban from any sort of interaction or
-   public communication with the community for a specified period.
-4. **Permanent ban** — permanent ban from any sort of public
-   interaction within the community.
+This enforcement ladder is intended as a guideline. It does not limit the ability of Community Managers to use their discretion and judgment, in keeping with the best interests of our community.
 
-See the [canonical Covenant 3.0 enforcement guidelines][cc3] for the
-precise consequences and durations.
+## Scope
+
+This Code of Conduct applies within all community spaces, and also applies when an individual is officially representing the community in public or other spaces. Examples of representing our community include using an official email address, posting via an official social media account, or acting as an appointed representative at an online or offline event.
 
 ## Attribution
 
-This Code of Conduct is adapted from the
-[Contributor Covenant version 3.0][cc3], available at
-<https://www.contributor-covenant.org/version/3/0/code_of_conduct/>.
+This Code of Conduct is adapted from the Contributor Covenant, version 3.0, permanently available at [https://www.contributor-covenant.org/version/3/0/](https://www.contributor-covenant.org/version/3/0/).
 
-Contributor Covenant is licensed under the Creative Commons
-Attribution 4.0 International license (CC BY 4.0).
+Contributor Covenant is stewarded by the Organization for Ethical Source and licensed under CC BY-SA 4.0. To view a copy of this license, visit [https://creativecommons.org/licenses/by-sa/4.0/](https://creativecommons.org/licenses/by-sa/4.0/)
+
+For answers to common questions about Contributor Covenant, see the FAQ at [https://www.contributor-covenant.org/faq](https://www.contributor-covenant.org/faq). Translations are provided at [https://www.contributor-covenant.org/translations](https://www.contributor-covenant.org/translations). Additional enforcement and community guideline resources can be found at [https://www.contributor-covenant.org/resources](https://www.contributor-covenant.org/resources). The enforcement ladder was inspired by the work of [Mozilla's code of conduct team](https://github.com/mozilla/inclusion).

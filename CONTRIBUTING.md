@@ -13,14 +13,20 @@ how to propose changes, and the rules around DCO and AI-assisted work.
 
 ## What contributions are welcome
 
-The review bar scales with risk:
+The review bar scales with risk. Find your change in the table; the
+"Review expectation" column tells you what to expect when you open
+the PR.
 
-- **Docs, examples, typos** → open a PR; review within 14 days.
-- **Bug fixes** → open a PR with a regression test; review within 14 days.
-- **Hook behavior, schema, or `/second-opinion` workflow changes** →
-  open an issue first with a written proposal; we discuss before code.
-- **New language packs** (Python, TypeScript, etc.) → open a Discussion
-  first to align on shape with the existing Go pack.
+| Tier | Examples | Review expectation |
+|------|----------|--------------------|
+| **1 — Trivial** | Typo fixes, doc clarifications, dependency-pin bumps with no API change, single-file README updates | Within 1 week; one approving review; no tests required (but no regressions either) |
+| **2 — Standard** | New skill template, refactor of a runner script, additional Makefile target, new smoke test case, new agent definition | Within 2 weeks; one approving review; smoke must stay green |
+| **3 — Risky** | Anything that touches `.claude/hooks/*.sh`, `.tdd/templates/*.schema.json`, `scripts/tdd/run-second-opinion.sh`, `scripts/git-hooks/*`, or `.github/workflows/release.yml` | Within 4 weeks; one approving review **plus** explicit lead-maintainer sign-off; security review against the threat model in `SECURITY.md`; regression test required |
+| **4 — Out of scope (open an issue first)** | New runtime dependencies, telemetry, network calls from hooks, changes that broaden the executed-code surface | Likely declined without prior discussion; please open an issue to align before writing code |
+
+For Tier 3 + 4 changes, opening an issue or Discussion first will
+save you time. We will tell you whether the proposal is welcome
+before you spend hours on code that ends up being closed.
 
 ## Dev setup
 
@@ -32,7 +38,7 @@ cd go-claude-forge
 make doctor
 # (or run by hand: jq, bash, git, gofmt, go ≥ 1.26.2)
 
-# Run the smoke suite (target: 571/571 passing)
+# Run the smoke suite (target: 591/591 passing)
 bash scripts/tdd-test-hooks.sh
 
 # Validate every JSON file parses
@@ -79,8 +85,19 @@ because it has lower friction for contributors and stronger industry
 adoption (Linux kernel, Docker, Kubernetes, OpenInfra Foundation as
 of mid-2025).
 
-The [DCO GitHub App](https://github.com/apps/dco) enforces the
-`Signed-off-by` check on every PR.
+DCO enforcement is provided by the **[cncf/dco2 GitHub App](https://github.com/apps/dco-2)**
+— the actively-maintained Rust-based drop-in replacement for the
+older `dcoapp/app` (which has had reliability problems since
+2021–22 outages). Install path: `github.com/apps/dco-2` (note the
+hyphen). Configuration in `.github/dco.yml`:
+
+```yaml
+allowRemediationCommits:
+  individual: true
+```
+
+so you can add a follow-up sign-off commit if you forget on the
+first push.
 
 ## AI-assisted contributions
 
@@ -136,7 +153,7 @@ provenance on a project whose job is to enforce attribution.
 
 - [ ] Commits signed (`git commit -s` for DCO)
 - [ ] AI-assisted disclosure added if applicable (`Assisted-by:` trailer + PR note)
-- [ ] `bash scripts/tdd-test-hooks.sh` passes (target: 571/571)
+- [ ] `bash scripts/tdd-test-hooks.sh` passes (target: 591/591)
 - [ ] If a hook contract changed, the JSON shape is documented
 - [ ] If a deny pattern was added, the comment cites the CVE/incident
 - [ ] CHANGELOG entry under `## [Unreleased]`
