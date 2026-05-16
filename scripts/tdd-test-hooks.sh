@@ -476,6 +476,106 @@ else
   fail "v1100_runner_uses_danger_full_access_not_read_only: runner must invoke codex with danger-full-access + ask-for-approval never"
 fi
 
+# v1.10.1: production-edit trigger must honor tier1_path_regexes.
+# Pre-v1.10.1 fired on every .go edit; ignored Tier 1/Tier 2
+# distinction. Real adopter friction: Tier 2 refactors required full
+# v1.9 ceremony, then forced manual cycle abandonment on /exit. Fix
+# is silent early-exit when tier_level=tier2 (unless operator opts
+# in via production_edits_all_tiers=true).
+V1101_PROD_TRIGGER=".claude/hooks/second-opinion-production-trigger.sh"
+
+# Tier 1 path → trigger MUST fire (deny with PRODUCTION_EDIT_REVIEW_REQUIRED).
+TMP_V1101T1=$(mktemp -d)
+mkdir -p "$TMP_V1101T1/.tdd/exceptions"
+( cd "$TMP_V1101T1" && git init -q && git config user.email t@t && git config user.name t )
+cat > "$TMP_V1101T1/.tdd/tdd-config.json" <<'EOF'
+{
+  "second_opinion": {
+    "no_discretion": {
+      "enabled": true,
+      "required_for": {"production_edits": true}
+    }
+  },
+  "tier1_path_regexes": ["(^|/)internal/auth/.*\\.go$"]
+}
+EOF
+echo "Cycle ID: v1101t1" > "$TMP_V1101T1/.tdd/current-plan.md"
+mkdir -p "$TMP_V1101T1/internal/auth"
+echo "package auth" > "$TMP_V1101T1/internal/auth/handler.go"
+( cd "$TMP_V1101T1" && git add . && git commit -q -m initial )
+PAYLOAD=$(jq -n '{tool_name:"Edit",tool_input:{file_path:"internal/auth/handler.go",old_string:"package auth",new_string:"package auth // edit"}}')
+out=$( ( cd "$TMP_V1101T1" && printf '%s' "$PAYLOAD" | bash "$PROJECT_ROOT/$V1101_PROD_TRIGGER" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'PRODUCTION_EDIT_REVIEW_REQUIRED|deny'; then
+  pass "v1101_tier1_production_edit_fires_trigger"
+else
+  fail "v1101_tier1_production_edit_fires_trigger: Tier 1 .go edit must fire (got: '$out')"
+fi
+rm -rf "$TMP_V1101T1"
+
+# Tier 2 path → trigger MUST be silent (no obligation, exit 0).
+TMP_V1101T2=$(mktemp -d)
+mkdir -p "$TMP_V1101T2/.tdd/exceptions"
+( cd "$TMP_V1101T2" && git init -q && git config user.email t@t && git config user.name t )
+cat > "$TMP_V1101T2/.tdd/tdd-config.json" <<'EOF'
+{
+  "second_opinion": {
+    "no_discretion": {
+      "enabled": true,
+      "required_for": {"production_edits": true}
+    }
+  },
+  "tier1_path_regexes": ["(^|/)internal/auth/.*\\.go$"]
+}
+EOF
+echo "Cycle ID: v1101t2" > "$TMP_V1101T2/.tdd/current-plan.md"
+mkdir -p "$TMP_V1101T2/internal/handlers"
+echo "package handlers" > "$TMP_V1101T2/internal/handlers/index.go"
+( cd "$TMP_V1101T2" && git add . && git commit -q -m initial )
+PAYLOAD=$(jq -n '{tool_name:"Edit",tool_input:{file_path:"internal/handlers/index.go",old_string:"package handlers",new_string:"package handlers // edit"}}')
+out=$( ( cd "$TMP_V1101T2" && printf '%s' "$PAYLOAD" | bash "$PROJECT_ROOT/$V1101_PROD_TRIGGER" 2>&1; echo "rc=$?" ) || true)
+if printf '%s' "$out" | grep -q 'rc=0' && ! printf '%s' "$out" | grep -qE 'PRODUCTION_EDIT_REVIEW_REQUIRED|deny'; then
+  pass "v1101_tier2_production_edit_silent"
+else
+  fail "v1101_tier2_production_edit_silent: Tier 2 .go edit must NOT fire (got: '$out')"
+fi
+# Verify no pending obligation was created for Tier 2.
+pending_count=$(jq -r '[.exceptions[]? | select(.status=="pending")] | length' "$TMP_V1101T2/.tdd/exceptions/post-red-test-edits.json" 2>/dev/null || echo 0)
+if [[ "$pending_count" == "0" ]]; then
+  pass "v1101_tier2_production_edit_creates_no_obligation"
+else
+  fail "v1101_tier2_production_edit_creates_no_obligation: Tier 2 edit should not create pending entry (got $pending_count)"
+fi
+rm -rf "$TMP_V1101T2"
+
+# Override: production_edits_all_tiers=true forces ceremony on Tier 2.
+TMP_V1101T3=$(mktemp -d)
+mkdir -p "$TMP_V1101T3/.tdd/exceptions"
+( cd "$TMP_V1101T3" && git init -q && git config user.email t@t && git config user.name t )
+cat > "$TMP_V1101T3/.tdd/tdd-config.json" <<'EOF'
+{
+  "second_opinion": {
+    "no_discretion": {
+      "enabled": true,
+      "production_edits_all_tiers": true,
+      "required_for": {"production_edits": true}
+    }
+  },
+  "tier1_path_regexes": ["(^|/)internal/auth/.*\\.go$"]
+}
+EOF
+echo "Cycle ID: v1101t3" > "$TMP_V1101T3/.tdd/current-plan.md"
+mkdir -p "$TMP_V1101T3/internal/handlers"
+echo "package handlers" > "$TMP_V1101T3/internal/handlers/index.go"
+( cd "$TMP_V1101T3" && git add . && git commit -q -m initial )
+PAYLOAD=$(jq -n '{tool_name:"Edit",tool_input:{file_path:"internal/handlers/index.go",old_string:"package handlers",new_string:"package handlers // edit"}}')
+out=$( ( cd "$TMP_V1101T3" && printf '%s' "$PAYLOAD" | bash "$PROJECT_ROOT/$V1101_PROD_TRIGGER" 2>&1 ) || true)
+if printf '%s' "$out" | grep -qE 'PRODUCTION_EDIT_REVIEW_REQUIRED|deny'; then
+  pass "v1101_production_edits_all_tiers_override_forces_tier2_ceremony"
+else
+  fail "v1101_production_edits_all_tiers_override_forces_tier2_ceremony: override should force Tier 2 ceremony (got: '$out')"
+fi
+rm -rf "$TMP_V1101T3"
+
 # v1.9.9: runner must recognize context-request responses (failure_mode
 # starts with "missing context:") and surface requested file paths to
 # the operator. v1.9.10 loosened the detection to drop the id-prefix
@@ -9866,6 +9966,7 @@ v19_make_cycle() {
   "second_opinion": {
     "no_discretion": {
       "enabled": true,
+      "production_edits_all_tiers": true,
       "required_for": {
         "plan_writes": true,
         "test_writes": true,
@@ -10266,6 +10367,7 @@ cat > "$TMP_V19T28/.tdd/tdd-config.json" <<'EOF'
   "second_opinion": {
     "no_discretion": {
       "enabled": true,
+      "production_edits_all_tiers": true,
       "required_for": {"plan_writes": true, "test_writes": true, "production_edits": true}
     }
   }
@@ -10301,6 +10403,7 @@ cat > "$TMP_V19T29/.tdd/tdd-config.json" <<'EOF'
   "second_opinion": {
     "no_discretion": {
       "enabled": true,
+      "production_edits_all_tiers": true,
       "required_for": {"plan_writes": true, "test_writes": true, "production_edits": true}
     }
   }

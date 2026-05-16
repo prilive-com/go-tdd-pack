@@ -73,6 +73,30 @@ while IFS= read -r pattern; do
   fi
 done < <(jq -r '.tier1_path_regexes[]? // empty' "$CONFIG" 2>/dev/null || true)
 
+# v1.10.1: respect tier1_path_regexes. Pre-v1.10.1 this hook fired on
+# every .go edit regardless of Tier classification, contradicting the
+# project's own `tier1_path_regexes` config. The original Mode A /
+# Mode B distinction (Tier 1 = high-stakes, full ceremony; Tier 2 =
+# everything else, no ceremony) was lost in v1.9.0 when the new
+# trigger system ignored tier1_path_regexes entirely. Net effect for
+# adopters: every Go file edit became Tier 1 work, requiring full
+# plan/test/production ceremony even for low-stakes refactors.
+#
+# v1.10.1 restores the original design: Tier 2 production edits are
+# silent (no obligation, no ceremony). If an operator wants v1.9.0
+# "gate-everything" behavior back, they can widen their
+# tier1_path_regexes to include `.+\.go$` — that explicitly opts
+# every Go file into Tier 1, which is now a deliberate choice rather
+# than the silent default.
+#
+# Override path for operators who want to force ceremony on Tier 2
+# (e.g., during a high-risk refactor week): set
+# `second_opinion.no_discretion.production_edits_all_tiers: true`.
+production_all_tiers="$(jq -r '.second_opinion.no_discretion.production_edits_all_tiers // false' "$CONFIG" 2>/dev/null || echo false)"
+if [[ "$tier_level" == "tier2" ]] && [[ "$production_all_tiers" != "true" ]]; then
+  exit 0
+fi
+
 # Cycle ID + base_git_sha.
 cycle_id="$( { grep -E '^Cycle ID:' "$PLAN" 2>/dev/null || true; } | head -1 | sed -E 's/^Cycle ID:[[:space:]]*//')"
 [[ -z "$cycle_id" ]] && cycle_id="unknown-cycle"
