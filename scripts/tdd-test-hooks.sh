@@ -476,6 +476,144 @@ else
   fail "v1100_runner_uses_danger_full_access_not_read_only: runner must invoke codex with danger-full-access + ask-for-approval never"
 fi
 
+# v1.10.2: stop_hook_active re-entry guard already present (added in v1.9.0)
+# Smoke verifies it's still there and works.
+V1102_STOP_HOOK=".claude/hooks/session-stop-review.sh"
+if grep -q 'stop_hook_active' "$V1102_STOP_HOOK"; then
+  pass "v1102_stop_hook_active_reentry_guard_present"
+else
+  fail "v1102_stop_hook_active_reentry_guard_present: re-entry guard missing"
+fi
+
+# When stop_hook_active=true the hook MUST exit 0 silently (else infinite loop).
+out=$(echo '{"hook_event_name":"Stop","stop_hook_active":true}' \
+  | CLAUDE_PROJECT_DIR="$PROJECT_ROOT" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$V1102_STOP_HOOK" 2>&1; echo "rc=$?")
+if printf '%s' "$out" | grep -q 'rc=0' && ! printf '%s' "$out" | grep -qE 'block|BLOCKED'; then
+  pass "v1102_stop_hook_silent_when_stop_hook_active_true"
+else
+  fail "v1102_stop_hook_silent_when_stop_hook_active_true (got: '$out')"
+fi
+
+# v1.10.2: stop hook writes per-cycle state.json + .tdd/active pointer
+# at clean session exit (when no pending obligations).
+TMP_V1102_STATE=$(mktemp -d)
+mkdir -p "$TMP_V1102_STATE/.tdd/exceptions"
+cat > "$TMP_V1102_STATE/.tdd/current-plan.md" <<'EOF'
+Cycle ID: v1102state
+EOF
+# Empty exceptions file → no pending obligations → hook should write state.
+echo '{"version":1,"phase":"red","cycle_id":"v1102state","exceptions":[]}' \
+  > "$TMP_V1102_STATE/.tdd/exceptions/post-red-test-edits.json"
+out=$(echo '{"hook_event_name":"Stop","stop_hook_active":false}' \
+  | CLAUDE_PROJECT_DIR="$TMP_V1102_STATE" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$V1102_STOP_HOOK" 2>&1; echo "rc=$?")
+state_exists=$([ -f "$TMP_V1102_STATE/.tdd/cycles/v1102state/state.json" ] && echo true || echo false)
+active_exists=$([ -f "$TMP_V1102_STATE/.tdd/active" ] && echo true || echo false)
+state_cycle_id=$(jq -r '.cycle_id' "$TMP_V1102_STATE/.tdd/cycles/v1102state/state.json" 2>/dev/null || echo MISSING)
+active_value=$(cat "$TMP_V1102_STATE/.tdd/active" 2>/dev/null || echo MISSING)
+if [[ "$out" == *"rc=0"* ]] \
+   && [[ "$state_exists" == "true" ]] \
+   && [[ "$active_exists" == "true" ]] \
+   && [[ "$state_cycle_id" == "v1102state" ]] \
+   && [[ "$active_value" == "v1102state" ]]; then
+  pass "v1102_stop_hook_writes_per_cycle_state_and_active_pointer"
+else
+  fail "v1102_stop_hook_writes_per_cycle_state_and_active_pointer: rc=$out state=$state_exists active=$active_exists cycle=$state_cycle_id active_val=$active_value"
+fi
+rm -rf "$TMP_V1102_STATE"
+
+# v1.10.2: SessionStart hook reads .tdd/active and injects cycle hint.
+V1102_SC_HOOK=".claude/hooks/session-context.sh"
+TMP_V1102_SC=$(mktemp -d)
+( cd "$TMP_V1102_SC" && git init -q && git config user.email t@t && git config user.name t \
+  && echo init > README.md && git add . && git commit -q -m initial )
+mkdir -p "$TMP_V1102_SC/.tdd/cycles/v1102sc"
+echo 'v1102sc' > "$TMP_V1102_SC/.tdd/active"
+cat > "$TMP_V1102_SC/.tdd/cycles/v1102sc/state.json" <<'EOF'
+{"cycle_id":"v1102sc","status":"reviewing","next_actor":"claude","approved_rounds":1,"updated_at":"2026-05-16T00:00:00Z","context_hint":"Cycle v1102sc paused mid-review."}
+EOF
+out=$(echo '{"hook_event_name":"SessionStart","source":"resume"}' \
+  | CLAUDE_PROJECT_DIR="$TMP_V1102_SC" timeout "${HOOK_TIMEOUT:-5}" \
+    bash "$PROJECT_ROOT/$V1102_SC_HOOK" 2>&1)
+if printf '%s' "$out" | grep -q 'Active TDD cycle: v1102sc' \
+   && printf '%s' "$out" | grep -q 'status=reviewing' \
+   && printf '%s' "$out" | grep -q 'next_actor=claude'; then
+  pass "v1102_session_start_injects_active_cycle_state"
+else
+  fail "v1102_session_start_injects_active_cycle_state (got: '$out')"
+fi
+rm -rf "$TMP_V1102_SC"
+
+# Slash commands exist (markdown files Claude Code reads).
+if [[ -f .claude/commands/continue.md ]] && [[ -f .claude/commands/resume.md ]]; then
+  pass "v1102_continue_and_resume_slash_commands_exist"
+else
+  fail "v1102_continue_and_resume_slash_commands_exist: missing one or both"
+fi
+
+# External validator script smoke.
+VALIDATOR="scripts/tdd/validate-codex-output.sh"
+if [[ -x "$VALIDATOR" ]]; then
+  # Valid input passes.
+  TMP_V1102_OK=$(mktemp)
+  cat > "$TMP_V1102_OK" <<'EOF'
+{
+  "review_type": "production_edit",
+  "cycle_id": "v1102",
+  "scope_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "verdict": "approve",
+  "findings": [],
+  "required_actions": [],
+  "summary": "looks good",
+  "codex_session_uuid": "s-uuid",
+  "codex_model": "gpt-5.5"
+}
+EOF
+  if bash "$VALIDATOR" "$TMP_V1102_OK" 2>/dev/null | grep -q '^OK'; then
+    pass "v1102_validator_accepts_well_formed_codex_output"
+  else
+    fail "v1102_validator_accepts_well_formed_codex_output"
+  fi
+  rm -f "$TMP_V1102_OK"
+
+  # Invalid verdict rejected.
+  TMP_V1102_BAD=$(mktemp)
+  cat > "$TMP_V1102_BAD" <<'EOF'
+{
+  "review_type": "production_edit",
+  "cycle_id": "v1102",
+  "scope_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "verdict": "totally_fine",
+  "findings": [],
+  "required_actions": [],
+  "summary": "x",
+  "codex_session_uuid": "s",
+  "codex_model": "gpt-5.5"
+}
+EOF
+  if ! bash "$VALIDATOR" "$TMP_V1102_BAD" 2>/dev/null; then
+    pass "v1102_validator_rejects_invalid_verdict"
+  else
+    fail "v1102_validator_rejects_invalid_verdict"
+  fi
+  rm -f "$TMP_V1102_BAD"
+
+  # Missing required field rejected.
+  TMP_V1102_MISSING=$(mktemp)
+  cat > "$TMP_V1102_MISSING" <<'EOF'
+{ "review_type": "production_edit", "verdict": "approve" }
+EOF
+  if ! bash "$VALIDATOR" "$TMP_V1102_MISSING" 2>/dev/null; then
+    pass "v1102_validator_rejects_missing_required_fields"
+  else
+    fail "v1102_validator_rejects_missing_required_fields"
+  fi
+  rm -f "$TMP_V1102_MISSING"
+else
+  fail "v1102_validator_script_missing_or_not_executable"
+fi
+
 # v1.10.1: production-edit trigger must honor tier1_path_regexes.
 # Pre-v1.10.1 fired on every .go edit; ignored Tier 1/Tier 2
 # distinction. Real adopter friction: Tier 2 refactors required full

@@ -137,4 +137,62 @@ if [[ "$pending" -gt 0 ]]; then
   exit 0
 fi
 
+# v1.10.2: write per-cycle state.json at every clean session exit, plus
+# update .tdd/active to point at the most recent cycle. SessionStart
+# reads this on the next session to inject continuation context. The
+# state file is best-effort — if any step fails we still exit 0.
+#
+# Schema (kept intentionally minimal for MVP):
+#   {
+#     "cycle_id":     "<id>",
+#     "status":       "reviewing|approved|abandoned|...",
+#     "next_actor":   "claude|codex|human|none",
+#     "approved_rounds": <count>,
+#     "updated_at":   "<iso-8601>",
+#     "context_hint": "<human-readable summary for SessionStart injection>"
+#   }
+cycle_dir="$PROJECT_DIR/.tdd/cycles/${cycle_id}"
+mkdir -p "$cycle_dir" 2>/dev/null || true
+
+ts="$(date -u +%FT%TZ 2>/dev/null || echo unknown)"
+approved_rounds=0
+if [[ -f "$ARTIFACT" ]]; then
+  approved_rounds=$(jq -r --arg cid "$cycle_id" '
+    [.exceptions[]?
+     | select(.binding.cycle_id == $cid)
+     | select(.status == "approved")
+    ] | length
+  ' "$ARTIFACT" 2>/dev/null || echo 0)
+  [[ -z "$approved_rounds" ]] && approved_rounds=0
+fi
+
+# Status + next_actor derivation. At Stop time, if we reached here, there
+# are no pending obligations (we already returned above if pending > 0).
+# So the cycle is either approved (some completion exists) or fresh
+# (no work done yet).
+if [[ "$approved_rounds" -gt 0 ]]; then
+  status="approved"
+  next_actor="claude"
+  hint="Cycle $cycle_id has ${approved_rounds} approved review round(s). Next action depends on what Claude is doing — likely continue implementation OR commit if green proof captured."
+else
+  status="pending"
+  next_actor="claude"
+  hint="Cycle $cycle_id is open with no completed reviews yet. Resume work as you left it; trigger hooks will fire on the next Tier 1 edit."
+fi
+
+jq -n \
+  --arg cid    "$cycle_id" \
+  --arg st     "$status" \
+  --arg na     "$next_actor" \
+  --argjson ar "$approved_rounds" \
+  --arg ts     "$ts" \
+  --arg hint   "$hint" \
+  '{cycle_id:$cid, status:$st, next_actor:$na, approved_rounds:$ar, updated_at:$ts, context_hint:$hint}' \
+  > "$cycle_dir/state.json.tmp" 2>/dev/null && \
+  mv "$cycle_dir/state.json.tmp" "$cycle_dir/state.json" 2>/dev/null || true
+
+# Update the pointer to the cycle this session was working on.
+echo "$cycle_id" > "$PROJECT_DIR/.tdd/active.tmp" 2>/dev/null && \
+  mv "$PROJECT_DIR/.tdd/active.tmp" "$PROJECT_DIR/.tdd/active" 2>/dev/null || true
+
 exit 0

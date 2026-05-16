@@ -49,6 +49,11 @@ CLAUDE.local.md
 # v1.7.0: per-cycle typed test-edit exception artifact + audit log
 .tdd/exceptions/
 .tdd/audit/
+# v1.9.7: cycle-abandonment durable archive
+.tdd/abandoned/
+# v1.10.2: per-cycle session-resumption state + active pointer
+.tdd/cycles/
+.tdd/active
 
 # OS / editor
 .DS_Store
