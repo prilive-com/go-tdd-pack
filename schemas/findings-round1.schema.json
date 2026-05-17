@@ -36,7 +36,8 @@
           "title",
           "body",
           "file",
-          "line"
+          "line",
+          "confidence"
         ],
         "properties": {
           "severity": {
@@ -58,7 +59,13 @@
           "title": { "type": "string", "maxLength": 120 },
           "body":  { "type": "string", "maxLength": 800 },
           "file":  { "type": "string" },
-          "line":  { "type": "integer", "minimum": 0 }
+          "line":  { "type": "integer", "minimum": 0 },
+          "confidence": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5,
+            "description": "1=guess, 2=plausible, 3=likely, 4=high confidence, 5=verified (tool output, test ran, doc cited)"
+          }
         }
       }
     },

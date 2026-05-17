@@ -97,12 +97,13 @@ VERDICT_SUMMARY=$(jq -r '.summary_one_sentence // "review requested"' "${ROUND1_
 # Surface ALL findings (blocker + major + minor + nit). Quality-tuned:
 # even nits can be useful signal for Claude. Per tdd-pack.toml
 # min_surface = "nit". If you want to filter, raise the bar here.
+# Confidence is shown as c=N (1-5); 5=verified, 1=guess.
 FINDINGS=$(jq -r '
   [.findings[]?]
   | if length == 0 then "(no findings)"
     else (
       map(
-        "- [\(.severity)/\(.category)] \(.title)\n  \(.body)"
+        "- [\(.severity)/\(.category) c=\(.confidence // "?")] \(.title)\n  \(.body)"
         + (if .file != "" then "\n  at \(.file):\(.line // 0)" else "" end)
       ) | join("\n")
     )

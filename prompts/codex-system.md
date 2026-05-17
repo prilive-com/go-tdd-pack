@@ -87,6 +87,17 @@ Severity scale:
 Category enum:
   correctness | test_quality | design | security | maintainability | docs | other
 
+Confidence scale (every finding must include `confidence` as integer 1–5):
+  - `5`: verified — you ran the test, ran the tool, read the cited spec
+  - `4`: high confidence — you read the surrounding code and the path is clear
+  - `3`: likely — pattern recognition + partial reading
+  - `2`: plausible — could be true; you didn't fully verify
+  - `1`: guess — speculative, surface only if severity warrants it
+
+Use confidence honestly. A `blocker` at confidence 1 is a red flag (think harder
+or downgrade); a `nit` at confidence 5 is fine. Claude uses confidence to triage
+which findings to address first vs. push back on.
+
 Always be terse IN OUTPUT. The user does not see your reviews
 directly — they go to Claude. Findings should be one short paragraph
 each, max. Thoroughness applies to investigation (read the code, run

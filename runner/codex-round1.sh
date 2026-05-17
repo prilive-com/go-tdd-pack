@@ -35,20 +35,30 @@ REASONING="${REASONING:-high}"
 # smaller on macOS). Real diffs commonly exceed this. jq --rawfile reads file
 # content in jq's memory, no command-line size limit.
 TREE_FILE=$(mktemp)
-# No cap on the file list — Codex needs to see the full repo layout to
-# orient itself. The list is just paths, not content, so even a 10K-file
-# repo costs only a few KB of context. Earlier `head -50` truncation
-# hid most of the codebase from the reviewer; do not reintroduce.
-cd "${PROJECT_DIR}" && git ls-files 2>/dev/null > "${TREE_FILE}"
+# Send only changed file paths for orientation. The full repo tree is
+# attention dilution per current evidence; Codex can `git ls-files`
+# itself if it wants the whole layout.
+cd "${PROJECT_DIR}" && git diff --name-only HEAD 2>/dev/null > "${TREE_FILE}"
+
+# Tool grounding — pre-execute go vet, gofmt -l, staticcheck,
+# golangci-lint, govulncheck (each skipped silently if not installed).
+# Output is markdown, included verbatim in the user prompt. Best-effort:
+# script always exits 0.
+TOOLS_FILE=$(mktemp)
+"${PROJECT_DIR}/runner/tool-grounding.sh" "${PROJECT_DIR}" > "${TOOLS_FILE}" 2>/dev/null || true
 
 USER_PROMPT=$(
   jq -rn \
-    --rawfile diff "${DIFF}" \
-    --rawfile tree "${TREE_FILE}" \
-    --rawfile tpl  "${USER_TPL}" \
-    '$tpl | gsub("\\{\\{DIFF\\}\\}"; $diff) | gsub("\\{\\{REPO_TREE\\}\\}"; $tree)'
+    --rawfile diff  "${DIFF}" \
+    --rawfile tree  "${TREE_FILE}" \
+    --rawfile tools "${TOOLS_FILE}" \
+    --rawfile tpl   "${USER_TPL}" \
+    '$tpl
+     | gsub("\\{\\{DIFF\\}\\}";            $diff)
+     | gsub("\\{\\{REPO_TREE\\}\\}";       $tree)
+     | gsub("\\{\\{TOOL_GROUNDING\\}\\}";  $tools)'
 )
-rm -f "${TREE_FILE}"
+rm -f "${TREE_FILE}" "${TOOLS_FILE}"
 
 # --- build codex flags ---
 # v2.0.2 fix: --ask-for-approval and --search are TOP-LEVEL codex flags,

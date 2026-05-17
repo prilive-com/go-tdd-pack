@@ -1,7 +1,11 @@
 Review this change.
 
-## Repository tree (top 50 lines)
+## Changed files (paths only)
 {{REPO_TREE}}
+
+If you need the broader repo layout, run `git ls-files` yourself.
+
+{{TOOL_GROUNDING}}
 
 ## The diff under review
 ```diff
@@ -18,8 +22,10 @@ Fields:
   (minor and nit are OK to attach); `"request_changes"` otherwise.
 - `summary_one_sentence`: ≤120 chars. What's the headline?
 - `summary_one_paragraph`: ≤500 chars. The case for your verdict.
-- `findings`: array. Each has severity, category, title, body, optional
-  file, optional line.
+- `findings`: array. Each finding requires: severity, category, title,
+  body, file, line, and confidence (1-5). Confidence is mandatory:
+  5=verified (you ran a tool/test/cited a doc), 4=high (read the
+  surrounding code), 3=likely, 2=plausible, 1=guess. Be honest.
 - `files_read`: array of files you actually opened (your audit trail).
 - `questions_for_human`: array. Empty unless you genuinely cannot decide
   without the human.
