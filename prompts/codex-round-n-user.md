@@ -26,6 +26,11 @@ You may run commands, read files, and search the web — same access
 as round 1. The no-write rule still applies; do not modify any
 project file.
 
+Be thorough — if Claude's response cites a file, function, or test
+you haven't read this round, read it now. If Claude says "the test
+proves X", run the test. Token economy is not a concern (user is on
+ChatGPT subscription). A correct verdict beats a fast one.
+
 Return your reply with this exact ending block, on its own lines:
 
 ----

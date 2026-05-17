@@ -44,8 +44,11 @@ CYCLE_DIR="${PROJECT_DIR}/.tdd/reviews/${CYCLE_ID}"
 emit_context() {
   local ctx="$1"
   local event="${2:-PostToolUse}"
-  # Cap at 9800 chars to stay under additionalContext 10K limit.
-  ctx="${ctx:0:9800}"
+  # Cap at 49500 chars to stay under additionalContext 50KB ceiling
+  # (Claude Code platform limit). Earlier 9800 cap was overly conservative
+  # and silently dropped the majority of findings when Codex returned a
+  # long list. Quality-tuned higher cap preserves the full signal.
+  ctx="${ctx:0:49500}"
   jq -nc \
     --arg event "${event}" \
     --arg ctx "${ctx}" \
@@ -91,11 +94,12 @@ fi
 
 VERDICT_SUMMARY=$(jq -r '.summary_one_sentence // "review requested"' "${ROUND1_JSON}" 2>/dev/null)
 
-# Filter findings: only blocker / major / minor (drop nit per default min_surface).
+# Surface ALL findings (blocker + major + minor + nit). Quality-tuned:
+# even nits can be useful signal for Claude. Per tdd-pack.toml
+# min_surface = "nit". If you want to filter, raise the bar here.
 FINDINGS=$(jq -r '
-  [.findings[]?
-   | select(.severity == "blocker" or .severity == "major" or .severity == "minor")]
-  | if length == 0 then "(no findings above minor severity)"
+  [.findings[]?]
+  | if length == 0 then "(no findings)"
     else (
       map(
         "- [\(.severity)/\(.category)] \(.title)\n  \(.body)"

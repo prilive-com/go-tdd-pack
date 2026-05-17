@@ -35,7 +35,11 @@ REASONING="${REASONING:-high}"
 # smaller on macOS). Real diffs commonly exceed this. jq --rawfile reads file
 # content in jq's memory, no command-line size limit.
 TREE_FILE=$(mktemp)
-cd "${PROJECT_DIR}" && git ls-files 2>/dev/null | head -50 > "${TREE_FILE}"
+# No cap on the file list — Codex needs to see the full repo layout to
+# orient itself. The list is just paths, not content, so even a 10K-file
+# repo costs only a few KB of context. Earlier `head -50` truncation
+# hid most of the codebase from the reviewer; do not reintroduce.
+cd "${PROJECT_DIR}" && git ls-files 2>/dev/null > "${TREE_FILE}"
 
 USER_PROMPT=$(
   jq -rn \

@@ -5,8 +5,10 @@
 
 [review]
 # Maximum debate rounds before escalating to the user.
-# Min 2, max 8. Default 4.
-max_rounds = 4
+# Min 2, max 8. Quality-tuned default 5 — one extra round beyond the
+# typical 1-3 convergence range to absorb hard cases without pulling
+# the operator in too early.
+max_rounds = 5
 
 # Wait this long after the last edit before firing review (milliseconds).
 # Coalesces bursty edits into one cycle.
@@ -34,10 +36,11 @@ max_cycle_minutes = 30
 model = ""
 
 # Reasoning effort: low | medium | high | xhigh
-# Default "high" — documented and supported by all Codex auth profiles.
-# "xhigh" is undocumented but reportedly supported by ChatGPT Plus/Pro/Team
-# auth. Opt up at your own risk; on unsupported auth you may get an error.
-reasoning_effort = "high"
+# Quality-tuned default "xhigh" — maximum reasoning supported by ChatGPT
+# Plus/Pro/Team auth. Catches subtler bugs and races than "high". If you
+# are on API-key auth (not ChatGPT subscription) and get an error, fall
+# back to "high".
+reasoning_effort = "xhigh"
 
 # Live web search. "live" enables --search; "disabled" omits the flag.
 # Use "disabled" only if your environment forbids outbound traffic.
@@ -56,9 +59,12 @@ web_search = "live"
 enforce_as = "criterion"
 
 [severity]
-# Minimum severity to surface to Claude. "nit"-level findings are dropped.
+# Minimum severity to surface to Claude.
 # blocker | major | minor | nit
-min_surface = "minor"
+# Quality-tuned default "nit" — show Claude every finding Codex generates,
+# even style/clarity nits. Lets Claude decide what to act on instead of
+# silently dropping signal.
+min_surface = "nit"
 
 # Severity at which a finding becomes a "must address" — the cycle cannot
 # converge if Codex returns a finding at this level or above.
