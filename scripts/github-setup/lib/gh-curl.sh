@@ -55,9 +55,8 @@ log_event() {
 # Returns: response body on stdout. Non-2xx exit code = 1.
 gh_api() {
   local method="$1" path="$2" body="${3:-}"
-  local tmp code retry
+  local tmp code="" retry=""
   tmp=$(mktemp)
-  trap 'rm -f "$tmp"' RETURN
 
   for try in 1 2 3 4 5; do
     if [[ -n "$body" ]]; then
@@ -106,10 +105,13 @@ gh_api() {
     echo "ERROR: $method $path → HTTP $code" >&2
     cat "$tmp" >&2
     cat "$tmp"
+    rm -f "$tmp"
     return 1
   fi
 
   cat "$tmp"
+  rm -f "$tmp"
+  return 0
 }
 
 # ----- Bool to JSON helper -----
