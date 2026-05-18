@@ -21,10 +21,10 @@ fixes only) for ~3 months, then end-of-life.
 **Do not open a public issue.** Use one of these private channels:
 
 1. **GitHub Private Vulnerability Reporting (preferred)** —
-   <https://github.com/prilive-com/go-claude-forge/security/advisories/new>
+   <https://github.com/prilive-com/go-tdd-pack/security/advisories/new>
 2. **GitHub abuse / Trust & Safety** (only if the maintainer is
    non-responsive or the issue involves them) —
-   <https://github.com/contact/report-abuse?report=prilive-com%2Fgo-claude-forge>
+   <https://github.com/contact/report-abuse?report=prilive-com%2Fgo-tdd-pack>
 
 We do not currently operate a dedicated `security@` email address.
 PVR provides audit trails, encrypted communication, and escalation

@@ -1,4 +1,4 @@
-# golangci-lint v2 configuration for go-claude-starter projects.
+# golangci-lint v2 configuration for go-tdd-pack projects.
 #
 # Per the v2 migration (https://golangci-lint.run/docs/product/migration-guide/):
 #   - linter settings live under `linters.settings.*` (was `linters-settings.*`)

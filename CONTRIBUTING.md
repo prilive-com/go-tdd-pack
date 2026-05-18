@@ -1,4 +1,4 @@
-# Contributing to go-claude-forge
+# Contributing to go-tdd-pack
 
 Thanks for considering a contribution. This file covers how to set up,
 how to propose changes, and the rules around DCO and AI-assisted work.
@@ -7,8 +7,8 @@ how to propose changes, and the rules around DCO and AI-assisted work.
 
 - [Code of Conduct](CODE_OF_CONDUCT.md)
 - [Security policy](SECURITY.md)
-- [Open issues](https://github.com/prilive-com/go-claude-forge/issues)
-- [Discussions](https://github.com/prilive-com/go-claude-forge/discussions)
+- [Open issues](https://github.com/prilive-com/go-tdd-pack/issues)
+- [Discussions](https://github.com/prilive-com/go-tdd-pack/discussions)
 - [Maintainers](MAINTAINERS.md)
 
 ## What contributions are welcome
@@ -31,8 +31,8 @@ before you spend hours on code that ends up being closed.
 ## Dev setup
 
 ```bash
-git clone https://github.com/prilive-com/go-claude-forge
-cd go-claude-forge
+git clone https://github.com/prilive-com/go-tdd-pack
+cd go-tdd-pack
 
 # Verify required tools
 make doctor

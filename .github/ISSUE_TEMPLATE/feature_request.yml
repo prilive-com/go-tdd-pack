@@ -8,7 +8,7 @@ body:
       value: |
         Thanks for proposing. Significant changes to hooks, schema,
         or `/second-opinion` workflow should also be discussed in
-        [Discussions](https://github.com/prilive-com/go-claude-forge/discussions)
+        [Discussions](https://github.com/prilive-com/go-tdd-pack/discussions)
         first — issues are for tracked, scoped work.
 
   - type: textarea

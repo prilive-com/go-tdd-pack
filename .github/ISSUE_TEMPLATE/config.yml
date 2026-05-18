@@ -1,11 +1,11 @@
 blank_issues_enabled: false
 contact_links:
   - name: Question / discussion
-    url: https://github.com/prilive-com/go-claude-forge/discussions
+    url: https://github.com/prilive-com/go-tdd-pack/discussions
     about: Ask questions, share usage, and discuss ideas in Discussions — not in Issues.
   - name: Security vulnerability
-    url: https://github.com/prilive-com/go-claude-forge/security/advisories/new
+    url: https://github.com/prilive-com/go-tdd-pack/security/advisories/new
     about: Report security issues privately via GitHub Private Vulnerability Reporting. Do not open a public issue.
   - name: Code of Conduct report
-    url: https://github.com/prilive-com/go-claude-forge/security/advisories/new
+    url: https://github.com/prilive-com/go-tdd-pack/security/advisories/new
     about: Report Code of Conduct violations via the same private channel — mark the report "Code of Conduct" so triage routes correctly.

@@ -8,8 +8,8 @@ body:
       value: |
         Thanks for reporting. Before submitting, please confirm:
 
-        - This is **not a security issue**. Security issues use [Private Vulnerability Reporting](https://github.com/prilive-com/go-claude-forge/security/advisories/new) instead.
-        - You searched [open issues](https://github.com/prilive-com/go-claude-forge/issues) for an existing report.
+        - This is **not a security issue**. Security issues use [Private Vulnerability Reporting](https://github.com/prilive-com/go-tdd-pack/security/advisories/new) instead.
+        - You searched [open issues](https://github.com/prilive-com/go-tdd-pack/issues) for an existing report.
         - You are running pack version v1.9.4 or later. Earlier versions have known deadlocks (see CHANGELOG).
 
   - type: input

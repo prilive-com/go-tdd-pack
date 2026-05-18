@@ -141,7 +141,7 @@ env_var = "PRILIVE_REVIEW_DISABLE"
 ## 6. File layout (final)
 
 ```
-go-claude-forge/                            # repo root (or go-tdd-pack, per naming decision)
+go-tdd-pack/                            # repo root (or go-tdd-pack, per naming decision)
 ├── .claude-plugin/
 │   └── plugin.json                         # plugin manifest, version "2.0.0"
 ├── tdd-pack.toml                           # default config (copied on install)

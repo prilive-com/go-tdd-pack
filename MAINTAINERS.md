@@ -1,6 +1,6 @@
 # Maintainers
 
-The current maintainer team for `go-claude-forge`.
+The current maintainer team for `go-tdd-pack`.
 
 ## Active maintainers
 
@@ -137,7 +137,7 @@ project grows.
 
 ## Contact
 
-- Public discussion: <https://github.com/prilive-com/go-claude-forge/discussions>
-- Bugs / feature requests: <https://github.com/prilive-com/go-claude-forge/issues>
-- Security: <https://github.com/prilive-com/go-claude-forge/security/advisories/new>
+- Public discussion: <https://github.com/prilive-com/go-tdd-pack/discussions>
+- Bugs / feature requests: <https://github.com/prilive-com/go-tdd-pack/issues>
+- Security: <https://github.com/prilive-com/go-tdd-pack/security/advisories/new>
 - Code of Conduct: see [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)

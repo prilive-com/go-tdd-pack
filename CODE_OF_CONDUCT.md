@@ -46,12 +46,12 @@ Tensions can occur between community members even when they are trying their bes
 When an incident does occur, it is important to report it promptly. To report a possible violation, use one of the following private channels:
 
 1. **GitHub Private Vulnerability Reporting** —
-   <https://github.com/prilive-com/go-claude-forge/security/advisories/new>
+   <https://github.com/prilive-com/go-tdd-pack/security/advisories/new>
    (yes, the same channel as security reports; PVR is the most private
    and well-tracked communication path GitHub provides for repos.
    Mark the report `Code of Conduct` so triage routes it correctly.)
 2. **GitHub abuse report** —
-   <https://github.com/contact/report-abuse?report=prilive-com%2Fgo-claude-forge>
+   <https://github.com/contact/report-abuse?report=prilive-com%2Fgo-tdd-pack>
    (use this if the reportable conduct involves the project maintainer,
    OR if you would prefer your report bypass project maintainers
    entirely; GitHub Trust & Safety can act on the repository

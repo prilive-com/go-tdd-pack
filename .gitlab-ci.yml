@@ -1,4 +1,4 @@
-# GitLab CI pipeline for go-claude-starter projects.
+# GitLab CI pipeline for go-tdd-pack projects.
 # Self-hosted GitLab. Customize Go version and runner tags as needed.
 #
 # This is the deterministic floor: all gates here must pass before merge.

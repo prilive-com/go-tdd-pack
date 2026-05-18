@@ -1,6 +1,6 @@
 # .github/dependabot.yml
 #
-# Dependabot config for go-claude-forge. Conservative grouping:
+# Dependabot config for go-tdd-pack. Conservative grouping:
 # weekly, batched, with security updates separated so they get
 # faster attention.
 
