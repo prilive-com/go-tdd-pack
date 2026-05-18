@@ -1,5 +1,15 @@
-# GitHub Actions equivalent of .gitlab-ci.yml.
-# Use this OR .gitlab-ci.yml — delete whichever you don't need.
+# CI for the Prilive Go TDD Pack itself.
+#
+# The pack ships shell scripts, JSON schemas, prompts, and markdown — NOT Go
+# source. Adopter projects have their own Go code; this CI tests the PACK.
+#
+# Two jobs:
+#   - test: structural smoke tests (no Codex calls, deterministic, fast)
+#   - lint: shell syntax + JSON validity + governance files present
+#
+# These job names map 1:1 to required_status_checks in the
+# `balanced-solo-maintainer` ruleset. CodeQL runs as a separate workflow
+# (created by GitHub's CodeQL default setup). DCO runs as a GitHub App check.
 
 name: CI
 
@@ -8,104 +18,94 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
-  verify:
+  test:
+    name: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26'
+
       - name: Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq
-      - name: Operating rules present
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq jq
+
+      - name: Phase 2 unit smoke (orchestration, no Codex)
+        run: bash test/smoke-v2-phase2.sh
+
+      - name: Tool grounding fixture smoke
+        run: bash test/smoke-tool-grounding.sh
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck + jq
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck jq
+
+      - name: Bash syntax check
         run: |
-          if [ ! -s CLAUDE.md ] || [ ! -s AGENTS.md ]; then
-            echo "CLAUDE.md and AGENTS.md must both exist and be non-empty."
-            exit 1
-          fi
-      - name: gofmt
-        run: test -z "$(gofmt -l .)" || { gofmt -d .; exit 1; }
-      - name: go vet
-        run: go vet ./...
-      - name: go mod tidy
-        run: go mod tidy && git diff --exit-code go.mod go.sum
-      - name: go test
-        run: go test ./...
-      - name: go test -race
-        run: go test -race -count=1 ./...
-      - name: staticcheck
-        # Routed through make tools so STATICCHECK_VERSION env var
-        # (set as a job env or repo secret) actually pins the version.
+          set -e
+          FAIL=0
+          while IFS= read -r f; do
+            if ! bash -n "$f"; then
+              echo "BAD SHELL: $f"
+              FAIL=1
+            fi
+          done < <(find hooks runner test scripts -type f -name '*.sh' 2>/dev/null)
+          exit $FAIL
+
+      - name: JSON validity
         run: |
-          make tools
-          staticcheck ./...
-      - name: deadcode
-        # Advisory by default. Set DEADCODE_ALLOW_FAILURE=false (env: below)
-        # AND drop continue-on-error to hard-fail on findings.
+          set -e
+          FAIL=0
+          while IFS= read -r f; do
+            if ! jq empty "$f" 2>/dev/null; then
+              echo "BAD JSON: $f"
+              FAIL=1
+            fi
+          done < <(find . -type f -name '*.json' \
+            -not -path './.git/*' \
+            -not -path './node_modules/*' \
+            -not -path './.tdd/*' 2>/dev/null)
+          exit $FAIL
+
+      - name: shellcheck (advisory, severity=warning)
+        # Soft-fail for now. Once the codebase is shellcheck-clean,
+        # remove continue-on-error to make it blocking.
         continue-on-error: true
-        env:
-          DEADCODE_ALLOW_FAILURE: "true"
         run: |
-          make tools
-          bash scripts/check-deadcode.sh
-      - name: allowed-modules
-        env:
-          # CHECK_TRANSITIVE_MODULES=true (strict; default) suits high-stakes
-          # projects. For lower-stakes services, override to false.
-          CHECK_TRANSITIVE_MODULES: "true"
-        run: bash scripts/check-allowed-modules.sh
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
+          set -e
+          shellcheck -S warning \
+            hooks/*.sh \
+            runner/*.sh \
+            test/*.sh \
+            scripts/github-setup/*.sh \
+            scripts/github-setup/lib/*.sh
 
-  hook-smoke-tests:
-    # F3: run scripts/tdd-test-hooks.sh in CI. The 200+ smoke tests
-    # cover every hook in .claude/hooks/ (require-tdd-state,
-    # require-second-opinion, gate-tier1-commit, guard-bash-pipefail,
-    # guard-dangerous-bash, scan-for-secrets, ai-bloat, etc.). The
-    # runner exits non-zero on any failure (final line: [ $FAIL -eq 0 ]).
-    # Without this job, hook regressions can land — caught by the
-    # F2-cycle Layer-0 leftover where local smoke ran against working
-    # tree but the committed code was actually broken.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install jq + python3-yaml
-        # python3-yaml is needed for the F3 self-tests that validate
-        # the CI YAML files. Without it, the self-tests skip silently
-        # (Codex round 1 P2: skip-as-pass hides genuine YAML errors).
-        run: sudo apt-get update && sudo apt-get install -y jq python3-yaml
-      - name: Run hook smoke suite
-        run: bash scripts/tdd-test-hooks.sh
-
-  security:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26'
-      - name: govulncheck
+      - name: Operating rules + governance files present
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
+          set -e
+          for f in CLAUDE.md AGENTS.md README.md LICENSE \
+                   SECURITY.md CONTRIBUTING.md CODE_OF_CONDUCT.md \
+                   CODEOWNERS CHANGELOG.md .github/dependabot.yml; do
+            if [ ! -s "$f" ]; then
+              echo "MISSING OR EMPTY: $f"
+              exit 1
+            fi
+          done
 
-  tdd-ceremony:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: TDD ceremony check
-        run: bash scripts/check-tdd-ceremony.sh
-
-  tdd-state-clean:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@v4
-      - name: Refuse mid-cycle TDD state
-        run: bash scripts/check-tdd-state-clean.sh
+      - name: Hook+runner script executable bits
+        run: |
+          set -e
+          FAIL=0
+          while IFS= read -r f; do
+            if [ ! -x "$f" ]; then
+              echo "NOT EXECUTABLE: $f"
+              FAIL=1
+            fi
+          done < <(find hooks runner test -type f -name '*.sh' 2>/dev/null)
+          exit $FAIL
