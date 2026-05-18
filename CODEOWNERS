@@ -1,0 +1,24 @@
+# Default owner — everything not otherwise listed
+* @prilive-com
+
+# Security-sensitive directories require code owner review on every PR
+/.github/                @prilive-com
+/SECURITY.md             @prilive-com
+/CODEOWNERS              @prilive-com
+
+# Pack runtime — runner, hooks, prompts, schemas
+/hooks/                  @prilive-com
+/runner/                 @prilive-com
+/prompts/                @prilive-com
+/schemas/                @prilive-com
+
+# Workflows + repo setup scripts
+/.github/workflows/      @prilive-com
+/scripts/                @prilive-com
+
+# Pack configuration
+/tdd-pack.toml           @prilive-com
+/.claude-plugin/         @prilive-com
+
+# Tests (smoke suite)
+/test/                   @prilive-com
