@@ -224,6 +224,7 @@ export PRILIVE_REVIEW_DISABLE=1
 | Codex operating rules | [`AGENTS.md`](AGENTS.md) |
 | Security policy | [`SECURITY.md`](SECURITY.md) |
 | Contribution policy | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
+| GitHub repo setup scripts (for the maintainer) | [`scripts/github-setup/RUNBOOK.md`](scripts/github-setup/RUNBOOK.md) |
 
 ---
 
