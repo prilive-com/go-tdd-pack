@@ -1,21 +1,152 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+All notable changes to the Prilive Go TDD Pack are documented in this file.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
-> **First public release.** **v1.10.2** is the first public-tagged
-> release of `go-claude-forge`. Versions enumerated below were
-> developed in the maintainer's private repository before public
-> release; their tag history will be pushed to the public repo so
-> the version numbers correspond to real commits, but no
-> downloadable artifacts existed for them prior to v1.10.2.
+> **First public release line:** v2.0.x. Earlier versions (v1.x ceremony
+> architecture) were developed in the maintainer's private repository
+> and are documented below for completeness, but were not publicly
+> distributed. The v1.x line is no longer maintained — new adoption
+> should use v2.0.x.
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [2.0.0] - 2026-05-18
+
+The v1.x → v2.0 architectural pivot. Replaces the manual TDD ceremony
+model (Tier 1/2/3, SPEC.md, second-opinion skill, blocking PreToolUse
+hooks) with **continuous silent peer review**: Codex reviews every
+meaningful Go change in the background, findings are silently injected
+into Claude's next turn, and the user is only pulled in on escalation.
+
 ### Added
-- _(next changes go here)_
+
+- **Continuous peer review architecture.** A background runner fires on
+  every PostToolUse (Edit/Write/MultiEdit/Bash), debounces 5s, runs
+  Codex against the diff, and silently injects findings into Claude's
+  next turn. See [`docs/V2_IMPLEMENTATION_SPEC.md`](docs/V2_IMPLEMENTATION_SPEC.md)
+  for the full design.
+- **Multi-round Codex resume.** Round 1 uses `codex exec --output-schema`
+  for strict JSON findings. Rounds 2+ use `codex exec resume <session-id>`
+  so the reviewer remembers its prior analysis without re-reading the
+  diff. Defaults to 5 rounds before escalation.
+- **A/B/V escalation message** when Claude and Codex don't converge.
+  The user sees one short message with both views and three choices
+  ([A] ship Claude's version, [B] apply Codex's, [V] view transcripts).
+- **Universal monorepo-aware tool grounding.** `runner/tool-grounding.sh`
+  walks each changed file up to its nearest non-empty `go.mod`, dedupes,
+  and runs tools per affected module. Works for single-module repos,
+  monorepos with multiple `go.mod` files at any depth, nested modules,
+  polyglot repos, and Go files with no enclosing `go.mod`. Never silently
+  no-ops — always emits a status section so Codex knows what was (and
+  wasn't) analyzed.
+- **Tool grounding for five Go tools** included verbatim in Codex's
+  prompt: `gofmt -l`, `go vet`, `staticcheck`, `golangci-lint run`,
+  `govulncheck`. Each tool times out at 60s, output capped at 4KB per
+  tool, total cap 30KB. Tools skipped silently if not installed but
+  marked `NOT INSTALLED` in Codex's prompt so absence is visible.
+- **Confidence scores on every finding.** Schema-required integer 1-5:
+  5 = verified (tool/test cited), 4 = high (read surrounding code),
+  3 = likely, 2 = plausible, 1 = guess. Displayed as `c=N` alongside
+  severity so Claude can triage by certainty.
+- **Codex runs with full machine access** (`--dangerously-bypass-approvals-and-sandbox`),
+  matching Claude's environment. The "no project writes" rule lives in
+  `prompts/codex-system.md` and is empirically verified by smoke tests.
+  No git worktree, no copy, no sandbox.
+- **Five new hooks** registered via `.claude/settings.json`:
+  `post-edit-review.sh` (async PostToolUse), `inject-findings.sh`
+  (sync PostToolUse + UserPromptSubmit), `stop-fingerprint.sh` (Stop),
+  `session-start.sh` (SessionStart). All deterministic shell, all
+  bounded.
+- **Five new runner scripts** under `runner/`: `review-runner.sh`
+  (orchestrator), `coalesce.sh`, `codex-round1.sh`, `codex-round-n.sh`,
+  `extract-verdict.sh`, `escalate.sh`, `tool-grounding.sh`.
+- **Smoke test suite.** `test/smoke-v2-phase2.sh` (25 unit-style
+  orchestration checks, no Codex calls), `test/smoke-tool-grounding.sh`
+  (12 fixture checks across 6 repo layouts), `test/smoke-v2-mvp.sh` and
+  `test/smoke-v2-phase2-live.sh` (live Codex end-to-end smokes).
+- **Quality-tuned defaults** in `tdd-pack.toml`: `reasoning_effort = "xhigh"`,
+  `web_search = "live"`, `model = ""` (track Codex CLI's current default),
+  `max_rounds = 5`, `min_surface = "nit"` (surface all findings to
+  Claude), additionalContext cap raised to 49500 chars.
+- **`docs/V2_IMPLEMENTATION_SPEC.md`** — full design document.
+- **`docs/V2_ROLLOUT_GUIDE.md`** — install instructions for adopters'
+  AI assistants.
+- **`docs/UPDATE_2026-05-17.md`** and **`docs/UPDATE_2026-05-17_monorepo-fix.md`** —
+  patch instructions for projects on earlier v2.0 commits.
+- **PRILIVE_REVIEW_DISABLE=1** as the single emergency kill switch.
+
+### Changed
+
+- **Breaking:** removed the v1.x TDD ceremony model entirely. Tier 1/2/3
+  classification, `SPEC.md`, `CYCLE_ABANDONED.txt`, `current-plan.md`,
+  the `second-opinion` skill, and all blocking PreToolUse ceremony hooks
+  are gone. Adopters should use the continuous review model instead.
+- **Breaking:** v1.x state files (`.tdd/current-plan.md`, `.tdd/cycles/`,
+  `.tdd/exceptions/*.json`) are no longer used. New state lives under
+  `.tdd/reviews/` (one directory per review cycle).
+- Codex orientation prompt now sends `git diff --name-only HEAD` for
+  the changed-files list, not the full repo tree. Codex still has
+  `git ls-files`, `Read`, and other tools to fetch broader layout when
+  needed. Tighter prompt, less attention dilution.
+
+### Removed
+
+- v1.x ceremony files (see Changed). Adopters migrating from v1.x can
+  delete `.tdd/current-plan.md`, `.tdd/cycles/`, `.tdd/exceptions/`,
+  `.claude/hooks/require-second-opinion.sh`, and any `SPEC.md` /
+  `CYCLE_ABANDONED.txt` artifacts safely.
+- The `--sandbox read-only` invocation of Codex from v1.10.0 (still
+  documented below). Replaced with `--dangerously-bypass-approvals-and-sandbox`
+  for capability parity with Claude.
+- The `git ls-files | head -50` repo tree injection (was a quality cap).
+- The 9800-char additionalContext cap (was over-conservative; raised
+  to 49500).
+- The `minor`-floor filter on injected findings (was over-conservative;
+  Claude now sees nits too).
+
+### Fixed
+
+- **Monorepo tool-grounding silent no-op.** The original
+  `runner/tool-grounding.sh` checked for `go.mod` at `PROJECT_DIR` root
+  and silently skipped any monorepo without one. Fixed by diff-driven
+  discovery (walk up from each changed file). Tool grounding now works
+  for any Go repo layout. See [`docs/UPDATE_2026-05-17_monorepo-fix.md`](docs/UPDATE_2026-05-17_monorepo-fix.md).
+- **Runner did not resume in-progress cycles.** After round 1 emitted
+  request_changes and the working tree was reverted (Claude's fix), the
+  runner's `git diff --quiet HEAD` skip-if-clean check exited without
+  ever running round 2. Fixed by detecting `state.json` for an
+  in-progress cycle before the coalesce/diff/round-1 path.
+- `mv` from `mktemp` was downgrading executable bits on hook scripts
+  during fixture insertion (live smoke caught this). Tests now capture
+  and restore mode.
+- Codex `--output-schema` unsupported on `codex exec resume` (upstream
+  bug openai/codex#14343). Round 1 uses fresh `codex exec` with schema;
+  rounds 2+ use resume with `VERDICT:` line parsing via
+  `runner/extract-verdict.sh`.
+- ARG_MAX overflow on `awk -v` templating with large diffs. Switched to
+  `jq --rawfile` which reads from disk and has no command-line size limit.
+- `--ask-for-approval` and `--search` are top-level codex flags, not
+  `codex exec` flags. Replaced with `--dangerously-bypass-approvals-and-sandbox`
+  (subcommand-supported single flag) and `-c web_search="live"` (config
+  override that works on subcommands).
+
+### Security
+
+- Codex's "no project writes" rule is enforced by system prompt and
+  verified by `test/smoke-v2-mvp.sh` and `test/smoke-v2-phase2-live.sh`,
+  which both check file hashes before and after each cycle. Any
+  violation fails the smoke explicitly.
+- `.tdd/reviews/**` is added to `permissions.deny` in
+  `.claude/settings.json` so Claude cannot directly modify review state.
+
+---
+
+## [1.10.2] - 2026-05-16
 
 ## [1.10.2] - 2026-05-16
 

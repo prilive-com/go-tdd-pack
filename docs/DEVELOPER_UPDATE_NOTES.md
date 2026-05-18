@@ -1,4 +1,25 @@
-# Developer update notes — go-claude-starter
+# Developer Update Notes
+
+> **Historical.** This file documents the v1.x update path (v1.3.1 →
+> v1.10.x ceremony architecture). Kept for reference; superseded by
+> v2.0.
+>
+> **Current update docs (apply in order if upgrading from earlier
+> v2.0 commits):**
+>
+> 1. [`UPDATE_2026-05-17.md`](UPDATE_2026-05-17.md) — quality tuning,
+>    confidence scores, tool grounding, tightened orientation
+>    (commit `12eceb8`)
+> 2. [`UPDATE_2026-05-17_monorepo-fix.md`](UPDATE_2026-05-17_monorepo-fix.md)
+>    — diff-driven discovery for all Go repo layouts (commit `4005167`)
+>
+> If you're starting from a v1.x install, do not apply the docs below.
+> See [`V2_ROLLOUT_GUIDE.md`](V2_ROLLOUT_GUIDE.md) for the v1.x → v2.0
+> cutover path instead.
+
+---
+
+# v1.x developer update notes (historical, do not apply for v2.0 adoption)
 
 **Date:** 2026-05-08
 **Branch:** `feature/second-opinion`

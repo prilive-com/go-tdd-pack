@@ -1,0 +1,127 @@
+{
+  "name": "prilive-go-tdd-pack",
+  "version": "2.0.0",
+  "description": "Continuous silent peer review between Claude Code and OpenAI Codex CLI for Go projects. Codex reviews every meaningful Go change in the background; findings are silently injected into Claude's next turn. Includes monorepo-aware tool grounding (gofmt, go vet, staticcheck, golangci-lint, govulncheck), multi-round resume via codex exec resume, and A/B/V escalation when reviewers disagree.",
+  "author": {
+    "name": "Prilive",
+    "url": "https://github.com/prilive-com"
+  },
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/prilive-com/go-tdd-pack",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/prilive-com/go-tdd-pack"
+  },
+  "bugs": {
+    "url": "https://github.com/prilive-com/go-tdd-pack/issues"
+  },
+  "keywords": [
+    "go",
+    "golang",
+    "code-review",
+    "peer-review",
+    "codex",
+    "continuous-review",
+    "tdd",
+    "monorepo",
+    "static-analysis",
+    "staticcheck",
+    "golangci-lint",
+    "govulncheck"
+  ],
+  "categories": ["code-quality", "review"],
+  "engines": {
+    "claude-code": ">=2.1.89"
+  },
+  "requires": {
+    "codex-cli": ">=0.125.0",
+    "go": ">=1.22.0",
+    "git": ">=2.25.0",
+    "bash": ">=4.0",
+    "jq": ">=1.6"
+  },
+  "recommends": {
+    "staticcheck": "honnef.co/go/tools/cmd/staticcheck@latest",
+    "golangci-lint": "https://golangci-lint.run/welcome/install/",
+    "govulncheck": "golang.org/x/vuln/cmd/govulncheck@latest"
+  },
+  "config_file": "tdd-pack.toml",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/post-edit-review.sh",
+            "async": true,
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inject-findings.sh",
+            "timeout": 3
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/post-edit-review.sh",
+            "async": true,
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inject-findings.sh",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/stop-fingerprint.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  },
+  "documentation": {
+    "readme": "README.md",
+    "guides": [
+      { "name": "Adoption Guide", "path": "docs/ADOPTION_GUIDE.md" },
+      { "name": "AI Developer Guide", "path": "docs/AI_DEVELOPER_GUIDE.md" },
+      { "name": "Integration Guide", "path": "docs/INTEGRATION_GUIDE.md" },
+      { "name": "Monorepo Adoption Guide", "path": "docs/MONOREPO_ADOPTION_GUIDE.md" },
+      { "name": "V2 Implementation Spec", "path": "docs/V2_IMPLEMENTATION_SPEC.md" },
+      { "name": "V2 Rollout Guide", "path": "docs/V2_ROLLOUT_GUIDE.md" }
+    ]
+  },
+  "security": {
+    "policy": "SECURITY.md"
+  }
+}

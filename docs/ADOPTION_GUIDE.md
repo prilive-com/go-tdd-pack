@@ -1,364 +1,258 @@
-# Adoption guide for new projects
+# Adoption Guide — Prilive Go TDD Pack v2.0
 
-For a developer bringing `go-claude-starter` into a Go project from
-scratch (or near-scratch). If you already have an extensive
-`.claude/` directory you want to merge with, see
-`docs/INTEGRATION_GUIDE.md` instead — that doc covers the merge case.
+> **For new adopters.** Step-by-step install and verification path.
+> Read once; you should not need to come back after your first review
+> cycle runs successfully.
 
-This doc is the short, action-oriented path for fresh adoption.
-
----
-
-## What you get
-
-The pack ships:
-
-- **Hooks** that gate dangerous actions (force-push, hooks bypass,
-  `--no-verify`, secrets in commits, dangerous bash) and enforce TDD
-  discipline on high-stakes paths
-- **Skills** (`go-tdd-feature`, `go-tdd-bugfix`, `/second-opinion`,
-  `go-modernize`, etc.) that drive the model through proven
-  workflows
-- **Rules** (`.claude/rules/*.md`) that the model reads as standing
-  guidance for Go style, testing, security, and CI discipline
-- **Templates** (`.tdd/templates/*`) for the artifacts the workflows
-  produce: spec plans, red proofs, green proofs, research packets,
-  disposition matrices
-
-Everything is opt-in or default-safe. Hooks deny only on documented
-violations; skills run when invoked or when their auto-fire conditions
-are met; rules apply when the model judges them relevant.
+If you're moving from a v1.x ceremony install, just replace the pack
+files (this guide also serves as the v1.x→v2.0 cutover). v2.0 does
+not read v1.x state.
 
 ---
 
-## Install (5 minutes)
-
-### Step 1 — Copy the pack into your project
+## Step 1 — Prerequisites
 
 ```bash
-cd your-go-project
-git checkout -b chore/adopt-go-claude-starter
-
-# Clone the starter elsewhere
-git clone <starter-pack-url> /tmp/starter
-
-# Copy the relevant directories
-cp -r /tmp/starter/.claude .claude
-cp -r /tmp/starter/.tdd .tdd
-cp -r /tmp/starter/scripts scripts
-cp -r /tmp/starter/docs docs
-
-# Optional: copy CLAUDE.md if you do not have one
-[ -f CLAUDE.md ] || cp /tmp/starter/CLAUDE.md.template CLAUDE.md
+claude --version   # need 2.1.89 or newer
+codex --version    # need 0.125 or newer
+go version         # need 1.22 or newer
+git --version      # need 2.25 or newer
+bash --version     # need 4 or newer
+jq --version       # need 1.6 or newer
 ```
 
-### Step 2 — Set the project name
+If anything is missing:
 
-Edit `.tdd/tdd-config.json` and set `project_name` to your project's
-short name. This appears in audit logs and hook deny messages.
+- **Claude Code:** https://docs.claude.com/en/docs/claude-code
+- **Codex CLI:** install per https://github.com/openai/codex, then `codex login`
+- **Go:** https://go.dev/dl/
+- **bash/jq on macOS:** `brew install bash jq`
 
-### Step 3 — Calibrate Tier 1 paths
-
-Open `.tdd/tdd-config.json` and look at `tier1_path_regexes`. The
-default list covers common high-stakes patterns:
-- `internal/.../auth|authorization|rbac|policy|security|crypto|secret|session|token` directories
-- `internal/.../payment|billing|invoice|ledger|accounting|balance` directories
-- `internal/.../migration|database|storage|repository|transaction` directories
-- Migration SQL files
-- Destructive `cmd/*` tools
-
-**Tier 1 paths get the full TDD ceremony** (3 operator approval gates,
-mandatory `/second-opinion` review, commit-time validation). Edit
-the regex list to match YOUR project's high-stakes paths. Do not
-add paths that don't actually need the ceremony — friction backfires
-when applied indiscriminately.
-
-If your project has no high-stakes paths (e.g., a CLI tool, a static
-site generator), set `tier1_path_regexes: []`. The pack still works;
-it just won't enforce ceremony anywhere. Tier 2 (lighter discipline)
-applies to all production Go code outside Tier 1.
-
-### Step 4 — Verify
+Authenticate Codex:
 
 ```bash
-bash scripts/tdd-test-hooks.sh
-# Expect: Results: 86 passed, 0 failed
+codex login
 ```
 
-If you see failures, the pack is mis-installed or you have a `jq` /
-`bash` version mismatch. The output names which test failed.
+If you have ChatGPT Plus/Pro/Team, Codex usage is free under your
+subscription. Otherwise an OpenAI API key works (per-token billing).
 
-### Step 5 — Commit
+---
+
+## Step 2 — Install recommended Go tooling
+
+The pack's tool grounding works best when these are on PATH. Without
+them, the pack degrades gracefully — Codex sees `NOT INSTALLED` in
+the prompt and softens related recommendations — but review quality
+is lower.
 
 ```bash
-git add .claude .tdd scripts docs
-git commit -m "chore: adopt go-claude-starter"
+go install honnef.co/go/tools/cmd/staticcheck@latest
+go install golang.org/x/vuln/cmd/govulncheck@latest
+
+# golangci-lint v2 — official install:
+curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+  | sh -s -- -b $(go env GOPATH)/bin
 ```
 
-You're done. Open Claude Code in the repo and the pack is active.
+Verify everything is on PATH:
 
----
-
-## Your first Tier 1 cycle (the full ceremony)
-
-This is what happens when you ask Claude to change a Tier 1 path
-(e.g., `internal/auth/handler.go`).
-
-### 1. Spec phase
-
-Claude invokes the `go-tdd-feature` (or `go-tdd-bugfix`) skill,
-which writes a spec to `.tdd/current-plan.md`. It pauses and asks
-you to reply.
-
-You reply: `APPROVED SPEC` (or plain `APPROVED`). The model sets
-`Human approved spec: yes` in the plan.
-
-### 2. Red phase
-
-The model writes failing tests, runs them to confirm they fail,
-captures verbatim output to `.tdd/red-proof.md`, and sets
-`Red phase confirmed: yes`. Then pauses and asks you again.
-
-You reply: `APPROVED GREEN` (or plain `APPROVED`). The model sets
-`Green phase authorized: yes`. The hook now permits production-code
-edits to Tier 1 paths.
-
-### 3. Green phase
-
-The model writes the production code. Tests go from RED to PASS.
-The model captures `.tdd/green-proof.md`, then runs `/second-opinion
-diff` for a cross-model review of the staged diff. It writes an
-adjudication artifact (`.tdd/second-opinion-completed.md`) and
-pauses.
-
-You read the diff and the adjudication. You reply: `APPROVED
-IMPLEMENTATION` (or plain `APPROVED`). The model sets
-`Implementation reviewed: yes`. The commit gate (`gate-tier1-commit.sh`)
-now permits `git commit`.
-
-### 4. Commit
-
-Claude runs `git commit -m "green(<id>): <description>"`. The hook
-validates all four markers + green-proof + fresh adjudication. If
-all pass, commit lands.
-
-That's the full ceremony. Roughly 30–60 minutes including thinking
-time. The friction is the point; you reserve it for paths where a
-silent regression would cause real damage.
-
-For non-Tier-1 paths, none of this applies. Standard Go discipline
-(linters, race detector, normal code review) covers them.
-
----
-
-## v1.6.0 features — opt in when ready
-
-Three flags in `.tdd/tdd-config.json` `second_opinion` block:
-
-```json
-"second_opinion": {
-  "model_tier1": "gpt-5.5",
-  "model_default": "gpt-5.5",
-  "fallback_model": "gpt-5.4",
-  "require_research_packet_tier1": false,
-  "require_pass_a_tier1": false,
-  "require_disposition_matrix_tier1": false
-}
+```bash
+which staticcheck govulncheck golangci-lint
 ```
 
-All three default `false`. Default behavior is solid. Flip flags as
-your team is ready.
+If `not found`, ensure `$(go env GOPATH)/bin` is in `PATH`. On most
+shells:
 
-### Flag 1: `require_disposition_matrix_tier1` (recommended week 1)
-
-Replaces free-form `/second-opinion` rebuttal text with a structured
-matrix where every Codex finding gets a row with mandatory
-Disposition column. Mechanical improvement, no LLM behavior change,
-zero risk. Flip first.
-
-### Flag 2: `require_research_packet_tier1` (recommended week 2)
-
-For Tier 1 plans, requires a `.tdd/research-packet.md` with ≥3
-authoritative sources cited. Anchors `/second-opinion` review against
-the same evidence the implementer consulted.
-
-Adds 5–10 minutes of writing to each Tier 1 plan. Flip if your team
-values formalized spec-phase research; skip if your domain doesn't
-need it.
-
-### Flag 3: `require_pass_a_tier1` (later, after own validation)
-
-Codex generates its own independent design BEFORE seeing Claude's
-plan ("Pass A"), then compares the plan against its own design.
-Anchoring-resistant review.
-
-The mechanism is empirically motivated by 2025–2026 multi-agent
-review literature, but **codebase-specific value is unproven for
-your project**. Don't flip blindly.
-
-**Validation path:**
-1. Keep the flag off.
-2. On a real Tier 1 cycle, set `SECOND_OPINION_PASS_A_DISABLE=0`
-   explicitly (it's already 0 by default; this is just to be sure)
-   and trigger Pass A by ensuring a research packet exists at
-   `.tdd/research-packet.md` before invoking `/second-opinion plan`.
-3. Read the generated `.tdd/codex/independent-design.md`. Does it
-   propose anything Claude's plan missed?
-4. If yes, flip the flag on your project. If no, leave it off and
-   try again on a future cycle.
-
-**Killswitch:** `export SECOND_OPINION_PASS_A_DISABLE=1` turns Pass A
-off entirely (skill skips, hook skips its check). Useful when Pass A
-produces noise on a particular cycle (e.g., pure refactors).
-
----
-
-## What's safe vs what's unproven
-
-| Component | Status |
-|---|---|
-| Force-push / no-verify / dangerous-bash hooks | Proven across many projects; safe |
-| Secret-scanner | Proven; safe |
-| Pipefail guard (catches `go build \| head` masking exit code) | Proven on real bugs; safe |
-| TDD ceremony (4 markers, 3 operator gates) | Proven; safe |
-| Phase-aware test policy (no test edits after red confirmed) | Proven; safe |
-| Integration guards (commit-time regex) | Mechanism proven; project-specific guard quality is your responsibility |
-| `/second-opinion` cross-model review | Proven; safe |
-| Disposition matrix (structural improvement on rebuttal) | Mechanical; safe |
-| Research packet (spec-phase discipline) | Mechanical; safe |
-| Closure check (verifies findings → implementation) | Mechanical; safe |
-| Codebase-grep invitation in Codex prompt | Mechanism in place; effectiveness depends on Codex's tool use in your repo |
-| **Pass A blind independent design** | **Mechanism validated; codebase-specific value unproven. Validate on your first cycle before flipping the flag.** |
-
----
-
-## Integration guards — adding your project's invariants
-
-`.tdd/tdd-config.json` `integration_guards` array is a project-level
-list of "no API X outside file Y" invariants. The commit gate greps
-the repo against each guard on Tier 1 commits and denies on violations
-outside `allowed_globs`.
-
-Default array is empty. Add guards as you find bugs that grep could
-have caught. Each guard should link to the bug it would have caught.
-
-Example shape:
-
-```json
-"integration_guards": [
-  {
-    "name": "no_direct_db_access_outside_repo_layer",
-    "pattern": "(?:Conn|DB)\\.(?:Exec|Query|QueryRow)",
-    "severity": "deny",
-    "allowed_globs": [
-      "internal/repository/**/*.go",
-      "internal/migrations/**/*.go",
-      "**/*_test.go"
-    ],
-    "rationale": "All DB calls must route through the repository layer (project ADR #007)"
-  }
-]
+```bash
+echo 'export PATH="$HOME/go/bin:$PATH"' >> ~/.bashrc
 ```
 
-See `.claude/rules/go-integration-guards.md` for the decision tree
-(test first, type safety second, guard third) and the full schema.
-
-**Important:** guards are FALLBACK protection. If you can write an
-integration test or refactor toward type safety to catch the same
-class of bug, do that instead. Use guards only when neither option
-fits.
+Open a new terminal so the change takes effect.
 
 ---
 
-## Common gotchas
+## Step 3 — Install the pack
 
-### "Hook denied my edit, what now?"
+```bash
+git clone https://github.com/prilive-com/go-tdd-pack.git /tmp/go-tdd-pack
+cd ~/your-go-project
 
-The deny message tells you which marker is missing or which artifact
-is stale. Read the `<claude-directive>` block — it lists the specific
-fix.
+cp -R /tmp/go-tdd-pack/hooks .
+cp -R /tmp/go-tdd-pack/runner .
+cp -R /tmp/go-tdd-pack/prompts .
+cp -R /tmp/go-tdd-pack/schemas .
+cp -R /tmp/go-tdd-pack/test .
+cp /tmp/go-tdd-pack/tdd-pack.toml .
+cp /tmp/go-tdd-pack/CLAUDE.md .
+cp /tmp/go-tdd-pack/AGENTS.md .
 
-Most common causes:
-- Missing M1 (spec not approved): operator hasn't said `APPROVED SPEC`
-- Missing M2 (red proof not done): write tests, capture red-proof.md,
-  set marker
-- Missing M3 (green not authorized): operator hasn't said
-  `APPROVED GREEN`
-- Missing M4 (impl not reviewed): operator hasn't said
-  `APPROVED IMPLEMENTATION` after seeing the diff
-- Stale `/second-opinion` adjudication (>60min): re-run
+chmod +x hooks/*.sh runner/*.sh test/smoke-*.sh
+```
 
-### "I want to edit a test mid-green"
-
-Phase-aware test policy denies this by default (the documented
-"don't edit tests in green phase" rule). Workflow to return to red:
-1. Operator authorizes return-to-red explicitly
-2. Set `Red phase confirmed: no` in plan
-3. Edit the test
-4. Re-run, capture new red-proof
-5. Set `Red phase confirmed: yes`
-6. Operator says `APPROVED GREEN` again
-7. Continue
-
-Emergency override: `test_file_policy.allow_after_red_confirmed: true`
-in tdd-config.json. Document reason in commit. Not for routine use.
-
-### "The Codex review (`/second-opinion`) returned no output"
-
-Check `.tdd/second-opinion-debug.log` for the actual error. Common
-causes:
-- Codex CLI not installed (run `make doctor`)
-- Codex not authenticated (run `codex login` for ChatGPT auth, or set
-  `CODEX_API_KEY` for API-key auth)
-- Network timeout (skill exits 0 silently, audit log records the skip)
-- Default model `gpt-5.5` requires ChatGPT auth; with API-key auth
-  the skill auto-falls-back to `gpt-5.4` (and doctor.sh warns about
-  this once)
-
-### "Hook deadlock — I cannot proceed and the documented flow doesn't help"
-
-STOP. Surface to the operator. Do NOT modify the hook script.
-Hook scripts are governance infrastructure; patching them mid-cycle
-is unauthorized modification.
-
-The escape hatches are:
-- Operator flips a config flag in tdd-config.json with reason in
-  commit
-- Operator sets a killswitch env var
-  (`SECOND_OPINION_DISABLE=1`, `TDD_COMMIT_GATE_DISABLE=1`,
-  `SECOND_OPINION_PASS_A_DISABLE=1`)
-- Real bug → upstream fix
-
-If a deadlock happens, the hook design is wrong, not your workflow.
-Report it.
+Then **merge the hook registration** from
+`/tmp/go-tdd-pack/.claude/settings.json` into your project's
+`.claude/settings.json`. Do NOT blind-overwrite — your project may
+have other hooks. Full merge procedure in
+[`V2_ROLLOUT_GUIDE.md`](V2_ROLLOUT_GUIDE.md) §2.
 
 ---
 
-## Where to read more
+## Step 4 — Verify the install
 
-| Topic | File |
-|---|---|
-| TDD discipline rules | `.claude/rules/go-tdd.md` |
-| Full TDD workflow (the 21-step cycle) | `docs/process/tdd_workflow.md` |
-| `/second-opinion` v1.6.0 design rationale | `docs/specs/second-opinion-v1.6.0-spec.md` |
-| TDD gate redesign rationale | `docs/specs/tdd-gate-conflict-resolution-spec.md` |
-| Integration guards | `.claude/rules/go-integration-guards.md` |
-| Hook smoke tests | `scripts/tdd-test-hooks.sh` |
-| Pack maintenance + design choices | `MAINTAINING.md` |
+Three smoke tests, in order. Stop and fix at the first failure.
+
+```bash
+bash test/smoke-v2-phase2.sh        # ~1s, no Codex calls, 25 checks
+bash test/smoke-tool-grounding.sh   # ~2s, no Codex calls, 12 fixture checks
+bash test/smoke-v2-mvp.sh           # ~30s, 1 real Codex call
+```
+
+Expected results:
+
+- `v2.0 PHASE 2 SMOKE — PASS (25 checks)`
+- `TOOL-GROUNDING SMOKE — PASS (12 checks)`
+- `v2.0 MVP SMOKE — PASS`
+
+If the first two fail, the install is broken — check that scripts have
+executable bits and the hook paths in `.claude/settings.json` are correct.
+
+If the MVP smoke fails on dirty tree, commit or stash your changes
+first (it adds an HTML comment to README.md as a fixture and refuses to
+run if other changes are present).
 
 ---
 
-## Summary in one paragraph
+## Step 5 — Try a real change
 
-Copy `.claude/`, `.tdd/`, `scripts/`, `docs/` into your repo. Set
-`project_name` and adjust `tier1_path_regexes` in
-`.tdd/tdd-config.json` to match your project's high-stakes paths.
-Run `bash scripts/tdd-test-hooks.sh` (expect 86 passing). Use
-Claude Code normally — non-Tier-1 work is unaffected; Tier 1 work
-follows the documented 3-gate ceremony. Keep v1.6.0 flags off
-initially. Flip the disposition-matrix flag in week 1 (zero risk).
-Flip the research-packet flag in week 2 if your team is willing.
-Validate Pass A on your first real Tier 1 cycle before flipping its
-flag. If a hook denies unexpectedly, read the stderr message — every
-deny includes the specific fix. Never modify hook scripts to make a
-deny go away; STOP and surface to the operator instead.
+Open Claude Code in your project:
+
+```bash
+cd ~/your-go-project
+claude
+```
+
+Ask Claude to make a small change:
+
+```
+Add a small Add function in math.go that returns a + b, and a test.
+```
+
+Claude writes the code. About 5 seconds after Claude's edits settle,
+the pack runs Codex in the background. You won't see anything happen —
+that's by design.
+
+If everything works, you'll see one of two outcomes:
+
+- **Silent convergence:** Claude continues, you get the finished
+  feature. Codex approved.
+- **Escalation:** A short A/B/V message appears if Claude and Codex
+  can't converge across all rounds. Pick A, B, or V.
+
+To see the most recent review state at any time, ask Claude
+"show me the latest review" — it reads `.tdd/reviews/state.json`
+and the latest cycle directory.
+
+---
+
+## Step 6 — Configure (optional)
+
+The default `tdd-pack.toml` is tuned for maximum review quality:
+
+```toml
+[review]
+max_rounds = 5            # escalate after 5 rounds without convergence
+coalesce_ms = 5000        # 5s edit-settle window
+
+[codex]
+model = ""                # empty = use Codex CLI's current default
+reasoning_effort = "xhigh"
+web_search = "live"
+
+[severity]
+min_surface = "nit"       # Claude sees every finding
+
+[disable]
+env_var = "PRILIVE_REVIEW_DISABLE"
+```
+
+Adjust if your priorities differ. Common tweaks:
+
+- `reasoning_effort = "high"` — faster cycles, slightly lower quality
+- `web_search = "disabled"` — if your environment forbids egress
+- `max_rounds = 3` — quicker escalation when convergence stalls
+
+Full config reference: [`INTEGRATION_GUIDE.md`](INTEGRATION_GUIDE.md).
+
+---
+
+## Step 7 — Monorepo / unusual layouts
+
+If your repo is a monorepo with multiple `go.mod` files at any depth,
+nested modules, or polyglot, the pack auto-detects via diff-driven
+discovery. You don't need to configure anything — see
+[`MONOREPO_ADOPTION_GUIDE.md`](MONOREPO_ADOPTION_GUIDE.md) for details.
+
+---
+
+## Daily workflow
+
+There isn't one. The pack runs automatically on every meaningful Go
+edit. Your interaction is:
+
+- Write code with Claude normally.
+- If you see an escalation, choose A / B / V.
+- If you want to see the latest review, ask Claude "show me the latest
+  review".
+
+That's it.
+
+---
+
+## Emergency switch
+
+```bash
+export PRILIVE_REVIEW_DISABLE=1
+```
+
+Disables the pack for the current shell. Unset to re-enable.
+
+Use this if Codex auth breaks, you're in the middle of a big refactor
+and don't want review yet, or the pack misbehaves.
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| No review after edits | Codex CLI not authenticated | `codex login` |
+| "NOT INSTALLED" lines in reviews | staticcheck/govulncheck/golangci-lint missing from PATH | See Step 2 |
+| Reviews very slow | xhigh reasoning on a large monorepo | Drop `reasoning_effort = "high"` |
+| Always escalates | Real disagreement; system working as designed | Use A/B/V to decide |
+| "no module-affecting files" on every review | Pack run from above your Go project | Run Claude from inside the project root |
+| Stale `.tdd/runner.lock` blocking | Previous runner crashed | `rm -f .tdd/runner.lock` |
+
+---
+
+## What to expect over time
+
+- **First few cycles:** A few escalations as Codex calibrates to your
+  code style.
+- **Steady state:** Most cycles converge silently. Escalations happen
+  on real design disagreements.
+- **Long term:** You stop noticing the pack except when it catches a
+  real bug before you ship.
+
+---
+
+## Next steps
+
+- Read [`AI_DEVELOPER_GUIDE.md`](AI_DEVELOPER_GUIDE.md) — what your AI
+  assistant should know about working under v2.0.
+- Skim [`INTEGRATION_GUIDE.md`](INTEGRATION_GUIDE.md) if you want to
+  understand the hook/runner mechanics.
+
+---
+
+_Last updated: 2026-05-18 for v2.0._

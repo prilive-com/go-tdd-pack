@@ -1,523 +1,420 @@
-# Integration guide
+# Integration Guide — Prilive Go TDD Pack v2.0
 
-For developers who already use Claude Code in their Go project and
-want to merge `go-claude-starter` into what they have.
-
-You are NOT starting from zero. You have:
-
-- An existing `.claude/` folder with your own settings, rules, skills,
-  agents, or hooks.
-- Your own project rules in `CLAUDE.md` (or similar file).
-- Project-specific tools, scripts, or CI jobs.
-
-You want to keep what works for your project AND add what is missing
-from this starter.
+> **Audience:** Adopters who want to understand or customize the
+> integration between Claude Code, Codex CLI, and the pack's
+> hooks/runner.
+>
+> If you just want to install and use the pack, read
+> [`ADOPTION_GUIDE.md`](ADOPTION_GUIDE.md) first. This is the deep dive.
 
 ---
 
-## Step 0 — Before you change anything
+## Architecture overview
 
-1. Make sure your repo is clean: `git status` shows no changes.
-2. Create a new branch for the integration work:
-
-   ```bash
-   git checkout -b chore/integrate-go-claude-starter
-   ```
-
-3. Clone our starter to a separate folder so you can compare files
-   side by side:
-
-   ```bash
-   git clone --depth 1 \
-     ssh://git@gt.devopspoint.io:2244/prompts/go-projects-claude-starter.git \
-     /tmp/go-claude-starter-ref
-   ```
-
-4. Install the required local tools:
-
-   ```bash
-   cd /tmp/go-claude-starter-ref
-   make doctor
-   ```
-
-   If any **required** tool is missing (red `MISS`), install it first.
-   Recommended tools (yellow `WARN`) can be installed later.
-
-5. Read this whole guide before you start moving files.
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ Claude Code session                                              │
+│                                                                  │
+│   User prompt                                                    │
+│      ↓                                                           │
+│   Claude (you) writes/edits Go file                              │
+│      ↓                                                           │
+│   PostToolUse hook fires:                                        │
+│     hooks/post-edit-review.sh  (async, returns in <50ms)         │
+│       ↓                                                          │
+│       └─→ runner/review-runner.sh (background, detached)         │
+│            ↓                                                     │
+│            single-flight flock (.tdd/runner.lock)                │
+│            ↓                                                     │
+│            coalesce.sh  (waits 5s for edits to settle)           │
+│            ↓                                                     │
+│            check state.json — resume in-progress cycle?          │
+│            ↓ (no resume)                                         │
+│            git diff --quiet HEAD — anything to review?           │
+│            ↓                                                     │
+│            runner/tool-grounding.sh                              │
+│              (gofmt, go vet, staticcheck, golangci-lint,         │
+│               govulncheck — per affected Go module)              │
+│            ↓                                                     │
+│            codex-round1.sh                                       │
+│              (codex exec --output-schema → round-1.json)         │
+│            ↓                                                     │
+│            on request_changes: state.json updated, runner exits  │
+│            ↓                                                     │
+│            (next runner invocation, via Stop hook below)         │
+│            codex-round-n.sh (rounds 2+)                          │
+│              (codex exec resume → VERDICT: APPROVE|REQUEST_CHANGES│
+│            ↓                                                     │
+│            convergence (silent) or escalation (A/B/V message)    │
+│                                                                  │
+│   inject-findings.sh runs on PostToolUse and UserPromptSubmit:   │
+│     reads .tdd/reviews/state.json                                │
+│     emits additionalContext if findings pending                  │
+│       ↓                                                          │
+│   Claude reads findings in next system reminder                  │
+│   Claude addresses findings; Stop hook captures the response     │
+│   Stop hook fires runner again for next round                    │
+└─────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## Step 1 — Read these files first (45 minutes)
+## Hook setup
 
-These are the files that explain what our system does and why. Read
-them in this order:
+The pack registers four PostToolUse hooks plus Stop and SessionStart
+via `.claude/settings.json`:
 
-| # | File | What you learn |
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/hooks/post-edit-review.sh", "async": true, "timeout": 5 },
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/hooks/inject-findings.sh", "timeout": 3 }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/hooks/post-edit-review.sh", "async": true, "timeout": 5 }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [
+        { "type": "command", "command": "$CLAUDE_PROJECT_DIR/hooks/inject-findings.sh", "timeout": 3 }
+      ]}
+    ],
+    "Stop": [
+      { "hooks": [
+        { "type": "command", "command": "$CLAUDE_PROJECT_DIR/hooks/stop-fingerprint.sh", "timeout": 5 }
+      ]}
+    ],
+    "SessionStart": [
+      { "hooks": [
+        { "type": "command", "command": "$CLAUDE_PROJECT_DIR/hooks/session-start.sh", "timeout": 3 }
+      ]}
+    ]
+  }
+}
+```
+
+### Hook responsibilities
+
+| Hook | Trigger | Job |
 |---|---|---|
-| 1 | `README.md` | What the starter is. The 6 defense layers. Runtime requirements. First-run notes. |
-| 2 | `CLAUDE.md` | Operating rules for any Go project. Two workflow modes (Tier 1 vs other). Skills and agents that exist. |
-| 3 | `MAINTAINING.md` | Why each design choice was made. Hook output styles. Subagent model choice. Tool installation policy. |
-| 4 | `docs/process/tdd_workflow.md` | The full TDD tier model. The two human gates. Bypass procedure. |
-| 5 | `examples/tdd-cycle/README.md` | A worked Tier 1 cycle from spec to refactor. Read all 4 stage folders too. |
-
-After this you should be able to answer:
-
-- What is a "Tier 1" path?
-- What does the `require-tdd-state.sh` hook do?
-- Why does our pack ship hooks AND CI gates (defense in depth)?
-- What is the difference between `.claude/settings.json` and `.mcp.json`?
-
-If you cannot answer any of these, re-read the file.
+| `post-edit-review.sh` | PostToolUse (Edit/Write/MultiEdit/Bash) | Fire-and-forget background runner. Returns in <50ms. |
+| `inject-findings.sh` | PostToolUse + UserPromptSubmit | Read state.json; emit additionalContext if findings pending. |
+| `stop-fingerprint.sh` | Stop | Capture Claude's last response, re-fire runner for next round, fingerprint-check for missed edits. |
+| `session-start.sh` | SessionStart | On resume, notify about paused cycles. |
 
 ---
 
-## Step 2 — Read these files deeper (60 minutes)
+## Codex CLI invocation
 
-Now read the actual implementation. You do not need to memorize every
-line — the goal is to know **what is in each folder** so you can
-compare with your project later.
-
-### `.claude/` (auto-loaded by Claude CLI)
-
-| File or folder | Read for |
-|---|---|
-| `.claude/settings.json` | Permissions list (`allow`/`ask`/`deny`). Hook registration. MCP allowlist. |
-| `.claude/allowed-modules.txt` | The slopsquat allowlist. The first line is a placeholder for your org prefix. |
-| `.claude/VERSION` | Current pack version. |
-| `.claude/rules/*.md` | 9 rule files. Read `go-style.md`, `go-pgx.md`, `go-tdd.md`, `go-ai-bloat.md`, `go-security.md`, `go-testing.md`. |
-| `.claude/agents/*.md` | 6 reviewer subagents. Note `model: opus` on all of them — keep this. |
-| `.claude/skills/*/SKILL.md` | 13 skills. Pay attention to `description:` and `disable-model-invocation:` lines. |
-| `.claude/hooks/*.sh` | 8 safety scripts. The most important: `guard-dangerous-bash.sh`, `scan-for-secrets.sh`, `require-tdd-state.sh`. |
-
-### `.tdd/` (read by hooks, not by Claude CLI)
-
-| File | Read for |
-|---|---|
-| `.tdd/tdd-config.json` | The active Tier 1 path regexes and prompt keywords. Service preset by default. |
-| `.tdd/presets/{service,library,cli}.json` | Alternate presets to copy over `.tdd/tdd-config.json`. |
-| `.tdd/templates/*.md` | feature-plan, bugfix-plan, red-proof skeletons. |
-| `.tdd/current-plan.md` | The state file (idle by default). |
-
-### `.mcp.json` (project root, NOT inside `.claude/`)
-
-The project MCP server list. Currently only `gopls`. The matching
-allowlist line is `enabledMcpjsonServers: ["gopls"]` inside
-`.claude/settings.json`.
-
-### `scripts/`
-
-| Script | Used for |
-|---|---|
-| `scripts/doctor.sh` | Verify required + recommended tools. |
-| `scripts/install-go-tools.sh` | Install Go developer tools (with `*_VERSION` env var override). |
-| `scripts/check-allowed-modules.sh` | CI: slopsquat enforcement. Default `CHECK_TRANSITIVE_MODULES=true` (strict). |
-| `scripts/check-tdd-ceremony.sh` | CI: every `green(<id>):` commit on Tier 1 must have a `red(<id>):` before it. |
-| `scripts/check-tdd-state-clean.sh` | CI: refuse merge if `.tdd/current-plan.md` is mid-cycle. |
-| `scripts/tdd-test-hooks.sh` | Smoke test for hooks. Should report 27/27 passing. |
-| `scripts/ci-go.sh` | The full CI sequence as a local script (`make ci`). |
-
-### CI files
-
-- `.gitlab-ci.yml` — for self-hosted GitLab.
-- `.github/workflows/ci.yml` — for GitHub Actions.
-
-You only need one of these in your project. Delete the other.
-
----
-
-## Step 3 — Look at your existing project
-
-Now open your own project. For each item in our starter, answer:
-
-- **Do I have this?** Yes / No / Partial
-- **Is mine better, equal, or weaker?**
-- **Action:** Keep mine / Take theirs / Merge
-
-Make a table. Example:
-
-| Item | Have it? | Mine vs theirs | Action |
-|---|---|---|---|
-| `guard-dangerous-bash.sh` | Yes (5 patterns) | Theirs (28 patterns, incident-cited) is stronger | **Take theirs** |
-| `CLAUDE.md` go style rules | No | — | **Take theirs** |
-| `CLAUDE.md` project domain rules | Yes (custom for our service) | Mine is unique | **Keep mine** |
-| `.claude/agents/order-reviewer.md` | Yes (project-specific) | Not in theirs | **Keep mine** |
-| `.tdd/tdd-config.json` | No | — | **Take theirs (service preset)** |
-| `.claude/allowed-modules.txt` | Partial (only own org) | Theirs has Go ecosystem defaults | **Merge** |
-
-This table is the input to Step 4.
-
----
-
-## Step 4 — What to keep, take, or merge
-
-### Always TAKE FROM OURS (security-critical, you should not be weaker than us)
-
-- `.claude/hooks/guard-dangerous-bash.sh` — 28+ deny patterns,
-  incident-cited.
-- `.claude/hooks/scan-for-secrets.sh` — content-based, gitleaks-aware,
-  with straddle reconstruction.
-- `.claude/hooks/guard-protected-files.sh` — `.env` and migration
-  guard.
-- `.claude/hooks/require-tdd-state.sh` — Tier 1 blocking gate with
-  defensive multi-path extraction.
-- `.claude/hooks/route-to-tdd.sh` — UserPromptSubmit advisory router.
-- `.claude/hooks/gofmt-after-edit.sh` — auto-format.
-- `.claude/hooks/detect-ai-bloat.sh` — AI-bloat advisory.
-- `.claude/hooks/session-context.sh` — session start orientation.
-- `.tdd/templates/*.md` — feature-plan, bugfix-plan, red-proof skeletons.
-- `scripts/check-tdd-ceremony.sh` — CI red-before-green check.
-- `scripts/check-tdd-state-clean.sh` — CI dirty-state check.
-- `scripts/check-allowed-modules.sh` — CI slopsquat check.
-- `scripts/doctor.sh` — tool inventory.
-- `scripts/tdd-test-hooks.sh` — hook smoke test.
-
-If any of these already exist in your project, **back them up** to
-`/tmp/old-hooks-backup/` and then replace with ours. Do not try to
-mix-and-match logic inside one script — take the whole file.
-
-### Always KEEP YOURS (project-specific)
-
-- Project domain rules in `CLAUDE.md` (your business invariants,
-  your domain model, your team conventions).
-- Project-specific reviewer agents (e.g. `order-reviewer`,
-  `payment-reviewer`, `auth-reviewer` for your specific service).
-- Project-specific skills (e.g. `replay-restarter`,
-  `backtest-runner` — workflows that only make sense for your
-  project).
-- Project-specific path-scoped rules (e.g. `paths/internal/orders.md`
-  — rules that apply only when editing that path).
-- Your CI jobs that test your specific business logic.
-- Your `go.mod`, your code, your tests, your migrations.
-
-### MERGE these
-
-#### `CLAUDE.md`
-
-Our `CLAUDE.md` has generic Go rules. Your `CLAUDE.md` has project
-rules. Merge by section:
-
-```markdown
-# CLAUDE.md — <Your Project Name>
-
-## Project context              <- KEEP YOURS
-... your project description ...
-
-## Two workflow modes          <- TAKE OURS
-... Tier 1 vs other ...
-
-## Project-specific rules      <- KEEP YOURS
-... business invariants ...
-
-## Go quality rules (always)   <- TAKE OURS, then add yours
-... ours ...
-... your additions ...
-
-## Testing rules               <- TAKE OURS
-...
-
-## Skills available            <- MERGE: ours + yours
-- (our 13 skills)
-- replay-restarter (yours)
-- backtest-runner (yours)
-
-## Reviewer agents available   <- MERGE: ours + yours
-- (our 6 agents)
-- order-reviewer (yours)
-- payment-reviewer (yours)
-```
-
-After merging `CLAUDE.md`, merge `AGENTS.md` separately for Codex /
-cross-agent guidance. Do not copy `CLAUDE.md` over `AGENTS.md` unless
-your project intentionally wants identical instructions for both tools.
-
-#### `.claude/settings.json`
-
-Take ours as the base. Then add any **extra** entries from yours:
-
-- `permissions.allow` — add your project's safe Bash commands
-  (e.g. `Bash(make migrate)`, `Bash(./scripts/replay *)`).
-- `permissions.ask` — add anything risky-but-needed for your project.
-- `permissions.deny` — keep all of ours, add any project-specific
-  denies.
-- `hooks` section — keep all of ours. Add your project hooks AFTER
-  ours (so ours run first as the safety floor).
-
-**Do not** weaken our `permissions.deny` list. Do not add
-`enableAllProjectMcpServers: true` (CVE-2025-59536).
-
-#### `.tdd/tdd-config.json`
-
-Start from `.tdd/presets/service.json` (or `library.json` / `cli.json`
-depending on your project type). Then:
-
-- Add your project-specific Tier 1 paths to `tier1_path_regexes`.
-  Example: `(^|/)internal/orders/.*\\.go$` for an orders service.
-- Add your project-specific keywords to `tier1_prompt_keywords`.
-  Example: `"order"`, `"fill"`, `"position"` for a trading bot.
-- Set `project_name` to your real project name.
-
-#### `.claude/allowed-modules.txt`
-
-Take ours as the base. Then:
-
-- Add your org/group prefix as the first line. Example:
-  `gitlab.your-domain.com/your-team/`.
-- Add any extra modules your project uses that are not on the
-  default list.
-
-Verify on `pkg.go.dev` that every module is real before adding.
-
-#### `.claude/rules/`
-
-Take all 9 of our rule files. Add your own project-domain rule files
-(e.g. `orders.md`, `auth.md`). Reference them from your merged
-`CLAUDE.md`.
-
-#### `.claude/agents/`
-
-Take all 6 of our reviewer agents. Add your project-specific agents
-(e.g. `order-reviewer.md`). Reference them from your merged
-`CLAUDE.md`.
-
-#### `.claude/skills/`
-
-Take all 13 of our skills. Add your project-specific skills with
-their own `SKILL.md` files. Apply the same description-quality rules
-(see `.claude/skills/specify/SKILL.md` and any of our other skills as
-templates).
-
-#### `.golangci.yml`
-
-If you do not have a v2 lint config: take ours as-is.
-
-If you have a v1 config: take ours and add your project-specific
-linter overrides under the v2 structure (`linters.settings.<name>`,
-`linters.exclusions.rules`). Do not mix v1 and v2 keys (this is the
-exact bug v1.1.1 fixed in our pack).
-
-#### `Makefile`
-
-If you have a Makefile: keep yours, add any of our targets you do not
-have (`doctor`, `tdd-test`, `tools`, `ci`). If our `deadcode` target
-clashes with yours, prefer the version with `DEADCODE_ALLOW_FAILURE`
-support.
-
-#### CI files (`.gitlab-ci.yml` or `.github/workflows/ci.yml`)
-
-Take ours as the base. Then add your project-specific CI jobs (build,
-deploy, integration tests, etc.) as additional jobs. Make sure these
-new jobs are not blocking our safety jobs — keep `tdd-state-clean`,
-`tdd-ceremony-check`, `allowed-modules`, `operating-rules-present` as
-required.
-
----
-
-## Step 5 — Step-by-step merge
-
-Do this on the integration branch.
+Round 1 uses `codex exec` with strict schema:
 
 ```bash
-# In your project, on the integration branch.
-cd /path/to/your-project
+codex exec \
+  --dangerously-bypass-approvals-and-sandbox \
+  -c 'web_search="live"' \
+  -c 'model_reasoning_effort="xhigh"' \
+  --output-schema schemas/findings-round1.schema.json \
+  -o .tdd/reviews/<cycle>/round-1.json \
+  --skip-git-repo-check \
+  --cd "$PROJECT_DIR" \
+  <prompt>
+```
 
-# 1. Back up your current setup so you can compare or revert.
-mkdir -p /tmp/integration-backup
-cp -r .claude .mcp.json CLAUDE.md AGENTS.md REVIEW.md \
-      .gitlab-ci.yml .github .golangci.yml Makefile \
-      scripts /tmp/integration-backup/ 2>/dev/null || true
+Rounds 2+ resume the same session:
 
-# 2. Copy each of our files in. For files that need merging,
-#    edit in place after the copy.
+```bash
+codex exec resume <session-id> \
+  --dangerously-bypass-approvals-and-sandbox \
+  -c 'web_search="live"' \
+  <prompt>
+```
 
-REF=/tmp/go-claude-starter-ref
+**Important flag notes** (gotchas verified during build):
 
-# Files to take wholesale (security-critical):
-mkdir -p .claude/hooks .tdd/templates .tdd/presets scripts docs/process
-cp $REF/.claude/hooks/*.sh           .claude/hooks/
-cp $REF/.tdd/templates/*.md          .tdd/templates/
-cp $REF/.tdd/presets/*.json          .tdd/presets/
-cp $REF/scripts/check-tdd-ceremony.sh \
-   $REF/scripts/check-tdd-state-clean.sh \
-   $REF/scripts/check-allowed-modules.sh \
-   $REF/scripts/doctor.sh \
-   $REF/scripts/tdd-test-hooks.sh \
-   $REF/scripts/install-go-tools.sh \
-   $REF/scripts/changed-go-files.sh \
-   $REF/scripts/check-deadcode.sh \
-   $REF/scripts/ci-go.sh             scripts/
-cp $REF/docs/process/tdd_workflow.md docs/process/
-chmod +x .claude/hooks/*.sh scripts/*.sh
+- `--dangerously-bypass-approvals-and-sandbox` is a **subcommand** flag.
+  `--ask-for-approval` and `--search` (top-level only) won't work on
+  `codex exec`. Use `-c web_search="live"` instead of `--search`.
+- `--output-schema` and `-o` are **silently ignored** on `codex exec resume`
+  (openai/codex#14343, #12538). Rounds 2+ parse free-form text via
+  `runner/extract-verdict.sh` for `VERDICT: APPROVE | REQUEST_CHANGES`.
 
-# Files to take as base, then merge yours into:
-#    .claude/settings.json
-#    .claude/allowed-modules.txt
-#    .tdd/tdd-config.json
-#    CLAUDE.md
-#    AGENTS.md
-#    REVIEW.md
-#    .gitlab-ci.yml or .github/workflows/ci.yml
-#    .golangci.yml
-#    Makefile
-#
-# For each, open both versions side by side and merge by hand.
+### Why no sandbox
 
-# 3. Take our reviewer agents AND skills (do not lose yours):
-cp -r $REF/.claude/agents/*.md  .claude/agents/   # add ours alongside yours
-cp -r $REF/.claude/skills/*     .claude/skills/   # add ours alongside yours
-cp -r $REF/.claude/rules/*.md   .claude/rules/    # add ours alongside yours
+User requirement: Codex must have capability parity with Claude. The
+"no project writes" rule lives in `prompts/codex-system.md` and is
+verified by smoke tests (`test/smoke-v2-mvp.sh` and
+`test/smoke-v2-phase2-live.sh` both hash-check all project files
+before and after each cycle).
 
-# 4. Pick the right TDD preset for your project type.
-#    Service is the default; switch if needed:
-# cp .tdd/presets/library.json .tdd/tdd-config.json
-# cp .tdd/presets/cli.json     .tdd/tdd-config.json
+---
 
-# 5. If you do not have one yet, copy our state file:
-cp $REF/.tdd/current-plan.md .tdd/current-plan.md
+## Configuration reference
 
-# 6. Set version and check.
-cp $REF/.claude/VERSION .claude/VERSION
+The pack reads `tdd-pack.toml` from the user's repo root. Defaults:
 
-# 7. Review AGENTS.md separately for Codex / cross-agent guidance.
-test -s AGENTS.md
+```toml
+[review]
+# Maximum debate rounds before escalating to the user.
+# Min 2, max 8. Quality-tuned default 5.
+max_rounds = 5
+
+# Wait this long after the last edit before firing review (milliseconds).
+coalesce_ms = 5000
+
+# Also fire the runner when the Stop hook sees the working tree changed
+# since the last review (belt-and-suspenders).
+stop_hook_fingerprint = true
+
+# Declared but not enforced — informational only.
+max_codex_calls_per_cycle = 8
+max_cycle_minutes = 30
+
+[codex]
+# Empty = use Codex CLI's current default model.
+model = ""
+
+# Reasoning effort: low | medium | high | xhigh
+# xhigh is supported by ChatGPT Plus/Pro/Team auth.
+reasoning_effort = "xhigh"
+
+# "live" enables web search; "disabled" omits.
+web_search = "live"
+
+[tdd]
+# "criterion" = Codex flags missing tests as findings (non-blocking)
+# "off"       = TDD is not checked
+enforce_as = "criterion"
+
+[severity]
+# Minimum severity surfaced to Claude. Set to "nit" to show everything.
+min_surface = "nit"
+
+# Severity at which a finding becomes "must address" for convergence.
+must_address = "major"
+
+[gate]
+# OPT-IN git hooks (not auto-installed).
+git_pre_commit = false
+git_pre_push = false
+
+[audit]
+debates_jsonl = ".tdd/reviews/debates.jsonl"
+keep_transcripts = true
+
+[disable]
+env_var = "PRILIVE_REVIEW_DISABLE"
 ```
 
 ---
 
-## Step 6 — Test the merge
+## Environment variables
 
-```bash
-# 1. JSON files all parse.
-for f in $(find . -name '*.json' -not -path './.git/*'); do jq empty "$f"; done
-
-# 2. Shell scripts have no syntax errors.
-for f in .claude/hooks/*.sh scripts/*.sh; do bash -n "$f"; done
-
-# 3. YAML files all parse.
-python3 -c "import yaml; [yaml.safe_load(open(f)) for f in ['.gitlab-ci.yml','.github/workflows/ci.yml','.golangci.yml']]"
-
-# 4. Operating-rule files are present.
-test -s CLAUDE.md && test -s AGENTS.md && echo OK
-
-# 5. Required tools are installed.
-make doctor
-
-# 6. Hook smoke tests pass (target 27/27).
-make tdd-test
-
-# 7. Try a dangerous command — should be denied.
-echo '{"tool_input":{"command":"git commit --no-verify"}}' \
-  | bash .claude/hooks/guard-dangerous-bash.sh \
-  | jq -r '.hookSpecificOutput.permissionDecision'
-# Expected: deny
-
-# 8. Try a Tier 1 path edit — should be blocked (no plan file with
-#    approvals yet).
-echo '{"tool_input":{"file_path":"internal/payments/charge.go"}}' \
-  | bash .claude/hooks/require-tdd-state.sh
-echo "exit code: $?"
-# Expected: exit 2 with a <claude-directive> message
-```
-
-If anything fails, stop and fix before going further.
-
----
-
-## Step 7 — Open a CI run
-
-```bash
-git add -A
-git commit -m "chore: integrate go-claude-starter v1.2.0"
-git push -u origin chore/integrate-go-claude-starter
-```
-
-Open the merge request / pull request. CI should run:
-
-- `fmt-vet`
-- `operating-rules-present`
-- `test`
-- `staticcheck`
-- `deadcode` (advisory)
-- `allowed-modules`
-- `govulncheck`
-- `golangci-lint`
-- `tdd-ceremony-check` (only fires if you touched a Tier 1 path)
-- `tdd-state-clean`
-
-Fix anything red. Most common first-time issues:
-
-| Symptom | Likely cause | Fix |
+| Variable | Purpose | Default |
 |---|---|---|
-| `allowed-modules` fails | Your existing `go.mod` requires modules not on our default allowlist | Add the module prefixes to `.claude/allowed-modules.txt` after verifying each on `pkg.go.dev` |
-| `golangci-lint` fails on settings | Your old v1 config keys clashed with our v2 keys | Re-read Step 4 → `.golangci.yml` section |
-| `operating-rules-present` fails | `CLAUDE.md` or `AGENTS.md` is missing/empty after the merge | Restore the missing file from the starter or merge your project-specific version |
-| `tdd-ceremony-check` fails | You touched a Tier 1 path without the `red(<id>):` → `green(<id>):` pattern | Either redo the work as a proper TDD cycle, or document the bypass in the MR description (see `docs/process/tdd_workflow.md` "Bypass procedure") |
-| Hook says "jq missing" | jq is not in CI image | Add `apk add --no-cache jq` (Alpine) or `apt-get install -y jq` (Debian) to your CI before the hook step |
+| `PRILIVE_REVIEW_DISABLE` | `1` = disable pack for current shell | unset |
+| `CLAUDE_PROJECT_DIR` | Project root (set by Claude Code) | working dir |
+| `TOOL_GROUNDING_TIMEOUT_S` | Per-tool timeout in tool-grounding.sh | 60 |
+| `TOOL_GROUNDING_CHAR_CAP` | Per-tool output cap in bytes | 4000 |
+| `TOOL_GROUNDING_TOTAL_CAP` | Total tool-grounding output cap | 30000 |
+
+The pack does **not** read `PRILIVE_BASE_REF`, `PRILIVE_WORKSPACE_MODE`,
+`PRILIVE_BUILD_SYSTEM`, `PRILIVE_FOLLOW_SUBMODULES`, or
+`PRILIVE_COMMIT_GATE` — those appear in some consultant docs but are
+not implemented in this version.
 
 ---
 
-## Step 8 — Tell your team
+## State files
 
-After the merge lands on `main`, tell your team:
+The pack writes to `.tdd/` under your repo root:
 
-- "We integrated `go-claude-starter v1.2.0`."
-- "Read `CLAUDE.md` — there are new rules for Tier 1 paths."
-- "If your edit gets blocked by `[require-tdd-state]`, read
-  `docs/process/tdd_workflow.md` — you need to use the
-  `go-tdd-feature` or `go-tdd-bugfix` skill."
-- "First time you run `claude`, accept the gopls MCP approval prompt
-  once."
-- "Run `make doctor` to check your local tools."
+```
+.tdd/
+├── .last-edit                       # mtime touched on every edit (coalesce)
+├── .last-fingerprint                # working-tree hash for Stop-hook fingerprint check
+├── runner.lock                      # flock for single-flight runner
+└── reviews/
+    ├── state.json                   # current cycle pointer (status, round, cycle_id)
+    ├── debates.jsonl                # append-only audit log
+    └── <cycle_id>/
+        ├── diff.patch               # diff under review
+        ├── round-1.json             # schema-valid round-1 findings
+        ├── round-2.txt              # free-form round-2 output
+        ├── round-N.txt              # rounds 3..max
+        ├── claude-response-2.txt    # captured Claude response between rounds
+        ├── claude-response-N.txt
+        ├── codex-session-id         # Codex thread id for resume
+        └── codex-stderr.log         # stderr from codex invocations
+```
 
----
-
-## When to re-integrate
-
-This starter is not a plugin. Updates do not flow in automatically.
-
-Plan to re-integrate every quarter:
-
-1. `git fetch` the starter repo at `/tmp/go-claude-starter-ref`.
-2. Read its `CHANGELOG.md` (or `git log`) since your last
-   integration.
-3. Compare changed files. Apply the changes that matter to your
-   project.
-4. Bump `.claude/VERSION` in your project to match.
-5. Run all 8 tests from Step 6.
-6. Open a "chore: refresh go-claude-starter to vX.Y.Z" MR.
+`.tdd/` is the pack's bookkeeping. The "no project writes" rule for
+Codex explicitly allows writes here. Claude is denied write access to
+`.tdd/reviews/**` via `permissions.deny` in `.claude/settings.json`.
 
 ---
 
-## When NOT to use this starter
+## State machine
 
-- Your project is not in Go (use a sibling starter like
-  `py-claude-starter` or write your own).
-- Your project has no Claude Code use (this starter is only useful
-  with Claude Code).
-- Your project is a tiny throwaway script (the ceremony cost is too
-  high for the value).
+```
+              ┌──────────┐
+              │   idle   │ ◄────────────────┐
+              └────┬─────┘                  │
+                   │ user edits             │
+                   ▼                        │
+              ┌──────────┐                  │
+              │ reviewing│ (round 1)        │
+              └────┬─────┘                  │
+                   │                        │
+        ┌──────────┴──────────┐             │
+        ▼                     ▼             │
+   verdict=approve    verdict=request_changes
+        │                     │             │
+        ▼                     ▼             │
+   ┌──────────┐         ┌─────────────────┐ │
+   │converged │         │request_changes  │ │
+   └────┬─────┘         │(waiting for     │ │
+        │               │ Claude response)│ │
+        │               └────┬────────────┘ │
+        │                    │              │
+        │                    │ Stop hook captures response
+        │                    │ → runner re-fires
+        │                    ▼              │
+        │               (back to reviewing) │
+        │                                   │
+        └───────────────────────────────────┘
+
+   Terminal states:
+     converged   — runner approved silently
+     failed      — codex crashed or returned invalid output
+     escalated   — max_rounds reached without convergence
+     abandoned   — operator marked cycle abandoned
+```
 
 ---
 
-## Questions to ask the team if unclear
+## Smoke tests
 
-- Which CI platform do we use — GitLab or GitHub Actions? (Pick one,
-  delete the other.)
-- What is our org/group module prefix for `allowed-modules.txt`?
-- Which paths in our project are Tier 1 (high stakes)?
-- Do we have project-specific reviewer agents that should run
-  alongside the generic ones?
-- Do we have any local tools or shell aliases that should be in the
-  permission allow list?
-- Who owns `.claude/hooks/` updates? (Usually the team lead or
-  security champion.)
+The pack ships three smoke suites:
+
+```bash
+# Structural — no Codex calls, ~1-2s, 25 + 12 checks
+bash test/smoke-v2-phase2.sh
+bash test/smoke-tool-grounding.sh
+
+# Round 1 with real Codex — ~30s, ~5-15K tokens
+bash test/smoke-v2-mvp.sh
+
+# Multi-round live — ~60s, ~20-40K tokens, exercises Phase 2 end-to-end
+bash test/smoke-v2-phase2-live.sh
+
+# Escalation path (opt-in, more expensive)
+SMOKE_PHASE2_ESCALATE=1 bash test/smoke-v2-phase2-live.sh
+```
+
+Run **structural smokes** on every change, **MVP smoke** on every
+runner orchestration change, **live multi-round** on changes to the
+Phase 2 resume logic, and **escalation** before each release.
 
 ---
 
-## Help
+## CI/CD compatibility
 
-If something is unclear:
+The pack is interactive-first. CI integration is not built in but is
+possible by invoking the runner directly:
 
-- Re-read the file mentioned in the table at the top.
-- Open the matching file in `/tmp/go-claude-starter-ref` and compare
-  with your project.
-- Ask in the team chat with a link to the specific file or rule.
+```yaml
+- name: Generate tool grounding
+  run: bash runner/tool-grounding.sh > grounding.md
+```
+
+You'd then need to script the Codex invocation yourself; the runner
+currently expects a Claude Code session for the Stop-hook capture
+mechanism that drives rounds 2+. CI use is best treated as a future
+feature, not a current one.
+
+---
+
+## Common customizations
+
+### Tune for speed instead of quality
+
+```toml
+[codex]
+reasoning_effort = "high"     # was xhigh
+web_search = "disabled"
+
+[review]
+max_rounds = 3
+```
+
+### Pin a specific Codex model
+
+```toml
+[codex]
+model = "gpt-5-codex"   # or any specific version
+```
+
+Otherwise leave empty to track Codex CLI's current default.
+
+### Quieter findings
+
+```toml
+[severity]
+min_surface = "minor"   # drops nits from Claude's context
+```
+
+### Disable a specific tool
+
+The pack auto-skips tools that aren't installed. If you want a tool not
+to run even when installed, uninstall it from your project's PATH or
+relocate it outside the Go bin path.
+
+---
+
+## Debugging
+
+If something isn't working:
+
+1. **Is `PRILIVE_REVIEW_DISABLE` set?** `echo $PRILIVE_REVIEW_DISABLE`
+   — must be empty or `0`.
+2. **Is Codex authenticated?** Run `codex login` and check
+   `~/.codex/auth.json` exists.
+3. **Are hooks registered?** `jq '.hooks' .claude/settings.json`
+   should show the entries above.
+4. **Is the runner being invoked?** Make an edit, then check
+   `ls -la .tdd/reviews/` — should show a new cycle dir.
+5. **Does Codex run?** Inspect the cycle's `round-1.json` — should be
+   non-empty JSON. If empty, check `codex-stderr.log` in the same dir.
+6. **Are findings being injected?** Check `.tdd/reviews/state.json`
+   — `"status": "request_changes"` means findings exist.
+
+To clear stale state:
+
+```bash
+rm -f .tdd/runner.lock
+jq -n --arg ts "$(date -u +%FT%TZ)" \
+  '{cycle_id:"", status:"abandoned", round:0, updated_at:$ts}' \
+  > .tdd/reviews/state.json
+```
+
+---
+
+## Further reading
+
+- [`ADOPTION_GUIDE.md`](ADOPTION_GUIDE.md) — install and verify
+- [`AI_DEVELOPER_GUIDE.md`](AI_DEVELOPER_GUIDE.md) — for AI assistants
+- [`MONOREPO_ADOPTION_GUIDE.md`](MONOREPO_ADOPTION_GUIDE.md) — monorepo specifics
+- [`V2_IMPLEMENTATION_SPEC.md`](V2_IMPLEMENTATION_SPEC.md) — full design spec
+- [`V2_ROLLOUT_GUIDE.md`](V2_ROLLOUT_GUIDE.md) — install instructions for AI assistants
+
+---
+
+_Last updated: 2026-05-18 for v2.0._

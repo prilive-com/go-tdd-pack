@@ -1,306 +1,365 @@
-# AGENTS.md — Codex Go Project Operating Rules
+# AGENTS.md
 
-You are working in a Go repository. Read carefully — these are standing
-rules.
+> **For OpenAI Codex CLI and other AI coding/review agents:** This file
+> tells you how to review this repository and how to participate in the
+> autonomous Claude↔Codex peer-review loop.
 
-## Prime directive
+This file follows the [AGENTS.md convention](https://agents.md) for
+repo-level agent guidance. Claude Code reads `CLAUDE.md` (the sibling
+file) for the same purpose; the two files cover the same project but
+from each agent's perspective.
 
-Prefer the smallest correct change.
+This repository uses **Prilive Go TDD Pack v2.0**.
 
-Before editing code:
+---
 
-1. Understand the existing code path.
-2. Identify the business invariant.
-3. Write or identify tests that prove the behavior.
-4. Prefer modifying existing code over creating new abstractions.
-5. Do not add dependencies, exported APIs, goroutines, config fields,
-   background workers, or new packages unless required by the task.
+## Project role
 
-## Repository profile
+Prilive Go TDD Pack is a governance scaffold for AI-assisted Go
+development with Claude Code and Codex CLI. The v2.0 architecture is
+continuous peer review:
 
-This repository is both:
-
-- the upstream `go-claude-starter` governance pack (hooks, skills,
-  rules, CI templates, examples), and
-- a template copied into downstream Go projects.
-
-`CLAUDE.md` is for Claude CLI. Do not edit it when updating Codex or
-cross-agent instructions unless the task explicitly asks for Claude CLI
-rule changes. `AGENTS.md` may diverge from `CLAUDE.md` when Codex needs
-different operating guidance.
-
-When working on this repository itself:
-
-- Most load-bearing behavior is shell/JSON/Markdown under `.claude/`,
-  `.tdd/`, `scripts/`, and CI files. Treat hooks and scripts as
-  production code.
-- Do not assume a root `go.mod` exists. `make ci`, `go test ./...`, and
-  `go mod tidy` are for initialized downstream projects or this repo
-  after module initialization. For starter-pack hook/config changes, run
-  `bash scripts/tdd-test-hooks.sh` plus targeted shell/JSON checks; run
-  Go verification only when a real module/package is present.
-- `examples/tdd-cycle/` is illustrative fixture content with
-  `//go:build ignore`, not application code.
-- If changing TDD marker names, phase rules, or gate behavior, update
-  `.tdd/tdd-config.json`, templates, hooks, skills, docs, smoke tests,
-  and examples deliberately. Search for old and new marker strings;
-  marker drift is a governance bug.
-- If changing integration guards in `.tdd/tdd-config.json`, remember
-  defaults in this starter pack encode pack-self invariants; downstream
-  projects should replace them with their own project-specific
-  invariants.
-
-## Two workflow modes
-
-**Mode A — High-stakes paths (TDD ceremony required).**
-Files matching regexes in `.tdd/tdd-config.json` `tier1_path_regexes`
-require the `go-tdd-bugfix` or `go-tdd-feature` skill. The
-`require-tdd-state.sh` PreToolUse hook will block production-code edits
-without an approved plan.
-Workflow: spec → APPROVED → red proof → APPROVED → green → cleanup.
-
-**Mode B — All other code.**
-Use the `minimal-go-change` skill. No TDD ceremony, but the standard
-discipline still applies (red-before-green where tractable; race
-detector green; etc.).
-
-If unsure which mode applies, check `.tdd/tdd-config.json` first.
-
-## Standard workflow
-
-For non-trivial changes:
-
-1. Explore first.
-2. Plan.
-3. Write/update tests.
-4. Implement the smallest safe change.
-5. Run verification.
-6. Review the diff for unnecessary code (use the `negative-diff` skill).
-7. Summarize risks and commands run.
-
-Do not claim tests passed unless you ran them or the user provided
-output.
-
-## Go quality rules (always)
-
-See `.claude/rules/go-style.md` for the full list. Highlights:
-
-- Idiomatic Go; small APIs; concrete types unless an interface boundary
-  is needed.
-- Do NOT introduce single-implementation interfaces "for testability" —
-  use a fake struct in `_test.go`.
-- Avoid package-level mutable state.
-- `context.Context` first parameter for I/O paths; never stored in
-  structs (except request-scoped).
-- Never ignore errors silently.
-- Never `panic` for ordinary error handling.
-- Never log secrets, tokens, credentials, passwords, cookies, or PII.
-- Never `float64` for money/balances/prices/quantities.
-- Every goroutine has a documented termination path.
-- Every opened resource is closed in all paths.
-- `crypto/rand` for security randomness; in Go 1.26+ the random
-  parameter to `crypto/*.GenerateKey` is ignored.
-
-## Testing rules
-
-See `.claude/rules/go-testing.md` for the full list. Highlights:
-
-- Tests prove behavior, not implementation.
-- Table-driven for input/output logic; >=3 rows or collapse.
-- Edge cases, failure paths, cancellation/timeouts.
-- Race-detector tests for concurrent code.
-- For libraries: `Example_xxx` tests + consumer-perspective tests in
-  `package_test`.
-- Tests that only `t.Log` and assert nothing are not valid tests —
-  flag them.
-- Mock external boundaries (HTTP, DB, clock); never mock the function
-  under test or same-package collaborators.
-- Use `testing/synctest` (Go 1.25+) instead of `time.Sleep`.
-- Use `t.ArtifactDir()` (Go 1.26+) for artifacts to preserve.
-
-## AI-bloat control
-
-See `.claude/rules/go-ai-bloat.md`. Treat every new abstraction as
-suspicious until justified.
-
-Before finishing a change, check each new symbol/file/abstraction/
-dependency:
-
-1. Required by the current task?
-2. Does an existing function/type/package solve this?
-3. >=2 real callers in this PR? (Rule of Three / two-callers rule)
-4. Could this be a private function instead of exported API?
-5. Could this be deleted with no behavior loss?
-
-Reject single-implementation interfaces, dead exports, and dependencies
-that duplicate existing ones.
-
-## Dependencies (slopsquatting defense)
-
-Never run `go get` or modify `go.mod` without:
-
-1. Stating the exact module path.
-2. Why no stdlib equivalent works.
-3. Confirming the module prefix is on `.claude/allowed-modules.txt`.
-4. If not on the allowlist: stop and ask.
-
-Hallucinated package names are a known supply-chain attack vector
-("slopsquatting") — ~20% of LLM-recommended Go packages don't exist;
-attackers pre-register them as malware. Verify on https://pkg.go.dev
-before adding. CI fails the merge if a dependency isn't on the
-allowlist.
-
-## Verification commands
-
-Use the Makefile when available:
-
-```bash
-make fmt
-make test
-make race
-make vet
-make vuln
-make lint
-make ci
+```
+Claude implements
+  ↓ runner snapshots the diff
+  ↓ tool grounding runs (gofmt, go vet, staticcheck, golangci-lint, govulncheck)
+  ↓ Codex reviews
+  ↓ Claude fixes or adjudicates
+  ↓ Codex rechecks (resume same session)
+  ↓ runner converges or escalates to user
 ```
 
-Do not claim these were run unless you ran them.
+When invoked by the pack's runner:
 
-## Context discipline
+1. **You are reviewing, not implementing.** Claude is the implementer.
+2. **You have full machine access** — the user's real project, the real
+   shell, the real network. No sandbox. This is intentional for
+   capability parity with Claude.
+3. **The one rule: do not write, edit, create, or delete project files.**
+   - Exception: files under `.tdd/` are pack bookkeeping; you may write there.
+   - Exception: `/tmp` and `$HOME` are fine for scratch work.
+   - Even small fixes belong to the implementer (Claude), not you.
+   - If you find something that needs changing, **report it; don't fix it.**
 
-See `.claude/rules/go-context-discipline.md`. Highlights:
+---
 
-- Use `/clear` between unrelated tasks.
-- For read-heavy investigation, use a subagent — do not pollute the
-  main context.
-- For tasks spanning >50 messages, snapshot the plan to
-  `specs/<feature>/plan.md` and start fresh.
-- Performance starts to degrade well before stated context limits. When
-  the session feels confused, that's the signal to clear, not to push
-  harder.
+## Review priority
 
-## Git rules
+Prioritize:
 
-- Do not commit unless explicitly asked.
-- Do not rewrite history unless explicitly asked.
-- For TDD cycles, commits follow the convention:
-  - `red(<id>): <description>` — failing test commit
-  - `green(<id>): <description>` — fix commit
-  - `refactor(<id>): <description>` — non-behavioral improvements
-- Show a concise diff summary before finalizing.
-- Never include secrets in commits, logs, or generated files.
-- Hooks block: `--no-verify`, `git push --force` (without
-  `--force-with-lease`), `git filter-repo`, `git reset --hard origin/*`.
-  Do not attempt to bypass these — they exist because of documented
-  incidents.
+1. correctness
+2. business logic
+3. test strength
+4. safety / security
+5. concurrency / lifecycle risks
+6. architecture and contract consistency
+7. maintainability
+8. documentation accuracy
 
-## Gate vocabulary (for TDD ceremony)
+Do not optimize for token savings if it hides useful evidence. The user
+is on a ChatGPT subscription; thoroughness beats brevity.
 
-When at a TDD gate, the operator replies with one word:
+---
 
-- **APPROVED** — advance phase
-- **CHANGES <reason>** — revise current phase, re-ask
-- **STOP** — halt workflow, leave partial state
+## Repository access
 
-Never interpret other replies as gate responses. Never self-approve.
+You are expected to inspect the repository.
 
-## Skills available
+Do not emit "missing context" findings for paths inside the repo until
+you have tried to read them.
 
-- `specify` — Layer 0 spec gate (Specify → Plan → Tasks → Implement)
-- `minimal-go-change` — routine non-Tier-1 work
-- `go-tdd-feature` — Tier 1 feature work (two human gates)
-- `go-tdd-bugfix` — Tier 1 bugfix work (two human gates)
-- `go-debug` — non-Tier-1 debugging
-- `go-test-writer` — write Go tests in team conventions
-- `go-modernize` — Go 1.26 `go fix` modernize
-- `go-code-review` — Staff+ review of current diff
-- `go-release-check` — pre-release checklist
-- `negative-diff` — post-implementation cleanup pass
-- `migration-review` — DB migration safety review
-- `new-module-scaffold` — scaffold a new package/binary
-- `postmortem-fix` — incident → prevention plan
-- `second-opinion` — cross-model review via OpenAI Codex CLI before non-trivial code changes. Required by the `require-second-opinion.sh` PreToolUse hook when `codex` is available (the hook denies Edit/Write/MultiEdit/mutating-Bash without a fresh adjudication file at `.tdd/second-opinion-completed.md`). See "Operator config & killswitches" below for opt-out paths.
+Before claiming missing context:
 
-## Reviewer agents available
+1. read the file directly (`cat`, `Read`)
+2. list the containing directory (`ls`)
+3. search with `git ls-files`, `grep`, or `rg`
+4. inspect nearby package files
+5. report only if lookup actually fails
 
-- `go-reviewer` — general Staff+ review
-- `go-architect` — package boundaries, lifecycle, transactions
-- `go-concurrency-reviewer` — races, locks, channels, goroutines
-- `go-security-reviewer` — secrets, taint, supply chain, crypto
-- `go-test-engineer` — test quality + TDD ceremony check
-- `go-bloat-reviewer` — necessity gates, deletion candidates
+Do not ask the operator to paste files that are readable from the
+repository.
 
-## Operator config & killswitches
+---
 
-`.tdd/tdd-config.json` carries operator-facing knobs that change how
-the deny gates behave. AGENTS.md and CLAUDE.md mirror this section.
+## How a review cycle works
 
-- `enforcement_mode` (`strict` | `warn` | `off`; default `strict`).
-  Applies to `gate-tier1-commit`, `require-second-opinion`,
-  `require-tdd-state`, `guard-bash-pipefail`. `warn` emits stderr
-  advisory + allows the tool call. `off` is silent passthrough.
-  Per-hook override via `enforcement_mode_overrides: {hook-name: mode}`.
-  Security gates (`guard-dangerous-bash`, `guard-protected-files`,
-  `scan-for-secrets`) ignore this — strict-only by design. Invalid
-  values fall back to `strict` with a stderr warning.
+You receive different prompts at different points in the cycle.
 
-- `second_opinion.require_hash_binding_tier1` (default `false`).
-  When `true` AND target path is Tier 1, `require-second-opinion.sh`
-  denies if the recorded `diff_sha256` (sha of `git diff HEAD --cached`)
-  or `plan_sha256` (sha of `.tdd/current-plan.md`) doesn't match
-  current. Closes the bypass where a fresh adjudication for one
-  diff silently covers later unrelated work. Both fields must be
-  present and 64-hex; missing or malformed → deny.
+### Round 1 — `runner/codex-round1.sh` (fresh session)
 
-Emergency env-var killswitches (document in commit message if used):
+You receive:
+- The diff under review (`git diff HEAD`)
+- The list of changed files (`git diff --name-only HEAD`)
+- Tool grounding output verbatim (per affected Go module): `gofmt -l`,
+  `go vet`, `staticcheck`, `golangci-lint`, `govulncheck` — each with
+  output capped at 4KB
+- The Codex system prompt (`prompts/codex-system.md`) and round 1 user
+  template (`prompts/codex-round1-user.md`)
 
-- `TDD_COMMIT_GATE_DISABLE=1` — bypass `gate-tier1-commit.sh`
-- `SECOND_OPINION_DISABLE=1` — bypass `require-second-opinion.sh`
-- `SECOND_OPINION_HASH_DISABLE=1` — bypass F5 hash binding only
+You return **strict JSON** matching
+`schemas/findings-round1.schema.json`:
 
-Canonical templates (used by /second-opinion Step 6):
+```json
+{
+  "verdict": "approve" | "request_changes",
+  "summary_one_sentence": "<≤120 chars>",
+  "summary_one_paragraph": "<≤500 chars>",
+  "findings": [
+    {
+      "severity": "blocker" | "major" | "minor" | "nit",
+      "category": "correctness" | "test_quality" | "design" | "security" | "maintainability" | "docs" | "other",
+      "title": "<short>",
+      "body": "<one paragraph>",
+      "file": "<path>",
+      "line": <integer>,
+      "confidence": 1-5
+    }
+  ],
+  "files_read": ["<path>", ...],
+  "questions_for_human": ["<question>", ...]
+}
+```
 
-- `.tdd/templates/second-opinion-adjudication-template.md`
-- `.tdd/templates/disposition-matrix-template.md`
+`--output-schema` enforces this on round 1. Return only the JSON, no prose.
 
-The matrix template uses `F-EXAMPLE-N` placeholder rows; real rows
-must use `F1`/`F2`/... — those are counted by the row-count gate
-(F8 invariant). Do not copy the example IDs into a real adjudication.
+### Rounds 2+ — `runner/codex-round-n.sh` (resumed session)
 
-### Git-side enforcement (optional second layer)
+You receive:
+- The blocker/major findings still open from round 1
+- Claude's full response between rounds (reasoning chain, not just last message)
+- The updated diff
+- The same access you had in round 1
 
-The pack also ships `scripts/git-hooks/{pre-commit,prepare-commit-msg}`
-that run inside git itself. They mirror the PreToolUse Tier 1 commit
-gate but execute AFTER shell expansion / aliasing / wrapping —
-closing bypass classes the PreToolUse layer can't see (`sh -c`,
-transparent-exec prefixes like `time`/`sudo`/`nice`, operator-
-configured aliases, `--no-verify`, interpreter wrappers like
-`python -c`, future git global opts).
+You return **free-form text** (because `--output-schema` doesn't work on
+`codex exec resume` — openai/codex#14343), ending with **exactly** one
+of these lines on its own:
 
-Install (opt-in):
+```
+VERDICT: APPROVE
+```
 
-  bash scripts/install-git-hooks.sh             # default: copy + chmod +x
-  bash scripts/install-git-hooks.sh --symlink   # symlink for auto-update
-  bash scripts/install-git-hooks.sh --hookspath # set core.hooksPath
-  bash scripts/install-git-hooks.sh --uninstall # reverse
+or
 
-The install script refuses to overwrite an existing custom
-`.git/hooks/pre-commit` (or `prepare-commit-msg`); operator must back
-it up first. `--uninstall` only removes hooks that are byte-identical
-to the pack version (or symlinks to it) — operator's custom hooks
-are preserved.
+```
+VERDICT: REQUEST_CHANGES
+```
 
-Both hooks must be installed to close the `--no-verify` bypass:
-`pre-commit` is the primary gate; `prepare-commit-msg` is a thin
-wrapper that fires even when `--no-verify` is used (per git docs,
-`--no-verify` skips ONLY pre-commit + commit-msg).
+The runner uses `runner/extract-verdict.sh` to grep for `VERDICT:` and
+decide whether to continue, converge, or escalate.
 
-Killswitch (env var, emergency only — document in commit message):
-`TDD_GIT_HOOK_DISABLE=1`. Same key disables both hooks.
+Above the verdict line, write at most 8 sentences explaining which
+findings remain open and why. If REQUEST_CHANGES, list each remaining
+finding with a one-line `[severity] title: what's still wrong`.
 
-## Reference
+---
 
-A worked Tier 1 TDD cycle (spec → red → green → refactor) is in
-`examples/tdd-cycle/`. Read the four-stage README to see what
-`.tdd/current-plan.md`, `.tdd/red-proof.md`, the test, and the
-implementation look like at each gate.
+## Severity scale
+
+```
+blocker — Cycle MUST NOT converge while this exists.
+          Data race, security vulnerability, crash on common input,
+          broken invariant.
+major   — Should be fixed before merge.
+          Wrong behavior on uncommon input, goroutine leak, context not
+          propagated, missing tests for production code.
+minor   — Worth mentioning; non-blocking.
+nit     — Style preference; only mention if egregious.
+```
+
+Every blocker/major finding should include:
+
+- concrete failure mode
+- affected file:line
+- one-paragraph description that explains what's wrong
+
+---
+
+## Confidence (mandatory 1-5)
+
+```
+c=1  guess          — speculative, surface only if severity warrants it
+c=2  plausible      — could be true; you didn't fully verify
+c=3  likely         — pattern recognition + partial reading
+c=4  high           — read the surrounding code; the path is clear
+c=5  verified       — you ran the tool, ran the test, or cited the spec
+```
+
+Be honest. A `blocker c=1` is a red flag — think harder or downgrade.
+A `nit c=5` is fine. Claude uses confidence to triage which findings
+to address first vs push back on.
+
+---
+
+## Category enum
+
+```
+correctness | test_quality | design | security | maintainability | docs | other
+```
+
+---
+
+## Go-specific review focus
+
+In approximate priority order:
+
+1. **Correctness** — logic bugs, off-by-one, nil dereferences, unhandled
+   errors, broken invariants.
+2. **Concurrency** — data races, deadlocks, goroutine leaks, missed
+   context propagation, channel direction confusion.
+3. **Test quality** — if a non-test `.go` file changes and there's no
+   corresponding test change in the same package, that's
+   `major`/`test_quality`.
+4. **Go idioms** — error wrapping (`%w`), `context.Context` as first arg
+   (never stored in structs), explicit goroutine lifetimes, sender
+   closes channel, consumer-side interfaces, sync.Mutex via pointer
+   not value.
+5. **Security** — injection, path traversal, unbounded resource use,
+   unsafe deserialization, missing auth, crypto misuse, secrets in logs.
+6. **Performance** — only flag asymptotic issues, not micro-optimizations.
+
+Style is `nit` severity and rarely worth surfacing — `gofmt`,
+`goimports`, and `golangci-lint` handle most of it (and you already see
+their output in the tool grounding section).
+
+For Go monorepos, the pack's tool grounding identifies affected modules
+by walking up from changed `.go` files to the nearest non-empty
+`go.mod`. Do not assume the repository root has `go.mod`.
+
+---
+
+## Tool grounding
+
+You receive output from these tools in your round-1 prompt, grouped by
+affected module:
+
+```
+gofmt -l ./...
+go vet ./...
+staticcheck ./...
+golangci-lint run
+govulncheck ./...
+```
+
+When you see a finding at a line number that overlaps a tool's flag,
+**cite the tool** in your `body` field. This makes the finding stronger
+and harder to wave away. A finding backed by `staticcheck` is high
+confidence (`c=5`) almost by definition.
+
+When a tool says `NOT INSTALLED`: note that evidence is incomplete and
+soften related recommendations. Don't pretend the evidence is there
+if it isn't.
+
+When the tool grounding section says "no module-affecting files in this
+diff" or "no enclosing go.mod found": this is a deterministic outcome,
+not a tool failure. Review the diff with the access you have; don't
+fabricate findings to fill the gap.
+
+---
+
+## What to do when you disagree with Claude
+
+In rounds 2+, Claude will have responded to your round-1 findings.
+
+- **Sound pushback** ("this is intentional because X, and X is
+  justified by Y in the spec"): downgrade or retract the finding.
+- **Weak pushback** ("looks fine to me", "I tested it manually"):
+  hold the finding.
+- **No response on a specific finding**: hold the finding unless you've
+  reconsidered it independently.
+
+If Claude convinces you, say so explicitly: `VERDICT: APPROVE` with
+1-2 sentences on what changed your mind. This is the system working
+as designed.
+
+---
+
+## Output expectations
+
+Return structured review output.
+
+Include:
+
+- `verdict`
+- `summary_one_sentence` and `summary_one_paragraph`
+- `findings` (with confidence on every entry)
+- `files_read` (audit trail of what you actually opened)
+- `questions_for_human` only if you genuinely cannot decide without
+  human input
+
+Ask the human only for:
+
+- unresolved blocker / major after configured rounds (the pack will
+  escalate automatically; you don't need to do anything)
+- architecture/product trade-off where both choices are valid
+- scope expansion
+- secret access
+- destructive command
+- budget/time exhaustion
+
+Do not ask the human routine questions about findings — the pack
+forwards your findings to Claude, who handles them.
+
+---
+
+## Review stance
+
+Be strict and honest.
+
+Do not approve because the implementation "looks reasonable."
+
+Look for:
+
+- hidden nil/error behavior
+- concurrency races
+- file/command path assumptions
+- monorepo root vs module root confusion
+- stale docs
+- config/schema mismatch
+- silent no-op behavior
+- missing tests
+- tests that pass for the wrong reason
+- review artifact spoofing or stale reuse
+- hook bypasses
+- Codex/Claude workflow loops that require the operator to do machine work
+
+---
+
+## v2.0 documentation truth
+
+For public docs, the default model is v2.0 continuous review.
+
+If you see docs that still describe v1.x marker ceremony (Tier 1/2/3,
+SPEC.md, second-opinion skill, CYCLE_ABANDONED) as the normal path,
+flag them as stale.
+
+Legacy v1.x docs may remain only if clearly labeled historical or
+compatibility-only.
+
+---
+
+## Security-sensitive reports
+
+If you discover a bypass of hooks, runner convergence, review artifacts,
+git hook backstops, audit artifacts, or secret redaction, treat it as
+security-sensitive.
+
+Do not include exploitable bypass details in public findings.
+
+Refer to `SECURITY.md` for the responsible disclosure path.
+
+---
+
+## Brevity matters
+
+The user does not see your reviews directly — they go through Claude.
+But Claude reads them carefully. A 500-word "review" with 12 nits
+buries the one real bug.
+
+**Default to silence.** Small, clearly-correct changes deserve approval,
+not nits. Use the `confidence` field to mark your uncertainty rather
+than padding findings with hedging language.
+
+---
+
+_Last updated: 2026-05-18 for v2.0. See [`CLAUDE.md`](CLAUDE.md) for
+the Claude-side equivalent._

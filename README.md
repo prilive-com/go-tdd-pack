@@ -1,184 +1,291 @@
-# <project-name>
+<div align="center">
 
-<one-line description of this Go project>
+# Prilive Go TDD Pack
 
-This project was bootstrapped from
-[`go-claude-starter`](https://gitlab.your-domain.com/your-group/go-claude-starter)
-v1.3.1. The Claude Code governance layer (rules, skills, agents, hooks)
-loads automatically — no plugin install, no bootstrap script, no
-`pre-commit install`. **Full enforcement requires standard local tools
-(see Runtime requirements below); run `make doctor` to verify.**
+**Continuous silent peer review between Claude Code and OpenAI Codex CLI for Go projects.**
 
-> **Trust note.** This pack defines hooks that execute shell scripts on
-> every Bash/Edit/Write tool call. Only clone this starter from sources
-> you trust, and review `.claude/hooks/*.sh` the same way you would
-> review any code that runs on your machine. (See CVE-2025-59536 — an
-> earlier Claude Code vulnerability where untrusted project settings
-> could trigger code execution before the user accepted the trust
-> dialog.)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![DCO](https://img.shields.io/badge/DCO-signed--off-brightgreen)](CONTRIBUTING.md)
+[![Keep a Changelog](https://img.shields.io/badge/changelog-Keep%20a%20Changelog-orange)](CHANGELOG.md)
+<!-- TODO: add CI status badge once GitHub Actions is configured on the public repo -->
 
-## Runtime requirements
+**[Quickstart](#quickstart) · [How it works](#how-it-works) · [Install](#install) · [Monorepos](docs/MONOREPO_ADOPTION_GUIDE.md) · [Security](SECURITY.md)**
 
-**Required (without these, hooks fail closed loudly):**
+</div>
 
-- Claude Code (latest)
-- Go (1.26+)
-- Bash
-- jq
-- git
+---
 
-**Recommended (full enforcement / quality checks):**
+## The problem
 
-- gopls          (Go language server, exposed via the gopls MCP)
-- goimports      (import management; used by `gofmt-after-edit.sh`)
-- staticcheck    (static analysis; used in CI)
-- govulncheck    (vulnerability scanning; used in CI)
-- golangci-lint  (broad lint coverage; used in CI)
-- gitleaks       (content-based secret scanning; `scan-for-secrets.sh`
-                  falls back to a narrow regex set without it)
-- deadcode       (dead-code detection; advisory in CI)
+AI coding agents are fast, but prompt-only discipline breaks down. A model can decide that "this change is mechanical, no review needed" — and now the model is deciding whether its own safety process applies. That's not safe.
 
-Run `make doctor` to verify what's installed.
+Prilive Go TDD Pack v2.0 changes the default:
 
-## First-run note (MCP approval)
+> **Claude does not decide whether Codex review is needed. The runner does.**
 
-This starter ships a project-scoped MCP server (`gopls`) at `.mcp.json`.
-Per Anthropic's CVE-2025-59536 fix, Claude Code requires **explicit
-one-time user approval** before running any project MCP server, even
-when it appears in `enabledMcpjsonServers`.
+The pack runs continuous, silent peer review on every meaningful Go code change. Claude implements; Codex reviews; findings are silently injected into Claude's next turn; Claude addresses them or pushes back. The user only sees finished code, or — when Claude and Codex can't converge — a single A/B/V escalation question.
 
-The first time you run `claude` in the project, accept the gopls
-approval prompt (or run `/mcp` to enable it manually). After that,
-gopls loads automatically.
+---
 
-## Layout
+## What's different about this pack
+
+- **Codex runs with the same access as Claude** — full project read, full shell, full network, no sandbox, no copy. The "no project writes" rule lives in Codex's system prompt, verified by a smoke test, not by sandbox flags. Capability parity beats artificial restrictions for review quality.
+- **Tool-grounded** — `go vet`, `gofmt`, `staticcheck`, `golangci-lint`, and `govulncheck` run on every cycle. Their output goes verbatim into Codex's prompt so reviews cite tool evidence, not hallucinations.
+- **Monorepo-aware** — single-module repos, monorepos with multiple `go.mod` files at any depth, nested modules, polyglot repos, and Go files with no enclosing `go.mod` are all handled by a layout-agnostic affected-module algorithm. Discovery is driven by the diff, not by where the script is invoked from.
+- **Multi-round resume** — round 1 uses strict JSON schema; rounds 2+ resume the same Codex session via `codex exec resume`, so the reviewer remembers its prior analysis. Default cap: 5 rounds before escalation.
+- **Confidence-scored findings** — every finding includes a 1-5 confidence score so Claude can triage by certainty as well as severity. `[blocker/correctness c=4]` reads differently from `[blocker/correctness c=1]`.
+- **Quality-first defaults** — `reasoning_effort = "xhigh"`, full repo tree access via tools, no diff truncation, no cheap-model fallback. Token economy is not a constraint; review depth is.
+- **Free with a ChatGPT subscription** — Codex CLI uses your existing ChatGPT Plus/Pro/Team auth. No per-token billing if you're on a subscription.
+
+---
+
+## How it works
 
 ```
-.
-├── CLAUDE.md            # Operating rules (auto-loaded by Claude CLI)
-├── AGENTS.md            # Codex / cross-agent operating rules
-├── REVIEW.md            # Staff+ review rubric (used by go-reviewer agent)
-├── Makefile             # Convenience targets: make ci / make test / ...
-├── .mcp.json            # Project MCP servers (gopls). MUST be at repo root,
-│                        # not under .claude/ — Claude CLI only reads .mcp.json
-│                        # at the project root for project-scoped MCP.
-├── .claude/             # Claude CLI auto-loads this
-│   ├── settings.json    # Permissions + hook registration + MCP allowlist
-│   ├── allowed-modules.txt  # Slopsquat allowlist
-│   ├── rules/           # Loaded on demand from CLAUDE.md
-│   ├── agents/          # Reviewer subagents (auto-discovered)
-│   ├── skills/          # Workflow skills (auto-discovered)
-│   └── hooks/           # Safety hooks (registered via settings.json)
-├── .tdd/                # TDD ceremony state machine
-│   ├── tdd-config.json  # Tier 1 path regexes + required markers
-│   ├── current-plan.md  # Active cycle (idle by default)
-│   └── templates/       # feature-plan / bugfix-plan / red-proof
-├── specs/               # Layer 0 spec gate (Specify → Plan → Tasks)
-├── scripts/             # CI utilities + TDD smoke tests
-├── .gitlab-ci.yml       # GitLab CI (delete if you use GitHub Actions)
-├── .github/workflows/   # GitHub Actions (delete if you use GitLab)
-├── .golangci.yml        # Lint config
-└── docs/process/        # TDD workflow reference
+You ask Claude for a change
+  ↓
+Claude implements (Edit/Write/MultiEdit)
+  ↓
+PostToolUse hook fires the runner in background (returns in <50ms)
+  ↓
+Runner waits 5s for edits to settle (coalesce)
+  ↓
+Runner runs tool grounding per affected Go module:
+  gofmt -l, go vet, staticcheck, golangci-lint, govulncheck
+  ↓
+Codex round 1 — strict JSON via --output-schema
+  ↓
+  ├── approve → cycle converged → done (silent)
+  └── request_changes
+        ↓
+        Findings injected into Claude's next turn as additionalContext
+        ↓
+        Claude fixes silently OR writes a one-line rationale
+        ↓
+        Stop hook captures Claude's full response
+        ↓
+        Codex round 2 — resumes session, returns VERDICT: APPROVE | REQUEST_CHANGES
+        ↓
+        Repeat up to max_rounds (default 5)
+        ↓
+        If converged → done. If not → A/B/V escalation message to user.
 ```
 
-## How to use this
+The user sees: finished code, or one short escalation question.
 
-There are two paths:
+The user does NOT see: ceremony markers, plan files, approval prompts, per-edit progress updates.
 
-- **New Go project**: see "How to use this in a new project" below.
-- **Existing project that already has its own Claude Code setup**:
-  see [`docs/INTEGRATION_GUIDE.md`](docs/INTEGRATION_GUIDE.md) — a
-  step-by-step guide for merging this starter with your project's
-  existing rules, hooks, and tools without losing what already works.
+---
 
-## How to use this in a new project
+## Requirements
+
+**Required:**
+- [Claude Code](https://docs.claude.com/en/docs/claude-code) 2.1.89 or newer
+- [OpenAI Codex CLI](https://github.com/openai/codex) — install and authenticate with `codex login`
+- Go 1.22 or newer
+- Git 2.25 or newer
+- `bash` 4+, `jq` 1.6+
+
+**Recommended Go tooling** (the pack degrades gracefully if missing, showing `NOT INSTALLED` in Codex's prompt):
+- `staticcheck` — `go install honnef.co/go/tools/cmd/staticcheck@latest`
+- `golangci-lint` — see [install guide](https://golangci-lint.run/welcome/install/)
+- `govulncheck` — `go install golang.org/x/vuln/cmd/govulncheck@latest`
+
+The pack resolves tools from `PATH` and `$(go env GOPATH)/bin`.
+
+---
+
+## Install
+
+### Clone into an existing Go project
 
 ```bash
-git clone --depth 1 https://gitlab.your-domain.com/your-group/go-claude-starter.git my-service
-cd my-service
-rm -rf .git
-# Customize:
-#   - .tdd/tdd-config.json    project_name + tier1 regexes for your code
-#   - .claude/allowed-modules.txt   add your org/group prefix as the first line
-#   - README.md               replace the placeholders
-#   - Pick one CI: rm -rf .github/  (if GitLab) or rm .gitlab-ci.yml (if GitHub)
-go mod init <your-module-path>
-git init && git add . && git commit -m "Initial commit from go-claude-starter v1.0.0"
-git remote add origin <your-remote-url>
-git push -u origin main
+git clone https://github.com/prilive-com/go-tdd-pack.git /tmp/go-tdd-pack
+
+cp -R /tmp/go-tdd-pack/hooks .
+cp -R /tmp/go-tdd-pack/runner .
+cp -R /tmp/go-tdd-pack/prompts .
+cp -R /tmp/go-tdd-pack/schemas .
+cp -R /tmp/go-tdd-pack/test .
+cp /tmp/go-tdd-pack/tdd-pack.toml .
+cp /tmp/go-tdd-pack/CLAUDE.md .
+cp /tmp/go-tdd-pack/AGENTS.md .
+
+# Merge the hook entries from /tmp/go-tdd-pack/.claude/settings.json into
+# your project's .claude/settings.json (do NOT blind-overwrite — see
+# docs/V2_ROLLOUT_GUIDE.md §2 for the merge procedure).
+
+chmod +x hooks/*.sh runner/*.sh test/smoke-*.sh
+
+# Verify
+bash test/smoke-v2-phase2.sh        # 25 unit checks, no Codex calls
+bash test/smoke-tool-grounding.sh   # 12 fixture checks
 ```
 
-That's it. No bootstrap script. No `pre-commit install`. The Claude CLI
-loads `.claude/` automatically when you run `claude` in this directory.
-The CI picks up `.gitlab-ci.yml` or `.github/workflows/` automatically.
+That's it. On your next Claude Code session, Codex will start reviewing changes automatically.
 
-## Defense layers
+Full step-by-step install: [`docs/ADOPTION_GUIDE.md`](docs/ADOPTION_GUIDE.md).
+Rollout guide for AI assistants doing the install: [`docs/V2_ROLLOUT_GUIDE.md`](docs/V2_ROLLOUT_GUIDE.md).
 
-1. **Layer 0 — Specification gate.** `specs/` directory + `specify`
-   skill. Specify → Plan → Tasks → Implement.
-2. **Layer 1 — TDD ceremony for Tier 1 paths.** `.tdd/current-plan.md`
-   state machine + `route-to-tdd.sh` advisory router +
-   `require-tdd-state.sh` blocking gate. Two human approval gates.
-3. **Layer 2 — In-session prevention.** `CLAUDE.md` +
-   `.claude/rules/*` + skills + subagents + safety hooks
-   (`guard-dangerous-bash`, `scan-for-secrets`, `guard-protected-files`,
-   `gofmt-after-edit`, `detect-ai-bloat`).
-   Scope is intentionally **Go development + production database
-   safety** only. IaC / k8s / container-registry / project-domain
-   guards are out of upstream scope — see `MAINTAINING.md` "Adding
-   project-specific guards" for how to add them per project.
-4. **Layer 3 — Mechanical floor (CI).** `.gitlab-ci.yml` /
-   `.github/workflows/ci.yml`: gofmt, go vet, staticcheck, govulncheck,
-   deadcode, allowed-modules, race detector, **TDD ceremony check**.
-5. **Layer 4 — Review judgment.** `REVIEW.md` + reviewer subagents
-   (`go-reviewer`, `go-architect`, `go-concurrency-reviewer`,
-   `go-security-reviewer`, `go-test-engineer`, `go-bloat-reviewer`).
-6. **Layer 5 — Cleanup.** `negative-diff` skill explicitly tasked with
-   deletion after implementation.
+---
 
-## Tooling commands
+## Quickstart
+
+Open any Go project where the pack is installed and ask Claude to make a change:
+
+```
+Add a Retry function to internal/http/client.go with exponential backoff.
+```
+
+Claude writes the code. About 5 seconds after Claude's edits settle, Codex begins reviewing in the background. You won't see this happen — it's silent by design.
+
+If everything converges silently, you'll see finished code. If Claude and Codex disagree across all rounds, you'll see one short message:
+
+```
+[REVIEW ESCALATION — cycle <id>]
+
+Claude and Codex did not converge after 5 rounds.
+The disagreement is about: <one-sentence summary>
+
+Claude's final view:  <one paragraph>
+Codex's final view:   <one paragraph>
+
+Choose how to proceed:
+  [A] ship Claude's version — tell me 'go with Claude'
+  [B] apply Codex's recommendations — tell me 'go with Codex'
+  [V] view full transcripts
+```
+
+That's the entire user-facing surface. Everything else is internal.
+
+To see the most recent review at any time, ask Claude "show me the latest review" — it reads `.tdd/reviews/state.json` and the latest cycle directory.
+
+---
+
+## Repository layouts supported
+
+| Layout | Status |
+|---|---|
+| Single-module Go repo (`go.mod` at root) | ✓ Fully supported |
+| Monorepo with multiple `go.mod` files at any depth | ✓ Fully supported (per-module sections) |
+| Nested modules (child `go.mod` inside parent module) | ✓ Walked nearest-first |
+| Polyglot monorepo (Go + non-Go) | ✓ Only Go-affected modules are tooled |
+| Repo with no Go code | ✓ Pack emits "no Go modules touched" status |
+| `vendor/`, `testdata/`, `node_modules/` | ✓ Excluded from analysis |
+| Empty `go.mod` (Grab-style exclude marker) | ✓ Honored |
+
+Detailed monorepo guide: [`docs/MONOREPO_ADOPTION_GUIDE.md`](docs/MONOREPO_ADOPTION_GUIDE.md).
+
+**Not yet supported** (no plans unless real demand surfaces): Bazel/Buck2/Pants build system orchestration, `go.work` workspace mode toggles, submodule recursion. Native per-module tooling works fine inside Bazel-managed Go repos as long as `go.mod` exists.
+
+---
+
+## Configuration
+
+The pack reads `tdd-pack.toml` from the repo root. Defaults are tuned for quality:
+
+```toml
+[review]
+max_rounds = 5
+coalesce_ms = 5000
+
+[codex]
+model = ""                  # empty = use Codex CLI's current default
+reasoning_effort = "xhigh"  # max reasoning supported by ChatGPT Plus/Pro/Team
+web_search = "live"         # enables Codex web search during review
+
+[severity]
+min_surface = "nit"         # Claude sees every finding; can filter on its end
+```
+
+Full config reference: [`docs/INTEGRATION_GUIDE.md`](docs/INTEGRATION_GUIDE.md).
+
+**Emergency disable** for the current shell:
 
 ```bash
-make doctor                # verify required + recommended tools are installed
-make tools                 # install Go developer tools (gopls, staticcheck, ...)
-make tdd-test              # run the hook smoke tests (target: 17/17 passing)
-make ci                    # run the full CI sequence locally
+export PRILIVE_REVIEW_DISABLE=1
 ```
 
-If any required tool is missing, hooks fail closed with a clear
-diagnostic — `make doctor` is the fastest way to see what to install.
+---
 
-## When TDD ceremony applies
+## Documentation
 
-The `require-tdd-state.sh` hook fires only on paths matched in
-`.tdd/tdd-config.json` `tier1_path_regexes`. Everything else uses
-`minimal-go-change` discipline. This is deliberate — full TDD on every
-typo fix kills velocity.
+| Topic | File |
+|---|---|
+| Install into a new or existing project | [`docs/ADOPTION_GUIDE.md`](docs/ADOPTION_GUIDE.md) |
+| How AI developers should work with v2.0 | [`docs/AI_DEVELOPER_GUIDE.md`](docs/AI_DEVELOPER_GUIDE.md) |
+| Hook setup, config reference, state machine | [`docs/INTEGRATION_GUIDE.md`](docs/INTEGRATION_GUIDE.md) |
+| Go monorepo specifics | [`docs/MONOREPO_ADOPTION_GUIDE.md`](docs/MONOREPO_ADOPTION_GUIDE.md) |
+| Rollout / install instructions for AI assistants | [`docs/V2_ROLLOUT_GUIDE.md`](docs/V2_ROLLOUT_GUIDE.md) |
+| v2.0 design spec | [`docs/V2_IMPLEMENTATION_SPEC.md`](docs/V2_IMPLEMENTATION_SPEC.md) |
+| Latest update instructions | [`docs/UPDATE_2026-05-17.md`](docs/UPDATE_2026-05-17.md) + [monorepo fix](docs/UPDATE_2026-05-17_monorepo-fix.md) |
+| Release history | [`CHANGELOG.md`](CHANGELOG.md) |
+| Claude operating rules | [`CLAUDE.md`](CLAUDE.md) |
+| Codex operating rules | [`AGENTS.md`](AGENTS.md) |
+| Security policy | [`SECURITY.md`](SECURITY.md) |
+| Contribution policy | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 
-Default Tier 1 regexes cover money/billing, auth/security, migrations,
-notifications, and orchestration. Edit them for your project.
+---
 
-### Project-type presets
+## Safety and trust
 
-The starter ships with three Tier 1 presets in `.tdd/presets/`. The
-service preset is the active default. To switch:
+- **Codex never edits your project files.** The rule is in Codex's system prompt at `prompts/codex-system.md` and verified empirically by smoke tests. Run them any time you upgrade Codex CLI.
+- **No sandboxing of Codex.** Codex runs with the same machine access Claude has — your full project, your shell, your network. This is intentional: capability parity beats artificial restrictions for review quality. The "no project writes" rule holds because it's a clear, narrow instruction Codex respects — not because of OS-level enforcement.
+- **Emergency switch.** `PRILIVE_REVIEW_DISABLE=1` disables the entire pack for the current shell.
+- **No telemetry.** The pack doesn't phone home. Codex invocations go directly from your machine to OpenAI's Codex CLI (which uses your auth, your subscription).
+
+---
+
+## Security
+
+Found a security issue? Please **do not** open a public issue.
+
+- **Preferred:** [Open a private security advisory](https://github.com/prilive-com/go-tdd-pack/security/advisories/new) via GitHub's Private Vulnerability Reporting.
+- **Fallback:** Email the address in [`SECURITY.md`](SECURITY.md).
+
+Security-sensitive issue categories include: hook bypass, runner convergence bypass, Codex review artifact tampering, secret leakage through review context, and Codex writing to the real repository (no-write-rule violation).
+
+---
+
+## Contributing
+
+Contributions welcome.
+
+1. Sign off your commits — the project uses [Developer Certificate of Origin](https://developercertificate.org/) via the [cncf/dco2 GitHub App](https://github.com/apps/dco).
+2. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a PR.
+3. High-risk changes (hooks, runner state machine, Codex prompts, tool grounding, audit artifacts, config schema, settings.json) require discussion in an issue first.
 
 ```bash
-# Library / SDK (everything in pkg/ is a one-way door):
-cp .tdd/presets/library.json .tdd/tdd-config.json
-
-# CLI (cmd/, exec/runner code, destructive subcommands):
-cp .tdd/presets/cli.json .tdd/tdd-config.json
+git commit -s -m "Your change description"
 ```
 
-Then customize `project_name` and any project-specific regexes.
+---
 
-## Updating from upstream starter
+## Project status
 
-This repo was created from `go-claude-starter v1.0.0`. Updates do not
-flow in automatically. Refresh quarterly:
+- **Current public line:** v2.0.x
+- **License:** Apache-2.0
+- **Maintainer:** Prilive ([github.com/prilive-com](https://github.com/prilive-com))
+- **Primary audience:** Go teams using Claude Code and Codex CLI
+- **Production usage:** validated on one real Go monorepo as of 2026-05-18
+- **Legacy support:** v1.x ceremony architecture is no longer maintained. New adoption should use v2.0.
 
-1. Compare `.claude/`, `.tdd/templates/`, `.gitlab-ci.yml`,
-   `.github/workflows/ci.yml` against the latest starter.
-2. Cherry-pick changes you want.
-3. Update `.claude/VERSION`.
+---
+
+## License
+
+Apache License 2.0 — see [`LICENSE`](LICENSE).
+
+Copyright 2026 Prilive.
+
+---
+
+## Acknowledgements
+
+This pack builds on:
+
+- **Anthropic** — Claude Code platform and plugin ecosystem
+- **OpenAI** — Codex CLI
+- **`honnef.co/go/tools`** (`staticcheck`) — Go static analyzer
+- **`golangci-lint`** — comprehensive linter aggregator
+- **`golang.org/x/vuln/cmd/govulncheck`** — Go vulnerability scanner
