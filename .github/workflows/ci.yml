@@ -12,8 +12,8 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
       - name: Install jq
@@ -56,7 +56,7 @@ jobs:
           CHECK_TRANSITIVE_MODULES: "true"
         run: bash scripts/check-allowed-modules.sh
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         with:
           version: latest
 
@@ -71,7 +71,7 @@ jobs:
     # tree but the committed code was actually broken.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install jq + python3-yaml
         # python3-yaml is needed for the F3 self-tests that validate
         # the CI YAML files. Without it, the self-tests skip silently
@@ -83,8 +83,8 @@ jobs:
   security:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
       - name: govulncheck
@@ -96,7 +96,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - name: TDD ceremony check
@@ -106,6 +106,6 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Refuse mid-cycle TDD state
         run: bash scripts/check-tdd-state-clean.sh
