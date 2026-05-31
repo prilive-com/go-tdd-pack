@@ -46,6 +46,24 @@
     "govulncheck": "golang.org/x/vuln/cmd/govulncheck@latest"
   },
   "config_file": "tdd-pack.toml",
+  "commands": [
+    {
+      "name": "show-review",
+      "description": "Show the most recent Codex review cycle with all findings, verdict, and current state"
+    },
+    {
+      "name": "abandon-review",
+      "description": "Abandon the current review cycle so future edits start fresh"
+    },
+    {
+      "name": "accept-claude",
+      "description": "After an A/B/V escalation, accept Claude's version (ship as-is)"
+    },
+    {
+      "name": "accept-codex",
+      "description": "After an A/B/V escalation, accept Codex's recommendations and apply them"
+    }
+  ],
   "hooks": {
     "PostToolUse": [
       {

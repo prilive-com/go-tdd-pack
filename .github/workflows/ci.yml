@@ -37,6 +37,9 @@ jobs:
       - name: Tool grounding fixture smoke
         run: bash test/smoke-tool-grounding.sh
 
+      - name: Escalation-blocks-new-cycle smoke
+        run: bash test/smoke-escalation-blocks-new-cycle.sh
+
   lint:
     name: lint
     runs-on: ubuntu-latest
