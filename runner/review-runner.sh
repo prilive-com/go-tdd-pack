@@ -31,6 +31,14 @@ REVIEWS_DIR="${TDD_DIR}/reviews"
 CONFIG="${PROJECT_DIR}/tdd-pack.toml"
 STATE_FILE="${REVIEWS_DIR}/state.json"
 
+# Load shared config reader (cfg_get).
+# shellcheck source=lib/config.sh
+. "$(dirname "$0")/lib/config.sh"
+
+# Cycle budgets (task #101 — enforce previously-declared config knobs).
+MAX_CYCLE_MINUTES=$(cfg_get "${CONFIG}" "review.max_cycle_minutes" "30")
+MAX_CODEX_CALLS=$(cfg_get "${CONFIG}" "review.max_codex_calls_per_cycle" "8")
+
 mkdir -p "${REVIEWS_DIR}"
 
 # --- guard: PROJECT_DIR must be a git repo ---
@@ -57,17 +65,80 @@ if [[ "${PRILIVE_REVIEW_DISABLE:-0}" == "1" ]]; then
 fi
 
 # --- helpers ---
-update_state() {
+
+# mint_state: write a fresh state.json for a NEW cycle.
+# Resets started_at_epoch (cycle wall clock) and codex_calls (budget counter).
+# Use only when minting a brand-new cycle.
+mint_state() {
   local cycle="$1" status="$2" round="$3"
   local ts; ts=$(date -u +%FT%TZ 2>/dev/null || echo unknown)
+  local started; started=$(date +%s)
   jq -n \
     --arg cycle "${cycle}" \
     --arg status "${status}" \
     --argjson round "${round}" \
     --arg ts "${ts}" \
-    '{cycle_id:$cycle, status:$status, round:$round, updated_at:$ts}' \
+    --argjson started "${started}" \
+    '{cycle_id:$cycle, status:$status, round:$round, updated_at:$ts, started_at_epoch:$started, codex_calls:0}' \
     > "${STATE_FILE}.tmp" 2>/dev/null \
     && mv "${STATE_FILE}.tmp" "${STATE_FILE}"
+}
+
+# update_state: change status/round on an existing cycle.
+# Preserves started_at_epoch and codex_calls (budget counters) so they
+# survive across resume rounds.
+update_state() {
+  local cycle="$1" status="$2" round="$3"
+  local ts; ts=$(date -u +%FT%TZ 2>/dev/null || echo unknown)
+  local started codex_calls
+  started=$(jq -r '.started_at_epoch // 0' "${STATE_FILE}" 2>/dev/null || echo 0)
+  codex_calls=$(jq -r '.codex_calls // 0' "${STATE_FILE}" 2>/dev/null || echo 0)
+  jq -n \
+    --arg cycle "${cycle}" \
+    --arg status "${status}" \
+    --argjson round "${round}" \
+    --arg ts "${ts}" \
+    --argjson started "${started}" \
+    --argjson calls "${codex_calls}" \
+    '{cycle_id:$cycle, status:$status, round:$round, updated_at:$ts, started_at_epoch:$started, codex_calls:$calls}' \
+    > "${STATE_FILE}.tmp" 2>/dev/null \
+    && mv "${STATE_FILE}.tmp" "${STATE_FILE}"
+}
+
+# increment_codex_calls: bump the per-cycle counter after a Codex invocation.
+increment_codex_calls() {
+  [[ -f "${STATE_FILE}" ]] || return 0
+  jq '.codex_calls = ((.codex_calls // 0) + 1)' "${STATE_FILE}" \
+    > "${STATE_FILE}.tmp" 2>/dev/null \
+    && mv "${STATE_FILE}.tmp" "${STATE_FILE}"
+}
+
+# check_cycle_budget: return 0 if within both time + call caps; 1 if exceeded
+# (and writes a detail line to <cycle_dir>/.status that the runner uses for
+# its failure reason).
+check_cycle_budget() {
+  local cycle="$1"
+  local cycle_dir="${REVIEWS_DIR}/${cycle}"
+  local started_at codex_calls now elapsed_min
+  started_at=$(jq -r '.started_at_epoch // 0' "${STATE_FILE}" 2>/dev/null || echo 0)
+  codex_calls=$(jq -r '.codex_calls // 0' "${STATE_FILE}" 2>/dev/null || echo 0)
+  now=$(date +%s)
+  if [[ "${started_at}" != "0" ]]; then
+    elapsed_min=$(( (now - started_at) / 60 ))
+    if [[ "${elapsed_min}" -ge "${MAX_CYCLE_MINUTES}" ]]; then
+      mkdir -p "${cycle_dir}" 2>/dev/null
+      echo "failed:cycle_timeout:elapsed=${elapsed_min}min,cap=${MAX_CYCLE_MINUTES}min" \
+        > "${cycle_dir}/.status"
+      return 1
+    fi
+  fi
+  if [[ "${codex_calls}" -ge "${MAX_CODEX_CALLS}" ]]; then
+    mkdir -p "${cycle_dir}" 2>/dev/null
+    echo "failed:codex_calls_exceeded:calls=${codex_calls},cap=${MAX_CODEX_CALLS}" \
+      > "${cycle_dir}/.status"
+    return 1
+  fi
+  return 0
 }
 
 log_event() {
@@ -139,11 +210,7 @@ if [[ -n "${RESUME_CYCLE_ID}" ]]; then
 else
   # Fresh — coalesce, check clean tree, mint cycle, run round 1.
 
-  COALESCE_MS=5000
-  if [[ -f "${CONFIG}" ]]; then
-    CFG_COALESCE=$(awk -F' = ' '/^coalesce_ms =/ {print $2; exit}' "${CONFIG}" | tr -d ' ')
-    [[ "${CFG_COALESCE}" =~ ^[0-9]+$ ]] && COALESCE_MS="${CFG_COALESCE}"
-  fi
+  COALESCE_MS=$(cfg_get "${CONFIG}" "review.coalesce_ms" "5000")
   "${PROJECT_DIR}/runner/coalesce.sh" "${PROJECT_DIR}" "${COALESCE_MS}"
 
   if cd "${PROJECT_DIR}" && git diff --quiet HEAD 2>/dev/null; then
@@ -156,7 +223,8 @@ else
 
   git -C "${PROJECT_DIR}" diff HEAD > "${CYCLE_DIR}/diff.patch" 2>/dev/null
 
-  update_state "${CYCLE_ID}" "reviewing" 1
+  # mint_state seeds started_at_epoch + codex_calls=0 (budget counters).
+  mint_state "${CYCLE_ID}" "reviewing" 1
   log_event "${CYCLE_ID}" 1 "started"
 
   if ! "${PROJECT_DIR}/runner/codex-round1.sh" "${CYCLE_ID}" "${PROJECT_DIR}"; then
@@ -165,6 +233,7 @@ else
     log_event "${CYCLE_ID}" 1 "${STATUS_DETAIL}"
     exit 0
   fi
+  increment_codex_calls
 
   VERDICT=$(jq -r '.verdict' "${CYCLE_DIR}/round-1.json" 2>/dev/null || echo unknown)
   log_event "${CYCLE_ID}" 1 "verdict:${VERDICT}"
@@ -182,14 +251,21 @@ fi
 
 # ---- rounds START_ROUND..MAX_ROUNDS (resume path only) ----
 
-MAX_ROUNDS=$(awk -F' = ' '/^max_rounds =/ {print $2; exit}' "${CONFIG}" | tr -d ' ')
-MAX_ROUNDS="${MAX_ROUNDS:-4}"
+MAX_ROUNDS=$(cfg_get "${CONFIG}" "review.max_rounds" "5")
 
 for ROUND in $(seq "${START_ROUND}" "${MAX_ROUNDS}"); do
   RESPONSE_FILE="${CYCLE_DIR}/claude-response-${ROUND}.txt"
   if [[ ! -f "${RESPONSE_FILE}" ]]; then
     # No response yet for this round — wait for next Stop hook fire.
     update_state "${CYCLE_ID}" "request_changes" "$((ROUND - 1))"
+    exit 0
+  fi
+
+  # Budget gate: fail closed if we've blown wall-clock or call cap.
+  if ! check_cycle_budget "${CYCLE_ID}"; then
+    STATUS_DETAIL=$(cat "${CYCLE_DIR}/.status" 2>/dev/null || echo "failed:budget")
+    update_state "${CYCLE_ID}" "failed" "$((ROUND - 1))"
+    log_event "${CYCLE_ID}" "$((ROUND - 1))" "${STATUS_DETAIL}"
     exit 0
   fi
 
@@ -202,6 +278,7 @@ for ROUND in $(seq "${START_ROUND}" "${MAX_ROUNDS}"); do
     log_event "${CYCLE_ID}" "${ROUND}" "${STATUS_DETAIL}"
     exit 0
   fi
+  increment_codex_calls
 
   VERDICT=$("${PROJECT_DIR}/runner/extract-verdict.sh" "${CYCLE_DIR}/round-${ROUND}.txt")
   log_event "${CYCLE_ID}" "${ROUND}" "verdict:${VERDICT}"

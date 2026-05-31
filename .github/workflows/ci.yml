@@ -40,6 +40,9 @@ jobs:
       - name: Escalation-blocks-new-cycle smoke
         run: bash test/smoke-escalation-blocks-new-cycle.sh
 
+      - name: Config enforcement smoke
+        run: bash test/smoke-config-enforcement.sh
+
   lint:
     name: lint
     runs-on: ubuntu-latest
