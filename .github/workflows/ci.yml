@@ -76,10 +76,12 @@ jobs:
             -not -path './.tdd/*' 2>/dev/null)
           exit $FAIL
 
-      - name: shellcheck (advisory, severity=warning)
-        # Soft-fail for now. Once the codebase is shellcheck-clean,
-        # remove continue-on-error to make it blocking.
-        continue-on-error: true
+      - name: shellcheck (BLOCKING, severity=warning)
+        # Was advisory in v2.0; blocking as of v2.0.1 — codebase is clean
+        # at warning level (verified via task #102). See .shellcheckrc for
+        # policy + known exceptions. To tighten further in a future release,
+        # change -S warning to -S info (info-level findings currently exist
+        # but were out of scope for the v2.0.1 baseline pass).
         run: |
           set -e
           shellcheck -S warning \

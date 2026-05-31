@@ -52,7 +52,7 @@
 set -uo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-cd "${PROJECT_DIR}"
+cd "${PROJECT_DIR}" || exit 1
 
 fail() { echo "✗ FAIL: $*" >&2; exit 1; }
 pass() { echo "✓ $*"; }
@@ -138,7 +138,7 @@ mv "${FIXTURE_TMP}" "${TARGET}"
 
 info "Snapshotting project file hashes"
 SNAP_DIR=$(mktemp -d)
-trap "cleanup; rm -rf ${SNAP_DIR}" EXIT
+trap 'cleanup; rm -rf "${SNAP_DIR}"' EXIT
 
 git ls-files | grep -vE "^(${TARGET}|README\.md)$" | sort > "${SNAP_DIR}/files.txt"
 while IFS= read -r f; do

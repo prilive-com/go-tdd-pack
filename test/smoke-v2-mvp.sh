@@ -29,7 +29,7 @@
 set -uo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-cd "${PROJECT_DIR}"
+cd "${PROJECT_DIR}" || exit 1
 
 # ---- step 0: prerequisite checks ----
 

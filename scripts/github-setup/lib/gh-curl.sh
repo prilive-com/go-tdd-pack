@@ -131,8 +131,8 @@ load_config() {
     echo "Copy repo-config.env and edit it for your repo." >&2
     exit 1
   fi
-  # shellcheck source=/dev/null
   set -a
+  # shellcheck source=/dev/null
   . "$config_file"
   set +a
 }

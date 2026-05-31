@@ -27,12 +27,26 @@ info() { echo "▶ $*"; }
 
 PASS_COUNT=0
 
+# Sandbox lifecycle: accumulate paths and clean them ALL up at exit.
+# Previously each case did `trap "rm -rf ${SANDBOX}" EXIT` which (a)
+# replaces the previous EXIT trap (so cases 1..N-1's sandboxes leaked
+# to /tmp), and (b) shellcheck SC2064 flagged it. Single function +
+# array fixes both.
+CLEANUP_PATHS=()
+cleanup_all_sandboxes() {
+  local p
+  for p in "${CLEANUP_PATHS[@]}"; do
+    [[ -n "$p" ]] && rm -rf "$p"
+  done
+}
+trap cleanup_all_sandboxes EXIT
+
 # Build a clean sandbox for each test.
 make_sandbox() {
   local d
   d=$(mktemp -d)
   (
-    cd "$d"
+    cd "$d" || exit 1
     git init -q
     git config user.email "t@t"
     git config user.name "t"
@@ -90,7 +104,7 @@ assert_no_new_cycle_dir() {
 
 info "[1] escalated + dirty tree → runner refuses to start new cycle"
 SANDBOX=$(make_sandbox)
-trap "rm -rf ${SANDBOX}" EXIT
+CLEANUP_PATHS+=("${SANDBOX}")
 seed_state "${SANDBOX}" "cycle-escalated-fixture" "escalated" 5
 dirty_tree "${SANDBOX}"
 
@@ -104,7 +118,7 @@ PASS_COUNT=$((PASS_COUNT + 1))
 
 info "[2] reviewing + dirty tree → runner exits without spawning parallel cycle"
 SANDBOX=$(make_sandbox)
-trap "rm -rf ${SANDBOX}" EXIT
+CLEANUP_PATHS+=("${SANDBOX}")
 seed_state "${SANDBOX}" "cycle-inflight-fixture" "reviewing" 1
 dirty_tree "${SANDBOX}"
 
@@ -118,7 +132,7 @@ PASS_COUNT=$((PASS_COUNT + 1))
 
 info "[3] converged terminal → runner can start fresh cycle on dirty tree"
 SANDBOX=$(make_sandbox)
-trap "rm -rf ${SANDBOX}" EXIT
+CLEANUP_PATHS+=("${SANDBOX}")
 seed_state "${SANDBOX}" "cycle-converged-fixture" "converged" 2
 dirty_tree "${SANDBOX}"
 
@@ -141,7 +155,7 @@ PASS_COUNT=$((PASS_COUNT + 1))
 
 info "[4] abandoned terminal → runner can start fresh cycle"
 SANDBOX=$(make_sandbox)
-trap "rm -rf ${SANDBOX}" EXIT
+CLEANUP_PATHS+=("${SANDBOX}")
 seed_state "${SANDBOX}" "cycle-abandoned-fixture" "abandoned" 3
 dirty_tree "${SANDBOX}"
 
@@ -157,7 +171,7 @@ PASS_COUNT=$((PASS_COUNT + 1))
 
 info "[5] resolved_by_user_claude terminal → runner can start fresh cycle"
 SANDBOX=$(make_sandbox)
-trap "rm -rf ${SANDBOX}" EXIT
+CLEANUP_PATHS+=("${SANDBOX}")
 seed_state "${SANDBOX}" "cycle-resolved-claude-fixture" "resolved_by_user_claude" 5
 dirty_tree "${SANDBOX}"
 

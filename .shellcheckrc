@@ -1,0 +1,20 @@
+# ShellCheck configuration for the Prilive Go TDD Pack.
+#
+# Policy: shellcheck -S warning is BLOCKING in CI as of v2.0.1
+# (.github/workflows/ci.yml — see the `lint` job). All scripts must
+# pass at warning level. Info-level findings are advisory.
+#
+# No global disables. Each script that needs an exception uses an
+# inline `# shellcheck disable=SCXXXX` directive with a comment
+# explaining why. As of v2.0.1 there is exactly one such exception:
+#
+#   runner/codex-round1.sh:SC2038 — find|xargs pipeline for Codex
+#   session ID. Whole pipeline is planned for replacement in task
+#   #103 (v2.1.0 Codex modernization), so don't fix in isolation.
+#
+# To run locally:
+#   shellcheck -S warning hooks/*.sh runner/*.sh test/*.sh \
+#     scripts/github-setup/*.sh scripts/github-setup/lib/*.sh
+#
+# To check what the next stricter level would flag (info):
+#   shellcheck -S info ...
