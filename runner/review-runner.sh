@@ -33,6 +33,17 @@ STATE_FILE="${REVIEWS_DIR}/state.json"
 
 mkdir -p "${REVIEWS_DIR}"
 
+# --- guard: PROJECT_DIR must be a git repo ---
+# The whole pack is diff-driven (git diff HEAD, git ls-files, etc.).
+# In a non-git directory the runner would error opaquely deep inside
+# tool-grounding.sh or codex-round1.sh. Surface it clearly instead.
+if ! git -C "${PROJECT_DIR}" rev-parse --git-dir >/dev/null 2>&1; then
+  echo "[review-runner] ${PROJECT_DIR} is not a git repository — review skipped." >&2
+  echo "  The pack is diff-driven; without git there is no diff to review." >&2
+  echo "  Either initialize git (\`git init\`) or set PRILIVE_REVIEW_DISABLE=1." >&2
+  exit 0
+fi
+
 # --- single-flight via flock ---
 LOCK_FILE="${TDD_DIR}/runner.lock"
 exec 9>"${LOCK_FILE}"

@@ -61,8 +61,44 @@ case "${STATUS}" in
     # Cycle is in flight. Nothing to inject yet.
     exit 0
     ;;
-  converged|failed|abandoned)
-    # Cycle is done. Nothing to inject.
+  converged|abandoned|resolved_by_user_claude|resolved_by_user_codex)
+    # Cycle is done cleanly. Nothing to inject.
+    exit 0
+    ;;
+  failed)
+    # Cycle failed (codex crash, auth expiry, no-git workdir, etc.).
+    # Surface ONCE per failed cycle so the adopter knows to look at
+    # .tdd/runner.log. Avoid spamming every turn — write a marker file
+    # under the cycle dir so subsequent invocations stay silent.
+    MARKER="${CYCLE_DIR}/.failure-surfaced"
+    if [[ ! -f "${MARKER}" ]]; then
+      DETAIL=""
+      if [[ -f "${CYCLE_DIR}/.status" ]]; then
+        DETAIL=$(head -1 "${CYCLE_DIR}/.status" 2>/dev/null)
+      fi
+      HINT=""
+      case "${DETAIL}" in
+        *codex_exec_nonzero*|*codex_resume_nonzero*)
+          HINT="Likely cause: Codex CLI error. Common: expired ChatGPT auth (run \`codex login\` to refresh), API quota, or network. Check \`.tdd/runner.log\` for the raw Codex stderr."
+          ;;
+        *invalid_json*|*missing_fields*)
+          HINT="Codex returned unexpected output. Schema validation failed. Check \`.tdd/reviews/${CYCLE_ID}/round-1.json\` and \`.tdd/runner.log\`."
+          ;;
+        *no_session*|*no_response*|*no_round1*)
+          HINT="Internal state inconsistency. Check \`.tdd/reviews/${CYCLE_ID}/\` for missing artifacts."
+          ;;
+        *)
+          HINT="Check \`.tdd/runner.log\` for runner stderr."
+          ;;
+      esac
+      emit_context "[Codex review failed — cycle ${CYCLE_ID}, round ${ROUND}, detail: ${DETAIL:-unknown}]
+
+${HINT}
+
+The runner is fail-open: subsequent edits will start fresh cycles. To
+suppress this notice and move on, run /abandon-review."
+      touch "${MARKER}" 2>/dev/null
+    fi
     exit 0
     ;;
   request_changes)
