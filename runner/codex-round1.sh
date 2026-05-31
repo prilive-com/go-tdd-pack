@@ -143,4 +143,25 @@ case "${VERDICT}" in
     ;;
 esac
 
+# --- contract check: must_address vs verdict consistency ---
+# Per tdd-pack.toml [severity] must_address: Codex MUST NOT return
+# verdict=approve while leaving any finding at severity >= must_address
+# unresolved. This is a contract Codex is asked to honor (see the
+# system prompt). If violated, treat as a failed cycle — don't trust the
+# approve and silently ship code with unaddressed blockers.
+if [[ "${VERDICT}" == "approve" ]]; then
+  # shellcheck source=lib/config.sh
+  . "$(dirname "$0")/lib/config.sh"
+  MUST_ADDRESS=$(cfg_get "${CONFIG}" "severity.must_address" "major")
+  VIOLATIONS=$(jq -r --arg ma "${MUST_ADDRESS}" '
+    def sn($s): {"blocker":4, "major":3, "minor":2, "nit":1}[$s];
+    [.findings[]? | select(sn(.severity) >= sn($ma))] | length
+  ' "${CYCLE_DIR}/round-1.json")
+  if [[ "${VIOLATIONS:-0}" -gt 0 ]]; then
+    echo "[codex-round1] CONTRACT VIOLATION: verdict=approve with ${VIOLATIONS} unresolved finding(s) at severity >= must_address (${MUST_ADDRESS})" >&2
+    echo "failed:contract_violation_approve_with_must_address_findings" > "${CYCLE_DIR}/.status"
+    exit 1
+  fi
+fi
+
 exit 0

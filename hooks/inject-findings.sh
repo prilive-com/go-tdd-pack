@@ -130,13 +130,17 @@ fi
 
 VERDICT_SUMMARY=$(jq -r '.summary_one_sentence // "review requested"' "${ROUND1_JSON}" 2>/dev/null)
 
-# Surface ALL findings (blocker + major + minor + nit). Quality-tuned:
-# even nits can be useful signal for Claude. Per tdd-pack.toml
-# min_surface = "nit". If you want to filter, raise the bar here.
+# Filter by min_surface from tdd-pack.toml [severity] min_surface.
 # Confidence is shown as c=N (1-5); 5=verified, 1=guess.
-FINDINGS=$(jq -r '
-  [.findings[]?]
-  | if length == 0 then "(no findings)"
+# Severity numeric order: blocker=4, major=3, minor=2, nit=1.
+# shellcheck source=../runner/lib/config.sh
+. "${PROJECT_DIR}/runner/lib/config.sh"
+MIN_SURFACE=$(cfg_get "${PROJECT_DIR}/tdd-pack.toml" "severity.min_surface" "nit")
+
+FINDINGS=$(jq -r --arg ms "${MIN_SURFACE}" '
+  def sn($s): {"blocker":4, "major":3, "minor":2, "nit":1}[$s] // 0;
+  [.findings[]? | select(sn(.severity) >= sn($ms))]
+  | if length == 0 then "(no findings at or above min_surface=\($ms))"
     else (
       map(
         "- [\(.severity)/\(.category) c=\(.confidence // "?")] \(.title)\n  \(.body)"
