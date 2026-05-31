@@ -15,6 +15,119 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 _No unreleased changes._
 
+## [2.0.1] - 2026-05-31
+
+Patch release. Five focused improvements driven by external consultant
+review (2026-05-22), production adopter feedback (2026-05-31), and
+internal-tracked bugs. Backwards-compatible with v2.0.0 — no config
+schema changes, no behavior changes for the happy path. All work
+landed via individual PRs against the protected `main` branch with
+the new `test` / `lint` / `CodeQL` / `DCO` CI gates passing.
+
+### Fixed
+
+- **Escalation cycles no longer overwriteable** (#5).
+  `runner/review-runner.sh` previously only treated `request_changes`
+  as an in-progress state. On any dirty tree with
+  `state.status={escalated|reviewing}`, the runner minted a new cycle
+  and overwrote `state.json` — silently destroying pending A/B/V
+  escalations and racing in-flight reviews. State-machine guard now
+  blocks fresh cycles on these active states. Adopter-reported with a
+  fake-codex reproducer. Added `test/smoke-escalation-blocks-new-cycle.sh`
+  (5 fixture cases) to regression-protect.
+- **Hooks no longer fail silently** (#6).
+  `hooks/post-edit-review.sh` previously redirected runner output to
+  `/dev/null`. An adopter's ChatGPT auth token expired mid-session and
+  the runner failed silently for an hour before they noticed. Output
+  now appends to `.tdd/runner.log` with timestamped invocation sections.
+  Missing runner is logged to `.tdd/install-error.log` instead of being
+  silently swallowed. `hooks/inject-findings.sh` surfaces `failed`
+  cycles ONCE per cycle (via `.failure-surfaced` marker) with a hint
+  based on the specific failure mode (`codex_exec_nonzero` → "likely
+  expired ChatGPT auth, run `codex login`"; `invalid_json` → schema
+  failure; etc.).
+- **No-git workdir now exits cleanly** (#6). `runner/review-runner.sh`
+  previously errored opaquely inside `tool-grounding.sh` or
+  `codex-round1.sh` when run in a non-git directory. Now exits with a
+  clear message: either `git init` or `PRILIVE_REVIEW_DISABLE=1`.
+
+### Added
+
+- **Four operator slash commands** (#5):
+  - `/show-review` — read latest cycle artifacts, summarize
+  - `/abandon-review` — neutral exit, sets `abandoned`
+  - `/accept-claude` — ship as-is, sets `resolved_by_user_claude`
+  - `/accept-codex` — apply Codex findings, sets `resolved_by_user_codex`
+
+  These give operators a clear path out of escalation. `runner/escalate.sh`
+  A/B/V message updated to reference them by name. Three new terminal
+  states added: `abandoned`, `resolved_by_user_claude`,
+  `resolved_by_user_codex` — runner allows fresh cycles after them.
+- **Coverage-boundaries docs section** (#6) in `docs/INTEGRATION_GUIDE.md`.
+  Explicit table of what is/isn't reviewed: Claude Code's
+  `Edit`/`Write`/`MultiEdit`/`Bash` are covered; external `sed`/`vim`/editor
+  saves are NOT. Documented failure modes (no-git, auth expiry, runner.log).
+- **Shared TOML config parser** (#8) at `runner/lib/config.sh`. Single
+  source of truth for parsing `tdd-pack.toml`. Replaces brittle inline
+  `awk` parsers across multiple scripts. Per-shell cache.
+- **`runner/lib/config.sh` cfg_get function** with per-(path,key) cache.
+  Subset-TOML parser: `[section]` headers, `key = scalar`, `# comments`.
+- **State.json schema additions** (#8, additive — old fixtures still work):
+  - `started_at_epoch` — unix epoch when cycle minted; used by
+    `max_cycle_minutes` budget gate
+  - `codex_calls` — counter incremented after each Codex invocation;
+    used by `max_codex_calls_per_cycle` budget gate
+- **`test/smoke-escalation-blocks-new-cycle.sh`** (#5, 5 checks)
+- **`test/smoke-config-enforcement.sh`** (#8, 15 checks)
+- **`.shellcheckrc`** (#7) documenting the blocking-at-warning policy
+  and the one inline-disabled exception (SC2038 in `runner/codex-round1.sh`,
+  scheduled for removal in v2.1.0).
+- **`commands/`** directory containing 4 markdown command files,
+  registered in `.claude-plugin/plugin.json` `commands` array.
+
+### Changed
+
+- **ShellCheck is now BLOCKING in CI** (#7). Was `continue-on-error: true`
+  (advisory). Fixed all 22 baseline warnings across 5 SC codes
+  (SC2164×11, SC2064×9, SC2046×1, SC2038×1, SC1090×1). Bonus: the
+  SC2064 fix in `test/smoke-escalation-blocks-new-cycle.sh` also closed
+  a real sandbox-leak bug — each `trap "rm -rf ${SANDBOX}" EXIT` was
+  REPLACING the previous trap, so cases 1..N-1's mktemp dirs were
+  leaking to `/tmp`. Rewrote with a `CLEANUP_PATHS` array + single
+  cleanup function.
+- **Stop hook timeout bumped 5→10s** (#6) in both `.claude/settings.json`
+  and `.claude-plugin/plugin.json`. Typical hook completes in <1s but
+  very long transcripts can push jq parsing time up.
+- **Five `tdd-pack.toml` config fields now enforced** (#8). Previously
+  declared in config but never read by any script:
+  - `review.max_cycle_minutes` (default 30) — wall-clock budget gate
+  - `review.max_codex_calls_per_cycle` (default 8) — call counter gate
+  - `severity.must_address` (default "major") — contract check in
+    `runner/codex-round1.sh`. If Codex returns `verdict=approve` with
+    ANY finding at severity ≥ must_address, treat as contract violation
+    and fail the cycle with `failed:contract_violation_approve_with_must_address_findings`.
+  - `severity.min_surface` (default "nit") — filter in
+    `hooks/inject-findings.sh`. Findings below this severity are
+    dropped from injected context. Was previously hardcoded to show all.
+  - `review.coalesce_ms` — now read via the shared parser (was inline awk).
+- **`runner/escalate.sh` additionalContext cap raised** 9800→49500 chars
+  (#5) to match `hooks/inject-findings.sh` (which was raised earlier in
+  v2.0.0 but escalate.sh was missed).
+
+### Removed
+
+- Inline `awk -F' = '` config parsers (#8) — replaced by `cfg_get`.
+
+### Internal
+
+- **GitHub repo configuration**: `prilive-com/go-tdd-pack` now has 8 numbered
+  setup scripts under `scripts/github-setup/` plus orchestrator, audit,
+  and 99-make-public scripts — curl-based, idempotent, no `gh` dependency
+  (already in v2.0.0 but worth re-mentioning since the audit step gained
+  a new check this release: ruleset rules.required_status_checks).
+- **Dependabot bumped actions/checkout** v4 → v6 (#3) before v2.0.0 was
+  tagged but after the original v2.0.0 RC; included in this release.
+
 ## [2.0.0] - 2026-05-18
 
 The v1.x → v2.0 architectural pivot. Replaces the manual TDD ceremony
