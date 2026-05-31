@@ -1,6 +1,6 @@
 {
   "name": "prilive-go-tdd-pack",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Continuous silent peer review between Claude Code and OpenAI Codex CLI for Go projects. Codex reviews every meaningful Go change in the background; findings are silently injected into Claude's next turn. Includes monorepo-aware tool grounding (gofmt, go vet, staticcheck, golangci-lint, govulncheck), multi-round resume via codex exec resume, and A/B/V escalation when reviewers disagree.",
   "author": {
     "name": "Prilive",
