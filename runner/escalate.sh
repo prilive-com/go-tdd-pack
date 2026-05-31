@@ -57,16 +57,19 @@ Codex's final view:
 ${CODEX_FINAL}
 
 Choose how to proceed:
-  [A] ship Claude's version — tell me 'go with Claude'
-  [B] apply Codex's recommendations — tell me 'go with Codex'
-  [V] view full transcripts — tell me 'show review' (or run /show-review when Phase 3 ships)
+  [A] /accept-claude     — ship Claude's version as-is
+  [B] /accept-codex      — apply Codex's recommendations
+  [V] /show-review       — see full transcripts before deciding
+      /abandon-review    — neutral exit: drop the cycle without picking a side
 
 Your choice unblocks the cycle. Until you choose, this cycle stays
-in escalated state. Future edits won't trigger new reviews until
-this one is resolved."
+in escalated state. Future edits will NOT trigger new reviews until
+this one is resolved — the runner blocks new cycles when state is
+escalated, to protect your pending decision from being silently
+overwritten."
 
-# Cap at 9800 chars (additionalContext limit).
-MESSAGE="${MESSAGE:0:9800}"
+# Cap at 49500 chars (matches inject-findings.sh).
+MESSAGE="${MESSAGE:0:49500}"
 
 jq -nc --arg event "PostToolUse" --arg ctx "${MESSAGE}" \
   '{hookSpecificOutput: {hookEventName: $event, additionalContext: $ctx}}'

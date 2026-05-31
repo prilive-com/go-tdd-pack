@@ -71,21 +71,52 @@ log_event() {
     >> "${REVIEWS_DIR}/debates.jsonl" 2>/dev/null
 }
 
-# --- detect resume condition ---
+# --- detect resume condition + block-on-active-cycle guard ---
+#
+# Three cases when state.json exists:
+#   request_changes — waiting for Claude's response; we may resume into round N
+#   reviewing       — another runner is mid-Codex-call; this invocation must exit
+#   escalated       — operator hasn't picked A/B/V yet; do NOT start a fresh
+#                     cycle that would overwrite their pending decision
+#
+# Without this guard the runner happily mints a new cycle on any dirty tree
+# regardless of state, overwriting the escalated/reviewing state.json and
+# silently destroying the pending A/B/V escalation. See task #100 and
+# 2026-05-31 adopter report for the reproducer.
 RESUME_CYCLE_ID=""
 RESUME_FROM_ROUND=0
 if [[ -f "${STATE_FILE}" ]] && command -v jq >/dev/null 2>&1; then
   EXISTING_STATUS=$(jq -r '.status // empty' "${STATE_FILE}" 2>/dev/null)
   EXISTING_CYCLE=$(jq -r '.cycle_id // empty' "${STATE_FILE}" 2>/dev/null)
   EXISTING_ROUND=$(jq -r '.round // 0' "${STATE_FILE}" 2>/dev/null)
-  if [[ "${EXISTING_STATUS}" == "request_changes" ]] && [[ -n "${EXISTING_CYCLE}" ]]; then
-    NEXT_ROUND=$((EXISTING_ROUND + 1))
-    EXISTING_DIR="${REVIEWS_DIR}/${EXISTING_CYCLE}"
-    if [[ -d "${EXISTING_DIR}" ]] && [[ -f "${EXISTING_DIR}/claude-response-${NEXT_ROUND}.txt" ]]; then
-      RESUME_CYCLE_ID="${EXISTING_CYCLE}"
-      RESUME_FROM_ROUND="${NEXT_ROUND}"
-    fi
-  fi
+
+  case "${EXISTING_STATUS}" in
+    reviewing)
+      # Another runner is in flight (or crashed mid-cycle). Either way, do not
+      # spawn a parallel one and do not overwrite state. flock should also have
+      # caught a concurrent runner; this is belt-and-suspenders for the
+      # crashed-mid-cycle case where the lock was released but state stayed.
+      exit 0
+      ;;
+    escalated)
+      # Operator must explicitly resolve via /accept-claude, /accept-codex, or
+      # /abandon-review before a new cycle can start. Don't silently overwrite
+      # their pending decision.
+      exit 0
+      ;;
+    request_changes)
+      if [[ -n "${EXISTING_CYCLE}" ]]; then
+        NEXT_ROUND=$((EXISTING_ROUND + 1))
+        EXISTING_DIR="${REVIEWS_DIR}/${EXISTING_CYCLE}"
+        if [[ -d "${EXISTING_DIR}" ]] && [[ -f "${EXISTING_DIR}/claude-response-${NEXT_ROUND}.txt" ]]; then
+          RESUME_CYCLE_ID="${EXISTING_CYCLE}"
+          RESUME_FROM_ROUND="${NEXT_ROUND}"
+        fi
+      fi
+      ;;
+    # converged | failed | abandoned | resolved_by_user_claude | resolved_by_user_codex
+    # → terminal states, fall through to fresh-cycle path below.
+  esac
 fi
 
 # --- branch: resume vs fresh ---
