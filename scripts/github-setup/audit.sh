@@ -153,4 +153,8 @@ else
   fi
 fi
 
-exit $([ $drift_count -eq 0 ] && echo 0 || echo 1)
+if [ "$drift_count" -eq 0 ]; then
+  exit 0
+else
+  exit 1
+fi

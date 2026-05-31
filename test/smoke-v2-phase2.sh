@@ -20,7 +20,7 @@
 set -uo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-cd "${PROJECT_DIR}"
+cd "${PROJECT_DIR}" || exit 1
 
 fail() { echo "✗ FAIL: $*" >&2; exit 1; }
 pass() { echo "✓ $*"; }
@@ -44,7 +44,7 @@ EV="${PROJECT_DIR}/runner/extract-verdict.sh"
 [[ -x "${EV}" ]] || fail "extract-verdict.sh not executable"
 
 TMPDIR_VERDICT=$(mktemp -d)
-trap "rm -rf ${TMPDIR_VERDICT}" EXIT
+trap 'rm -rf "${TMPDIR_VERDICT}"' EXIT
 
 # 1a. plain approve
 cat > "${TMPDIR_VERDICT}/approve.txt" <<'EOF'
@@ -108,7 +108,7 @@ SS="${PROJECT_DIR}/hooks/session-start.sh"
 [[ -x "${SS}" ]] || fail "session-start.sh not executable"
 
 SANDBOX=$(mktemp -d)
-trap "rm -rf ${TMPDIR_VERDICT} ${SANDBOX}" EXIT
+trap 'rm -rf "${TMPDIR_VERDICT}" "${SANDBOX}"' EXIT
 mkdir -p "${SANDBOX}/.tdd/reviews"
 
 # 2a. no state file → silent (no output)

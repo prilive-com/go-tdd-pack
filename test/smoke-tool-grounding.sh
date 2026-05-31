@@ -34,7 +34,7 @@ init_git() {
 info "[1] single-module Go repo"
 T1=$(mktemp -d)
 (
-  cd "${T1}"
+  cd "${T1}" || exit 1
   init_git
   printf 'module test/single\n\ngo 1.22\n' > go.mod
   printf 'package main\nfunc main() {}\n' > main.go
@@ -66,7 +66,7 @@ rm -rf "${T1}"
 info "[2] monorepo (modules at services/api and services/lib)"
 T2=$(mktemp -d)
 (
-  cd "${T2}"
+  cd "${T2}" || exit 1
   init_git
   mkdir -p services/api services/lib
   printf 'module test/api\n\ngo 1.22\n' > services/api/go.mod
@@ -108,7 +108,7 @@ rm -rf "${T2}"
 info "[2b] monorepo, both modules touched"
 T2B=$(mktemp -d)
 (
-  cd "${T2B}"
+  cd "${T2B}" || exit 1
   init_git
   mkdir -p services/api services/lib
   printf 'module test/api\n\ngo 1.22\n' > services/api/go.mod
@@ -138,7 +138,7 @@ rm -rf "${T2B}"
 info "[3] non-Go change (README only)"
 T3=$(mktemp -d)
 (
-  cd "${T3}"
+  cd "${T3}" || exit 1
   init_git
   printf 'module test/x\n\ngo 1.22\n' > go.mod
   printf 'package main\nfunc main() {}\n' > main.go
@@ -171,7 +171,7 @@ rm -rf "${T3}"
 info "[4] Go file with no enclosing go.mod"
 T4=$(mktemp -d)
 (
-  cd "${T4}"
+  cd "${T4}" || exit 1
   init_git
   # NO go.mod
   printf 'package orphan\n' > orphan.go
@@ -203,7 +203,7 @@ rm -rf "${T4}"
 info "[5] vendor/ changes excluded"
 T5=$(mktemp -d)
 (
-  cd "${T5}"
+  cd "${T5}" || exit 1
   init_git
   printf 'module test/v\n\ngo 1.22\n' > go.mod
   printf 'package main\nfunc main() {}\n' > main.go
@@ -230,7 +230,7 @@ rm -rf "${T5}"
 info "[6] empty go.mod blocks tool-grounding for that subtree"
 T6=$(mktemp -d)
 (
-  cd "${T6}"
+  cd "${T6}" || exit 1
   init_git
   printf 'module test/root\n\ngo 1.22\n' > go.mod
   printf 'package main\nfunc main() {}\n' > main.go

@@ -102,7 +102,11 @@ fi
 # --- capture session id (for codex exec resume in later rounds) ---
 # Heuristic: most-recent rollout file in ~/.codex/sessions/.
 # Brittle under concurrent Codex use; acceptable for v2.0.0. Better approach
-# (v2.1.x backlog): parse `codex exec --json` for thread.started event.
+# tracked in task #103 (v2.1.0 Codex modernization): parse
+# `codex exec --json` for thread.started event.
+# shellcheck disable=SC2038
+# (SC2038 flags find|xargs without -print0/-0; the whole pipeline is
+# planned for replacement per task #103, so don't bother fixing here.)
 SESSION_ID=$(
   find ~/.codex/sessions -name 'rollout-*.jsonl' -type f 2>/dev/null \
     | xargs -I{} ls -t {} 2>/dev/null \
