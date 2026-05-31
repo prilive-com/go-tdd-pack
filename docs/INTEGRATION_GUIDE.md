@@ -379,6 +379,54 @@ relocate it outside the Go bin path.
 
 ---
 
+## Coverage boundaries — what the pack does and does NOT review
+
+The runner is **opportunistic**: it only sees changes that go through
+Claude Code's tool surface. Specifically, the PostToolUse hooks fire
+on `Edit`, `Write`, `MultiEdit`, and `Bash` tool invocations.
+
+That means **edits made outside Claude Code escape review entirely**.
+Concrete examples:
+
+| Action | Reviewed? |
+|---|---|
+| Claude calls `Edit` to change a file | ✓ Yes |
+| Claude calls `Bash` running `sed -i '...' file.go` | ✓ Yes (Bash PostToolUse fires) |
+| You manually run `vim file.go` in your terminal | ✗ No (no Claude Code tool involved) |
+| You run `sed -i '...' file.go` from your own shell | ✗ No |
+| You use your editor's GUI to save changes | ✗ No |
+| Another git hook (pre-commit) modifies files | ✗ No |
+| A Makefile target rewrites files | ✗ No |
+
+This is intentional design — the pack is a **Claude Code companion**,
+not a file-system watcher. The Stop hook's fingerprint check
+(`hooks/stop-fingerprint.sh`) catches some of this by detecting working-
+tree drift between Claude turns, but it's belt-and-suspenders, not
+comprehensive coverage.
+
+**If you need every change reviewed regardless of source**, layer a
+pre-commit git hook in addition to this pack. The pack itself
+intentionally does not install pre-commit hooks (see `tdd-pack.toml`
+`[gate]` for opt-in shell hooks if you want them).
+
+The runner also has a few specific failure modes worth knowing:
+
+- **No git repository:** the pack is diff-driven (uses `git diff HEAD`).
+  In a non-git directory the runner exits cleanly with a message to
+  stderr explaining the situation. Either `git init` your project or
+  set `PRILIVE_REVIEW_DISABLE=1`.
+- **Codex auth expiry:** if your ChatGPT subscription's auth token
+  expires mid-session, Codex returns 401 and the runner records the
+  cycle as `failed`. The `inject-findings.sh` hook surfaces this once
+  per failed cycle with a hint to run `codex login`. The runner is
+  fail-open — your edits continue; subsequent cycles will work once
+  you re-authenticate.
+- **Runner output / debugging:** the runner's stdout+stderr are
+  appended to `.tdd/runner.log`. Tail this to see what Codex actually
+  printed when things look wrong.
+
+---
+
 ## Debugging
 
 If something isn't working:

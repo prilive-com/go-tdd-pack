@@ -15,14 +15,32 @@ fi
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 RUNNER="${PROJECT_DIR}/runner/review-runner.sh"
 
-# If runner missing (broken install), be silent.
+# If runner missing (broken install), record it once so the user can see
+# why nothing is happening. Was previously a silent exit which made
+# broken installs invisible — adopter pain point.
 if [[ ! -x "${RUNNER}" ]]; then
+  mkdir -p "${PROJECT_DIR}/.tdd" 2>/dev/null
+  echo "[$(date -u +%FT%TZ)] runner missing: ${RUNNER}" \
+    >> "${PROJECT_DIR}/.tdd/install-error.log" 2>/dev/null
   exit 0
 fi
 
-# Fire-and-forget. nohup + & + disown + redirected fds = truly detached.
-# macOS bash 3.2 supports this idiom.
-nohup "${RUNNER}" "${PROJECT_DIR}" </dev/null >/dev/null 2>&1 &
+# Fire-and-forget. nohup + & + disown = truly detached.
+# Output goes to .tdd/runner.log instead of /dev/null so adopters can
+# diagnose silent failures (e.g., expired Codex auth, no-git workdir,
+# transient API errors). The log rotates trivially: each run appends a
+# timestamped section; ops can prune via `> .tdd/runner.log` or logrotate.
+mkdir -p "${PROJECT_DIR}/.tdd" 2>/dev/null
+LOG="${PROJECT_DIR}/.tdd/runner.log"
+{
+  echo ""
+  echo "==================================================================="
+  echo "$(date -u +%FT%TZ) runner invocation"
+  echo "  PROJECT_DIR=${PROJECT_DIR}"
+  echo "==================================================================="
+} >> "${LOG}" 2>/dev/null
+
+nohup "${RUNNER}" "${PROJECT_DIR}" </dev/null >> "${LOG}" 2>&1 &
 disown
 
 exit 0

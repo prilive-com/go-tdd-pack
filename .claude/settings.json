@@ -203,7 +203,7 @@
           {
             "type": "command",
             "command": "$CLAUDE_PROJECT_DIR/hooks/stop-fingerprint.sh",
-            "timeout": 5
+            "timeout": 10
           }
         ]
       }

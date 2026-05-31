@@ -111,7 +111,7 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/stop-fingerprint.sh",
-            "timeout": 5
+            "timeout": 10
           }
         ]
       }
