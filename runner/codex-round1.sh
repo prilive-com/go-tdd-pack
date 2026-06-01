@@ -85,35 +85,79 @@ CODEX_FLAGS+=(-o "${CYCLE_DIR}/round-1.json")
 CODEX_FLAGS+=(--skip-git-repo-check)
 CODEX_FLAGS+=(--cd "${PROJECT_DIR}")
 
+# --- detect Codex CLI capabilities + add --json if supported ---
+# Task #103: prefer parsing session ID from structured --json events
+# (first session_meta event has the UUID at .payload.id) over the
+# brittle ~/.codex/sessions scraping heuristic. On older CLI without
+# --json, fall back to the heuristic.
+# shellcheck source=lib/codex-capabilities.sh
+. "$(dirname "$0")/lib/codex-capabilities.sh"
+codex_detect_capabilities "${PROJECT_DIR}"
+HAS_JSON_EVENTS="$(codex_cap_supports supports_json "${PROJECT_DIR}")"
+
+EVENTS_FILE=""
+if [[ "${HAS_JSON_EVENTS}" == "true" ]]; then
+  EVENTS_FILE="${CYCLE_DIR}/codex-events.jsonl"
+  CODEX_FLAGS+=(--json)
+fi
+
 # --- invoke ---
-if ! codex exec "${CODEX_FLAGS[@]}" <<EOF
+# When --json is enabled, stdout becomes JSONL events; redirect to file.
+# When not, stdout is unused (--output-schema + -o write to files).
+if [[ -n "${EVENTS_FILE}" ]]; then
+  if ! codex exec "${CODEX_FLAGS[@]}" <<EOF >"${EVENTS_FILE}" 2>>"${CYCLE_DIR}/codex-stderr.log"
 $(cat "${SYSTEM_PROMPT}")
 
 ---
 
 ${USER_PROMPT}
 EOF
-then
-  echo "[codex-round1] ERROR: codex exec exited non-zero" >&2
-  echo "failed:codex_exec_nonzero" > "${CYCLE_DIR}/.status"
-  exit 1
+  then
+    echo "[codex-round1] ERROR: codex exec exited non-zero" >&2
+    echo "failed:codex_exec_nonzero" > "${CYCLE_DIR}/.status"
+    exit 1
+  fi
+else
+  if ! codex exec "${CODEX_FLAGS[@]}" <<EOF
+$(cat "${SYSTEM_PROMPT}")
+
+---
+
+${USER_PROMPT}
+EOF
+  then
+    echo "[codex-round1] ERROR: codex exec exited non-zero" >&2
+    echo "failed:codex_exec_nonzero" > "${CYCLE_DIR}/.status"
+    exit 1
+  fi
 fi
 
-# --- capture session id (for codex exec resume in later rounds) ---
-# Heuristic: most-recent rollout file in ~/.codex/sessions/.
-# Brittle under concurrent Codex use; acceptable for v2.0.0. Better approach
-# tracked in task #103 (v2.1.0 Codex modernization): parse
-# `codex exec --json` for thread.started event.
-# shellcheck disable=SC2038
-# (SC2038 flags find|xargs without -print0/-0; the whole pipeline is
-# planned for replacement per task #103, so don't bother fixing here.)
-SESSION_ID=$(
-  find ~/.codex/sessions -name 'rollout-*.jsonl' -type f 2>/dev/null \
-    | xargs -I{} ls -t {} 2>/dev/null \
-    | head -1 \
-    | xargs -I{} basename {} .jsonl 2>/dev/null \
-    | sed 's/^rollout-//'
-)
+# --- capture session id ---
+# Modern path: first event in --json output is `session_meta` with the
+# session UUID at .payload.id. Robust under concurrent Codex use.
+# Fallback (legacy CLI without --json): scrape ~/.codex/sessions for
+# the most-recent rollout. Brittle (can pick wrong session) but the
+# only option pre-0.125.
+SESSION_ID=""
+if [[ -n "${EVENTS_FILE}" ]] && [[ -s "${EVENTS_FILE}" ]]; then
+  SESSION_ID=$(jq -r 'select(.type == "session_meta") | .payload.id' \
+                  "${EVENTS_FILE}" 2>/dev/null | head -1)
+fi
+if [[ -z "${SESSION_ID}" ]]; then
+  # shellcheck disable=SC2038
+  # SC2038 — this fallback is exactly the old heuristic, kept only for
+  # CLI versions without --json. Modern path above is preferred. Use
+  # find -printf for proper time sort instead of `xargs ls -t` (which
+  # doesn't actually sort across multiple files).
+  SESSION_ID=$(
+    find ~/.codex/sessions -name 'rollout-*.jsonl' -type f -printf '%T@ %p\n' 2>/dev/null \
+      | sort -rn \
+      | head -1 \
+      | awk '{print $2}' \
+      | xargs -I{} basename {} .jsonl 2>/dev/null \
+      | sed 's/^rollout-//'
+  )
+fi
 if [[ -n "${SESSION_ID}" ]]; then
   echo "${SESSION_ID}" > "${CYCLE_DIR}/codex-session-id"
 fi
