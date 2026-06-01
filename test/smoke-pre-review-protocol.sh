@@ -159,21 +159,27 @@ else
   fail "global disable: expected no output, got: $OUT"
 fi
 
-# ---- case 3: Bash tool → pass-through (deferred to sub-piece #2) ----
+# ---- case 3: Bash + fake APPROVE → permissionDecision=allow ----
 
-info "[3] Bash tool with experimental on → pass-through (sub-piece #2 owns Bash)"
+info "[3] Bash + fake APPROVE → allow + kind=bash_command in submission"
 SANDBOX=$(make_sandbox); CLEANUP_PATHS+=("$SANDBOX")
+spawn_reviewer "$SANDBOX" "allow" "read-only command"
 OUT=$(
   CLAUDE_PROJECT_DIR="$SANDBOX" \
   PRILIVE_PRE_REVIEW_EXPERIMENTAL=1 \
+  PRILIVE_PRE_REVIEW_DEADLINE_S=10 \
   bash "$HOOK" <<< "$(make_input Bash "")"
 )
-if [[ -z "$OUT" ]]; then
-  pass "Bash: hook passes through; sub-piece #2 will register Bash matcher"
-  PASS_COUNT=$((PASS_COUNT+1))
-else
-  fail "Bash: expected no output, got: $OUT"
-fi
+DECISION=$(echo "$OUT" | jq -r '.hookSpecificOutput.permissionDecision // empty' 2>/dev/null)
+[[ "$DECISION" == "allow" ]] || fail "Bash + allow: expected allow, got: $DECISION (out=$OUT)"
+SUB_FILE=$(find "$SANDBOX/.tdd/queue" -maxdepth 1 -name '*.submission.json' 2>/dev/null | head -1)
+[[ -n "$SUB_FILE" ]] || fail "Bash submission file not written"
+KIND=$(jq -r '.payload.kind // empty' "$SUB_FILE" 2>/dev/null)
+CMD=$(jq -r '.payload.bash_command // empty' "$SUB_FILE" 2>/dev/null)
+[[ "$KIND" == "bash_command" ]] || fail "Bash submission kind should be bash_command; got: $KIND"
+[[ "$CMD" == "ls -la" ]] || fail "Bash submission bash_command should be 'ls -la'; got: $CMD"
+pass "Bash + allow: hook emitted allow + submission has kind=bash_command + command field"
+PASS_COUNT=$((PASS_COUNT+1))
 
 # ---- case 4: Write + fake APPROVE → permissionDecision=allow ----
 
@@ -236,18 +242,22 @@ info "[7] verdict file already present → instant cache hit, no submission need
 SANDBOX=$(make_sandbox); CLEANUP_PATHS+=("$SANDBOX")
 INPUT=$(make_input Write "$SANDBOX/cached.go")
 # Compute the same canonical payload + hash the hook will compute.
-PAYLOAD=$(echo "$INPUT" | jq -c '
+# Must mirror hooks/pre-review.sh exactly — adding/removing fields here
+# without matching the hook will break the cache-hit assertion.
+PAYLOAD=$(echo "$INPUT" | jq -c --arg kind "file_change" '
   def file_path: .tool_input.file_path // .tool_input.notebook_path // "";
   {
-    kind: "file_change",
+    kind: $kind,
     tool_name: .tool_name,
     file_path: file_path,
-    write_content:    (.tool_input.content    // null),
-    edit_old_string:  (.tool_input.old_string // null),
-    edit_new_string:  (.tool_input.new_string // null),
-    multi_edits:      (.tool_input.edits      // null),
-    notebook_source:  (.tool_input.new_source // null),
-    notebook_cell_id: (.tool_input.cell_id    // null)
+    write_content:    (.tool_input.content     // null),
+    edit_old_string:  (.tool_input.old_string  // null),
+    edit_new_string:  (.tool_input.new_string  // null),
+    multi_edits:      (.tool_input.edits       // null),
+    notebook_source:  (.tool_input.new_source  // null),
+    notebook_cell_id: (.tool_input.cell_id     // null),
+    bash_command:     (.tool_input.command     // null),
+    bash_description: (.tool_input.description // null)
   }
 ')
 if command -v sha256sum >/dev/null 2>&1; then
@@ -321,6 +331,47 @@ FILE_PATH=$(jq -r '.payload.file_path // empty' "$SUB_FILE" 2>/dev/null)
 [[ "$CELL" == "abc" ]]             || fail "NotebookEdit submission missing cell_id; got: $CELL"
 [[ "$FILE_PATH" == *"notebook.ipynb" ]] || fail "NotebookEdit submission file_path wrong; got: $FILE_PATH"
 pass "NotebookEdit: submission carries notebook source + cell_id + path"
+PASS_COUNT=$((PASS_COUNT+1))
+
+# ---- case 10: Bash + fake DENY with findings → deny + findings rendered ----
+
+info "[10] Bash + fake DENY → deny + findings rendered into reason"
+SANDBOX=$(make_sandbox); CLEANUP_PATHS+=("$SANDBOX")
+spawn_reviewer_deny_with_findings "$SANDBOX"
+OUT=$(
+  CLAUDE_PROJECT_DIR="$SANDBOX" \
+  PRILIVE_PRE_REVIEW_EXPERIMENTAL=1 \
+  PRILIVE_PRE_REVIEW_DEADLINE_S=10 \
+  bash "$HOOK" <<< "$(make_input Bash "")"
+)
+DECISION=$(echo "$OUT" | jq -r '.hookSpecificOutput.permissionDecision       // empty' 2>/dev/null)
+REASON=$(echo "$OUT"   | jq -r '.hookSpecificOutput.permissionDecisionReason // empty' 2>/dev/null)
+[[ "$DECISION" == "deny" ]]               || fail "Bash + deny: expected deny, got: $DECISION"
+[[ "$REASON" == *"unsafe edit"* ]]        || fail "Bash deny: reason missing top-level message"
+[[ "$REASON" == *"deletes guarded path"* ]] || fail "Bash deny: reason missing finding title"
+pass "Bash + deny: decision + findings rendered in permissionDecisionReason"
+PASS_COUNT=$((PASS_COUNT+1))
+
+# ---- case 11: Bash with missing .tool_input.command → fail-closed deny ----
+
+info "[11] Bash with no .tool_input.command → fail-closed deny"
+SANDBOX=$(make_sandbox); CLEANUP_PATHS+=("$SANDBOX")
+# Build a malformed Bash PreToolUse input: tool_input present but no command.
+MALFORMED=$(jq -nc '{tool_name:"Bash", session_id:"sess-1", tool_input:{description:"sneaky"}}')
+OUT=$(
+  CLAUDE_PROJECT_DIR="$SANDBOX" \
+  PRILIVE_PRE_REVIEW_EXPERIMENTAL=1 \
+  PRILIVE_PRE_REVIEW_DEADLINE_S=10 \
+  bash "$HOOK" <<< "$MALFORMED"
+)
+DECISION=$(echo "$OUT" | jq -r '.hookSpecificOutput.permissionDecision       // empty' 2>/dev/null)
+REASON=$(echo "$OUT"   | jq -r '.hookSpecificOutput.permissionDecisionReason // empty' 2>/dev/null)
+[[ "$DECISION" == "deny" ]]                    || fail "Bash missing command: expected deny, got: $DECISION"
+[[ "$REASON" == *"no .tool_input.command"* ]]  || fail "Bash missing command: reason wrong: $REASON"
+# Confirm we did NOT write a submission file for the empty command.
+SUB_COUNT=$(find "$SANDBOX/.tdd/queue" -maxdepth 1 -name '*.submission.json' 2>/dev/null | wc -l | tr -d ' ')
+[[ "$SUB_COUNT" == "0" ]] || fail "Bash missing command: hook should not submit; wrote $SUB_COUNT file(s)"
+pass "Bash missing command: hook fails closed before submitting"
 PASS_COUNT=$((PASS_COUNT+1))
 
 # ---- summary ----
