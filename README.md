@@ -239,7 +239,7 @@ export PRILIVE_REVIEW_DISABLE=1
 
 ## What the gate does NOT cover
 
-The pre-write gate (`PRILIVE_PRE_REVIEW_EXPERIMENTAL=1`) reviews every `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, and `Bash` action **Claude Code is about to take** through its tool API. That covers a lot — but it does not cover everything. Two architectural ceilings to know about:
+The pre-write gate (`[pre_review] enabled = true` in `tdd-pack.toml`, or the per-shell `PRILIVE_PRE_REVIEW_EXPERIMENTAL=1` env override) reviews every `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, and `Bash` action **Claude Code is about to take** through its tool API. That covers a lot — but it does not cover everything. Two architectural ceilings to know about:
 
 ### Opaque payloads
 

@@ -55,6 +55,10 @@ ACTUAL=$(awk -F' = ' '/^max_rounds =/ {gsub(/ /,"",$2); print $2; exit}' "${TOML
 pass "tdd-pack.toml max_rounds = 4"
 PASS_COUNT=$((PASS_COUNT + 1))
 
+require_phrase "${TOML}" '\[pre_review\]'        "tdd-pack.toml has [pre_review] section"
+require_phrase "${TOML}" 'enabled = false'       "tdd-pack.toml ships pre_review.enabled = false by default"
+require_phrase "${TOML}" 'Activation precedence' "tdd-pack.toml documents precedence order"
+
 info "[4] runner fallback defaults match shipped config"
 for f in "${PROJECT_ROOT}/runner/review-runner.sh" "${PROJECT_ROOT}/runner/codex-round-n.sh"; do
   if grep -qE 'cfg_get.*review.max_rounds.*"4"' "${f}"; then

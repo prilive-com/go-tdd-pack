@@ -447,6 +447,100 @@ REASON=$(echo "$OUT"   | jq -r '.hookSpecificOutput.permissionDecisionReason // 
 pass "submission write fails: hook emits deny with specific cause (not the generic deadline message)"
 PASS_COUNT=$((PASS_COUNT+1))
 
+# ============================================================
+# Config-based activation (tdd-pack.toml [pre_review] enabled)
+# ============================================================
+
+# Helper: a sandbox that includes runner/lib/config.sh so the hook can
+# read tdd-pack.toml. The other tests don't need this because they use
+# the env override path.
+make_sandbox_with_config_libs() {
+  local d
+  d=$(mktemp -d)
+  mkdir -p "$d/.tdd/queue" "$d/runner/lib"
+  cp "${PROJECT_ROOT}/runner/lib/config.sh" "$d/runner/lib/"
+  echo "$d"
+}
+
+# ---- case 15: config enabled=true → gate active ----
+
+info "[15] tdd-pack.toml pre_review.enabled = true → gate ON"
+SANDBOX=$(make_sandbox_with_config_libs); CLEANUP_PATHS+=("$SANDBOX")
+cat > "$SANDBOX/tdd-pack.toml" <<'EOF'
+[pre_review]
+enabled = true
+EOF
+spawn_reviewer "$SANDBOX" "allow" "config-gated review"
+OUT=$(
+  CLAUDE_PROJECT_DIR="$SANDBOX" \
+  PRILIVE_PRE_REVIEW_DEADLINE_S=10 \
+  bash "$HOOK" <<< "$(make_input Write "$SANDBOX/foo.go")"
+)
+DECISION=$(echo "$OUT" | jq -r '.hookSpecificOutput.permissionDecision // empty' 2>/dev/null)
+[[ "$DECISION" == "allow" ]] || fail "config enabled=true: expected allow, got: $DECISION (out=$OUT)"
+pass "config enabled=true: gate active without env var, hook emitted allow"
+PASS_COUNT=$((PASS_COUNT+1))
+
+# ---- case 16: config enabled=false + no env → pass-through ----
+
+info "[16] tdd-pack.toml pre_review.enabled = false + no env → pass-through"
+SANDBOX=$(make_sandbox_with_config_libs); CLEANUP_PATHS+=("$SANDBOX")
+cat > "$SANDBOX/tdd-pack.toml" <<'EOF'
+[pre_review]
+enabled = false
+EOF
+OUT=$(
+  CLAUDE_PROJECT_DIR="$SANDBOX" \
+  bash "$HOOK" <<< "$(make_input Write "$SANDBOX/foo.go")"
+)
+if [[ -z "$OUT" ]]; then
+  pass "config enabled=false + no env: pass-through (no JSON)"
+  PASS_COUNT=$((PASS_COUNT+1))
+else
+  fail "config enabled=false: expected no output, got: $OUT"
+fi
+
+# ---- case 17: env override wins over config=false ----
+
+info "[17] env PRILIVE_PRE_REVIEW_EXPERIMENTAL=1 wins over config enabled=false"
+SANDBOX=$(make_sandbox_with_config_libs); CLEANUP_PATHS+=("$SANDBOX")
+cat > "$SANDBOX/tdd-pack.toml" <<'EOF'
+[pre_review]
+enabled = false
+EOF
+spawn_reviewer "$SANDBOX" "allow" "env-overridden"
+OUT=$(
+  CLAUDE_PROJECT_DIR="$SANDBOX" \
+  PRILIVE_PRE_REVIEW_EXPERIMENTAL=1 \
+  PRILIVE_PRE_REVIEW_DEADLINE_S=10 \
+  bash "$HOOK" <<< "$(make_input Write "$SANDBOX/foo.go")"
+)
+DECISION=$(echo "$OUT" | jq -r '.hookSpecificOutput.permissionDecision // empty' 2>/dev/null)
+[[ "$DECISION" == "allow" ]] || fail "env override: expected allow, got: $DECISION (out=$OUT)"
+pass "env override wins over config=false: gate active"
+PASS_COUNT=$((PASS_COUNT+1))
+
+# ---- case 18: global kill switch wins over BOTH env override and config=true ----
+
+info "[18] PRILIVE_REVIEW_DISABLE=1 wins over config=true and env override"
+SANDBOX=$(make_sandbox_with_config_libs); CLEANUP_PATHS+=("$SANDBOX")
+cat > "$SANDBOX/tdd-pack.toml" <<'EOF'
+[pre_review]
+enabled = true
+EOF
+OUT=$(
+  CLAUDE_PROJECT_DIR="$SANDBOX" \
+  PRILIVE_PRE_REVIEW_EXPERIMENTAL=1 \
+  PRILIVE_REVIEW_DISABLE=1 \
+  bash "$HOOK" <<< "$(make_input Write "$SANDBOX/foo.go")"
+)
+if [[ -z "$OUT" ]]; then
+  pass "global disable wins: hook silent even with config=true + env=1"
+  PASS_COUNT=$((PASS_COUNT+1))
+else
+  fail "global disable: expected no output, got: $OUT"
+fi
+
 # ---- summary ----
 
 echo ""
