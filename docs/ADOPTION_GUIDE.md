@@ -209,6 +209,32 @@ That's it.
 
 ---
 
+## Activating the pre-write gate
+
+The pre-write gate is **off by default**. Turn it on by editing
+`tdd-pack.toml`:
+
+```toml
+[pre_review]
+enabled = true
+```
+
+Commit that change and Claude Code in this project gates every
+`Write`, `Edit`, `MultiEdit`, `NotebookEdit`, and `Bash` action
+through Codex before it runs.
+
+**Activation precedence** (highest first):
+
+1. `PRILIVE_REVIEW_DISABLE=1` in env → gate OFF (global kill switch).
+2. `PRILIVE_PRE_REVIEW_EXPERIMENTAL=1` in env → gate ON for this
+   shell, regardless of config. Useful for trying the gate in one
+   terminal without committing a config change.
+3. `[pre_review] enabled = true` in `tdd-pack.toml` → persistent
+   project default.
+4. Otherwise → gate OFF (advisory PostToolUse review still runs).
+
+---
+
 ## Architectural ceiling — what the gate cannot catch
 
 The pre-write gate hooks into Claude Code's `PreToolUse` event for

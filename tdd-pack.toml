@@ -87,3 +87,24 @@ keep_transcripts = true
 # Single emergency switch. If PRILIVE_REVIEW_DISABLE=1 in the environment,
 # the entire pack becomes a no-op. Use only as kill switch, not daily.
 env_var = "PRILIVE_REVIEW_DISABLE"
+
+[pre_review]
+# Pre-write gating (task #109). When `enabled = true`, every Write, Edit,
+# MultiEdit, NotebookEdit, and Bash action Claude Code takes is reviewed
+# by Codex BEFORE it runs. Reviewer decides allow / deny / ask; deny
+# blocks the action.
+#
+# Off by default so adopters who upgrade to this version see no behavior
+# change. To turn it on for your project: set `enabled = true` here and
+# commit the change. To temporarily bypass, `export PRILIVE_REVIEW_DISABLE=1`.
+#
+# Power-user env override: PRILIVE_PRE_REVIEW_EXPERIMENTAL=1 forces the
+# gate on for this shell regardless of config. Useful when you want to
+# experiment in one terminal without committing a config change.
+#
+# Activation precedence (highest first):
+#   1. PRILIVE_REVIEW_DISABLE=1       → gate OFF (kill switch)
+#   2. PRILIVE_PRE_REVIEW_EXPERIMENTAL=1 → gate ON (env override)
+#   3. pre_review.enabled in this file → persistent project default
+#   4. Otherwise → OFF
+enabled = false
