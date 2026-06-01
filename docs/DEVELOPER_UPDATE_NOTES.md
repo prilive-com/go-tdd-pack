@@ -1,25 +1,333 @@
 # Developer Update Notes
 
-> **Historical.** This file documents the v1.x update path (v1.3.1 →
-> v1.10.x ceremony architecture). Kept for reference; superseded by
-> v2.0.
+> **Audience:** developers who already installed the Prilive Go TDD Pack
+> in their Go project and want to move from one version to a newer one.
 >
-> **Current update docs (apply in order if upgrading from earlier
-> v2.0 commits):**
->
-> 1. [`UPDATE_2026-05-17.md`](UPDATE_2026-05-17.md) — quality tuning,
->    confidence scores, tool grounding, tightened orientation
->    (commit `12eceb8`)
-> 2. [`UPDATE_2026-05-17_monorepo-fix.md`](UPDATE_2026-05-17_monorepo-fix.md)
->    — diff-driven discovery for all Go repo layouts (commit `4005167`)
->
-> If you're starting from a v1.x install, do not apply the docs below.
-> See [`V2_ROLLOUT_GUIDE.md`](V2_ROLLOUT_GUIDE.md) for the v1.x → v2.0
-> cutover path instead.
+> For first install, read [`ADOPTION_GUIDE.md`](ADOPTION_GUIDE.md)
+> instead.
 
 ---
 
-# v1.x developer update notes (historical, do not apply for v2.0 adoption)
+## TL;DR
+
+```bash
+# 1. Read the new CHANGELOG entry first (5 minutes).
+#    https://github.com/prilive-com/go-tdd-pack/blob/main/CHANGELOG.md
+
+# 2. Re-clone the pack at the version you want.
+git clone --depth 1 --branch vX.Y.Z \
+  https://github.com/prilive-com/go-tdd-pack.git /tmp/go-tdd-pack
+
+# 3. Copy the updated files into your project (overwrites pack files only,
+#    NOT your CLAUDE.md / tdd-pack.toml / .claude/settings.json).
+cd ~/your-go-project
+cp -R /tmp/go-tdd-pack/hooks .
+cp -R /tmp/go-tdd-pack/runner .
+cp -R /tmp/go-tdd-pack/prompts .
+cp -R /tmp/go-tdd-pack/schemas .
+cp -R /tmp/go-tdd-pack/test .
+chmod +x hooks/*.sh runner/*.sh runner/lib/*.sh test/smoke-*.sh
+
+# 4. Verify the install still works.
+bash test/smoke-v2-phase2.sh
+bash test/smoke-tool-grounding.sh
+
+# 5. If the CHANGELOG entry links to a docs/UPDATE_*.md file, follow it.
+```
+
+That covers most upgrades. Read the rest of this page if you want to
+know **why**, or you hit one of the corner cases (config schema change,
+state-file shape change, downgrade).
+
+---
+
+## What "update the pack" means
+
+The pack is six things on disk:
+
+| Lives in | What it is | Update? |
+|---|---|---|
+| `hooks/` | Shell scripts triggered by Claude Code events | **Yes, overwrite** |
+| `runner/` | Review runner + Codex callers | **Yes, overwrite** |
+| `prompts/` | Codex system + per-round prompt templates | **Yes, overwrite** |
+| `schemas/` | JSON schemas for Codex output | **Yes, overwrite** |
+| `test/` | Smoke tests | **Yes, overwrite** |
+| `tdd-pack.toml` | Per-project config | **No** — keep your edits |
+| `CLAUDE.md`, `AGENTS.md` | Per-project rules | **No** — keep your edits |
+| `.claude/settings.json` | Per-project hook registration + permissions | **No** — merge if needed |
+
+Anything under `.tdd/` is runtime state (cycle dirs, lock, capability
+cache). Leave it alone; the runner manages it.
+
+The rule of thumb: **the pack ships scripts; your project owns the
+config**. Upgrades overwrite scripts; your config keeps its shape.
+
+---
+
+## Step-by-step upgrade
+
+### Step 1 — Read the CHANGELOG entry for the new version
+
+Open https://github.com/prilive-com/go-tdd-pack/blob/main/CHANGELOG.md
+and read the section for the version you are moving TO.
+
+Look for these three things:
+
+1. **Hook contract changes** — anything under "Changed" that mentions
+   `hooks/*.sh`, `settings.json`, or "deny pattern". You may need to
+   merge into your `.claude/settings.json`.
+2. **Config schema changes** — anything that mentions `tdd-pack.toml`,
+   `[review]`, `[codex]`, `[severity]`. Adopter action is required only
+   if the entry says "**Breaking**" or "**Migration**".
+3. **A linked `docs/UPDATE_YYYY-MM-DD.md` file** — only present for
+   releases that need adopter action beyond file-copy.
+
+If the entry is in the **patch** lane (2.0.X → 2.0.Y) and contains only
+`Fixed` items, you can usually skip straight to Step 2.
+
+### Step 2 — Snapshot your project state
+
+Before overwriting anything:
+
+```bash
+cd ~/your-go-project
+
+# Make sure your working tree is clean — pack overwrites are easier to
+# audit on a clean tree.
+git status
+
+# If you customised any pack file in place (rare), capture the diff
+# against the version you currently have, so you can re-apply later.
+git diff -- hooks/ runner/ prompts/ schemas/ test/ > /tmp/my-pack-customisations.patch
+```
+
+If `my-pack-customisations.patch` is non-empty, **stop and decide**:
+
+- If your edit is project-specific (a new deny pattern that only matters
+  to your repo), it belongs in your project's own `.claude/settings.json`
+  or a new file under `.claude/rules/`, not a pack file. Move it before
+  upgrading.
+- If your edit is a bugfix that should ship to all adopters, open an
+  issue or PR upstream.
+
+In-place edits to pack files do not survive upgrades. The pack assumes
+you own your project files and the pack owns the pack files.
+
+### Step 3 — Fetch the new version
+
+Pick the exact tag (not `main`). Tags are immutable; `main` may move.
+
+```bash
+# Replace vX.Y.Z with the version you want, e.g. v2.0.1.
+git clone --depth 1 --branch vX.Y.Z \
+  https://github.com/prilive-com/go-tdd-pack.git /tmp/go-tdd-pack
+```
+
+If you previously cloned to `/tmp/go-tdd-pack`, delete it first:
+
+```bash
+rm -rf /tmp/go-tdd-pack
+```
+
+### Step 4 — Copy the updated files
+
+```bash
+cd ~/your-go-project
+cp -R /tmp/go-tdd-pack/hooks .
+cp -R /tmp/go-tdd-pack/runner .
+cp -R /tmp/go-tdd-pack/prompts .
+cp -R /tmp/go-tdd-pack/schemas .
+cp -R /tmp/go-tdd-pack/test .
+chmod +x hooks/*.sh runner/*.sh runner/lib/*.sh test/smoke-*.sh
+```
+
+Do **not** copy `tdd-pack.toml`, `CLAUDE.md`, `AGENTS.md`, or
+`.claude/settings.json` blindly. Those are yours. If the CHANGELOG
+flagged a config schema change, hand-merge only the fields that changed.
+
+### Step 5 — Re-run the smoke tests
+
+```bash
+bash test/smoke-v2-phase2.sh        # 25 unit checks, no Codex calls
+bash test/smoke-tool-grounding.sh   # 12 fixture checks, no Codex calls
+```
+
+Both must end with `PASS`. If either fails, the install is broken — go
+to [Rollback](#rollback) below.
+
+If you have a few minutes and a working Codex auth:
+
+```bash
+bash test/smoke-v2-mvp.sh           # ~30s, 1 real Codex call
+```
+
+This proves end-to-end review still works on the new version.
+
+### Step 6 — Apply any per-release update notes
+
+If the CHANGELOG entry linked to `docs/UPDATE_YYYY-MM-DD.md`, open it
+and follow the steps. These notes exist only for releases that need
+adopter action beyond file-copy (config migration, in-flight state
+fixup, deprecation cleanup).
+
+If there is no such note, you are done.
+
+### Step 7 — Pin the version
+
+Record the version you upgraded to, so you can tell at a glance what
+you are running:
+
+```bash
+echo "vX.Y.Z" > .tdd-pack-version
+git add .tdd-pack-version
+git commit -sm "chore: bump go-tdd-pack to vX.Y.Z"
+```
+
+This file has no functional meaning to the pack — it is just a marker
+for humans. The runner does not read it.
+
+---
+
+## Two installation paths
+
+The pack supports two install paths. Pick one and stick with it.
+
+### Path A — file copy (recommended for most teams)
+
+This is what [`ADOPTION_GUIDE.md`](ADOPTION_GUIDE.md) describes. You
+clone the repo, copy pack directories into your project, and commit
+them to your project's git history. Upgrades use the steps above.
+
+**Pros:** every file the runner uses is visible in your repo; you can
+audit the diff against any earlier version; works offline.
+
+**Cons:** you have to remember to re-copy on new releases.
+
+### Path B — Claude Code plugin marketplace
+
+If your team uses a Claude Code plugin marketplace, you can install via:
+
+```bash
+/plugin install go-tdd-pack@prilive-com
+```
+
+Upgrades become:
+
+```bash
+/plugin update go-tdd-pack
+```
+
+**Pros:** one command; never miss a release.
+
+**Cons:** the pack files live under `~/.claude/plugins/`, not in your
+project — your repo does not show what version is running. Use the
+`.tdd-pack-version` marker file from Step 7 to compensate.
+
+Do not mix paths. If you start with A, do not later run `/plugin install`
+on the same project. The two installs will fight over hook registration.
+
+---
+
+## Rollback
+
+If the new version misbehaves, roll back to the previous tag the same
+way you upgraded — clone the older tag, copy the files back.
+
+```bash
+# Substitute the previous version you were on.
+git clone --depth 1 --branch vX.Y.Z-prev \
+  https://github.com/prilive-com/go-tdd-pack.git /tmp/go-tdd-pack-rollback
+
+cd ~/your-go-project
+cp -R /tmp/go-tdd-pack-rollback/hooks .
+cp -R /tmp/go-tdd-pack-rollback/runner .
+cp -R /tmp/go-tdd-pack-rollback/prompts .
+cp -R /tmp/go-tdd-pack-rollback/schemas .
+cp -R /tmp/go-tdd-pack-rollback/test .
+chmod +x hooks/*.sh runner/*.sh runner/lib/*.sh test/smoke-*.sh
+
+# Rerun smokes to confirm rollback is clean.
+bash test/smoke-v2-phase2.sh
+bash test/smoke-tool-grounding.sh
+```
+
+If the failing release introduced a state-file shape change (very rare —
+only happens at major bumps like v1.x → v2.0), rolling back the files
+is not enough; you also have to delete or migrate `.tdd/reviews/`. The
+release CHANGELOG will say so explicitly. Without an explicit note, the
+state files are compatible.
+
+Also tell us: open an issue at
+https://github.com/prilive-com/go-tdd-pack/issues with the failing
+smoke output. A failed upgrade for one adopter is usually a bug we
+should fix for everyone.
+
+---
+
+## How to read the CHANGELOG
+
+The CHANGELOG follows Keep a Changelog 1.1.0. Sections under each
+version are always in the same order:
+
+- **Added** — new files, hooks, skills, config knobs. Backwards
+  compatible.
+- **Changed** — behavior change to an existing file. Usually
+  backwards-compatible; read carefully if it touches `hooks/` or
+  `settings.json`.
+- **Fixed** — bug fixes. Always safe to take.
+- **Removed** — file or knob deleted. Adopter action required if you
+  used it.
+- **Security** — security fix. Take immediately.
+
+The SemVer mapping is documented in [`RELEASE_GUIDE.md`](RELEASE_GUIDE.md)
+§ Versioning policy. In short: a patch bump (`2.0.X`) never needs
+adopter action; a minor bump (`2.X.0`) may add optional config knobs;
+a major bump (`X.0.0`) means there is an `UPDATE_*.md` migration note.
+
+---
+
+## Version floors
+
+The pack assumes minimum versions of its dependencies. If you upgrade
+the pack across a major version line, also check that your environment
+meets the new floors:
+
+- `claude` Code: see `.claude-plugin/plugin.json` `requirements.claude`
+- `codex` CLI: detected at runtime by `runner/lib/codex-capabilities.sh`
+  — older CLIs degrade gracefully; you get a warning, not a crash
+- `go`: matches the major Go feature the pack uses (see
+  [`ADOPTION_GUIDE.md`](ADOPTION_GUIDE.md) Step 1)
+
+Run `claude --version`, `codex --version`, `go version` after upgrade
+if you suspect a floor mismatch.
+
+---
+
+## Troubleshooting
+
+| Symptom after upgrade | Likely cause | Fix |
+|---|---|---|
+| Smoke test exits with `NOT EXECUTABLE` | New script in the release lacks +x bit on your filesystem | `chmod +x hooks/*.sh runner/*.sh runner/lib/*.sh test/smoke-*.sh` |
+| Smoke test exits with `command not found: jq` | jq missing on PATH | Install jq (`apt install jq`, `brew install jq`) |
+| Runner ignores edits after upgrade | Hook registration in `.claude/settings.json` points to old hook name | Diff against `/tmp/go-tdd-pack/.claude/settings.json` and merge any new entries |
+| Runner exits with `failed:no_session` on round 2 | Stale `.tdd/reviews/`/`.tdd/.codex-capabilities.json` from a crashed older cycle | Delete the offending cycle dir; the new version detects capabilities fresh |
+| `.tdd/.codex-capabilities.json` has wrong version | Codex CLI was updated but cache wasn't invalidated | Delete the file; it will regenerate on next run |
+| `tdd-pack.toml` field you set now has no effect | Config field renamed in a minor bump | Check the CHANGELOG entry under "Changed"; rename the field |
+| Pack starts denying actions it used to allow | New deny pattern in a hook (cited in CHANGELOG under "Changed") | Read the cited incident; if your case is legitimate, surface it as an issue |
+
+---
+
+_Upgrade guide last updated: 2026-06-01 for v2.0.1._
+
+---
+
+## Appendix — v1.x historical update notes (do not apply to v2.0+)
+
+> Everything below documents the v1.x update path (v1.3.1 → v1.10.x
+> ceremony architecture). Kept for archival reference only. v1.x is no
+> longer maintained; new adoption uses v2.0+. If you are still on v1.x,
+> follow [`V2_ROLLOUT_GUIDE.md`](V2_ROLLOUT_GUIDE.md) to cut over to
+> v2.0 instead of applying these notes.
 
 **Date:** 2026-05-08
 **Branch:** `feature/second-opinion`
@@ -28,7 +336,7 @@
 
 ---
 
-## TL;DR
+### TL;DR
 
 You can update safely today. Defaults preserve the v1.3.1 behavior you already have. New features activate when you flip flags or invoke new artifacts. **No mandatory action.**
 
@@ -42,9 +350,9 @@ One new thing **you should NOT use yet without testing**:
 
 ---
 
-## What changed
+### What changed
 
-### Group 1 — Safety hardening (already active by default)
+#### Group 1 — Safety hardening (already active by default)
 
 These fixes activate automatically when you update. They do not require config changes and they catch real bugs.
 
@@ -59,7 +367,7 @@ These fixes activate automatically when you update. They do not require config c
 
 **Adoption:** nothing for you to do. These activate on update.
 
-### Group 2 — TDD gate redesign (deals with a real documented conflict)
+#### Group 2 — TDD gate redesign (deals with a real documented conflict)
 
 The earlier "two gates" model in the docs conflicted with what the hook actually enforced. Marker 3 was named "Human approved implementation" but used as "Green phase authorized" — operators hit deadlock at the boundary.
 
@@ -77,7 +385,7 @@ The earlier "two gates" model in the docs conflicted with what the hook actually
 - New cycles use the renamed markers automatically (templates updated).
 - Old marker name still satisfies the gate for one minor version (you'll see a stderr deprecation warning).
 
-### Group 3 — Integration guards (opt-in)
+#### Group 3 — Integration guards (opt-in)
 
 After parasitoid trial caught 3 P0/P1 cross-module integration bugs that plan-review missed (camelCase vs snake_case key mismatch, helper-only-called-on-one-path, direct API call bypassing new wrapper), we added a regex-based check at commit time.
 
@@ -92,7 +400,7 @@ After parasitoid trial caught 3 P0/P1 cross-module integration bugs that plan-re
 - Add guards as you find bugs that grep could have caught. Each guard should link to the bug it would have caught.
 - See `.claude/rules/go-integration-guards.md` for the schema and when to use what.
 
-### Group 4 — /second-opinion v1.6.0 (anchoring-resistant review, opt-in)
+#### Group 4 — /second-opinion v1.6.0 (anchoring-resistant review, opt-in)
 
 The single biggest change. The mechanism resists confirmation bias by making Codex generate its OWN design BEFORE seeing Claude's plan, then comparing. Three new artifacts; three opt-in flags.
 
@@ -108,7 +416,7 @@ The single biggest change. The mechanism resists confirmation bias by making Cod
 
 **Adoption:** see "Recommended adoption sequence" below.
 
-### Group 5 — Trial-feedback fixes from earlier rounds
+#### Group 5 — Trial-feedback fixes from earlier rounds
 
 These are smaller but worth knowing about:
 
@@ -119,7 +427,7 @@ These are smaller but worth knowing about:
 
 ---
 
-## How to update
+### How to update
 
 ```bash
 cd your-project
@@ -146,11 +454,11 @@ Nothing else is required. Existing cycles continue working.
 
 ---
 
-## Recommended adoption sequence
+### Recommended adoption sequence
 
 The matrix and packet flags can be flipped immediately. Pass A flag should wait until you have your own validation.
 
-### Week 1 — flip the matrix flag
+#### Week 1 — flip the matrix flag
 
 ```json
 "second_opinion": {
@@ -162,7 +470,7 @@ The matrix and packet flags can be flipped immediately. Pass A flag should wait 
 
 **Operator burden:** Claude writes a row per Codex finding instead of a paragraph. Slightly more structure; same total work.
 
-### Week 2 — flip the research packet flag
+#### Week 2 — flip the research packet flag
 
 ```json
 "second_opinion": {
@@ -176,7 +484,7 @@ The matrix and packet flags can be flipped immediately. Pass A flag should wait 
 
 **If your team resists:** the burden is real. Trade-off is whether the discipline is worth it for your codebase. Optional in our defaults; opinion-strong if you have audit-sensitive code (auth, payments, migrations).
 
-### Later — flip the Pass A flag (after your own validation)
+#### Later — flip the Pass A flag (after your own validation)
 
 ```json
 "second_opinion": {
@@ -201,7 +509,7 @@ Killswitch is per-shell. Add to your shell rc to disable globally.
 
 ---
 
-## How `/second-opinion` works after the update
+### How `/second-opinion` works after the update
 
 For non-Tier-1 cycles: same as v1.5.x. Single Codex pass, JSON findings, Claude adjudicates per-finding.
 
@@ -232,9 +540,9 @@ This is the full Tier 1 ceremony. For lower-tier work, most of these steps are s
 
 ---
 
-## Honest disclaimers
+### Honest disclaimers
 
-### What's proven and what isn't
+#### What's proven and what isn't
 
 | Improvement | Status |
 |---|---|
@@ -250,11 +558,11 @@ This is the full Tier 1 ceremony. For lower-tier work, most of these steps are s
 | Closure check | Mechanical; verifies findings → implementation. Safe. |
 | **Pass A blind independent design** | **Mechanism validated on one synthetic scenario. Codebase-specific value unproven. Use the killswitch or the flag default until you've tested.** |
 
-### Citations
+#### Citations
 
 The Pass A design rests on the 2025–2026 literature on multi-agent review (anchoring bias, ensembling > debate, confirmation bias in LLM code review). Specific paper citations were provided by external consultants. The directional claims are consistent with what we know; specific paper-by-paper citations are plausible but not all independently verified. The design rests on directions, not paper-by-paper.
 
-### What we did NOT add
+#### What we did NOT add
 
 - No round-3 / counter-review (literature is unambiguous on the convergence/sycophancy risk of additional rounds)
 - No multi-agent role-theater (separate "primary-architect" / "reconciler" / "final-spec-author" agents — same model with different prompts adds no independent signal)
@@ -263,9 +571,9 @@ The Pass A design rests on the 2025–2026 literature on multi-agent review (anc
 
 ---
 
-## If you hit problems
+### If you hit problems
 
-### Update breaks an in-flight cycle
+#### Update breaks an in-flight cycle
 
 Run the migration scripts:
 ```bash
@@ -279,14 +587,14 @@ If a hook denies an action and the deny message doesn't help, the hook's stderr 
 - Stale adjudication (>60min mtime — re-run `/second-opinion`)
 - Missing green-proof.md (capture verbatim test output before committing green)
 
-### Pass A is slow / produces bad output for your scenario
+#### Pass A is slow / produces bad output for your scenario
 
 Three options:
 1. Per-shell disable: `export SECOND_OPINION_PASS_A_DISABLE=1`
 2. Per-project disable: keep `require_pass_a_tier1: false` in tdd-config.json (the default)
 3. Tell us: open an issue with the symptom. Pass A is the conditionally-shipped piece; we'd rather drop it than have it produce noise.
 
-### gpt-5.5 not available (API-key auth)
+#### gpt-5.5 not available (API-key auth)
 
 The skill auto-falls-back to `gpt-5.4` (the most powerful model API-key auth supports). Doctor.sh warns when it detects the mismatch. To pin a specific model permanently:
 
@@ -297,13 +605,13 @@ The skill auto-falls-back to `gpt-5.4` (the most powerful model API-key auth sup
 }
 ```
 
-### CI / pipeline failures
+#### CI / pipeline failures
 
 If the GitLab pipeline fails on `operating-rules-present`, you have an old version of `.gitlab-ci.yml` or a missing operating-rules file. Pull in the current CI template and verify both `CLAUDE.md` and `AGENTS.md` exist.
 
 ---
 
-## Where to find more detail
+### Where to find more detail
 
 | Topic | Document |
 |---|---|
@@ -317,6 +625,6 @@ If the GitLab pipeline fails on `operating-rules-present`, you have an old versi
 
 ---
 
-## Summary in one paragraph
+### Summary in one paragraph
 
 Update is safe — defaults preserve v1.3.1 behavior. Run the two migration scripts once. Flip the disposition-matrix flag this week (low risk, immediate gain). Flip the research-packet flag next week if your team is willing to write packets. Keep the Pass A flag OFF until you've validated it on at least one of your own Tier 1 cycles (or until we build the eval harness — open an issue if you want it sooner). Pipefail / redact-patterns / PARTIAL discipline / mandatory-second-opinion / TDD gate redesign all activate automatically and have caught real bugs in trial use. If anything denies unexpectedly, read the stderr message — every deny includes the specific fix.
