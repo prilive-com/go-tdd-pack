@@ -5,10 +5,12 @@
 
 [review]
 # Maximum debate rounds before escalating to the user.
-# Min 2, max 8. Quality-tuned default 5 — one extra round beyond the
-# typical 1-3 convergence range to absorb hard cases without pulling
-# the operator in too early.
-max_rounds = 5
+# Min 1, max 8. Default 4 — covers the typical 1-3 convergence range
+# with one extra round for harder cases. The runner stops early on
+# `approve`; reaching this cap without convergence triggers
+# escalation (A/B/V). Lowered from 5 to 4 in sub-piece #5; adopters
+# seeing noisy reviews can drop to 2 or 3.
+max_rounds = 4
 
 # Wait this long after the last edit before firing review (milliseconds).
 # Coalesces bursty edits into one cycle.

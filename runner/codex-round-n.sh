@@ -36,7 +36,7 @@ SESSION_ID=$(cat "${SESSION_FILE}")
 . "$(dirname "$0")/lib/config.sh"
 MODEL=$(cfg_get "${CONFIG}" "codex.model" "")
 WEB_SEARCH=$(cfg_get "${CONFIG}" "codex.web_search" "live")
-MAX_ROUNDS=$(cfg_get "${CONFIG}" "review.max_rounds" "5")
+MAX_ROUNDS=$(cfg_get "${CONFIG}" "review.max_rounds" "4")
 
 # --- build prompt with jq --rawfile (avoids ARG_MAX on large diffs) ---
 
