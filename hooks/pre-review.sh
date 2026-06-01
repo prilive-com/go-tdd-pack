@@ -199,6 +199,19 @@ if [[ ! -f "${VERDICT}" ]] && [[ ! -f "${SUBMISSION}" ]]; then
     && mv "${SUBMISSION}.tmp" "${SUBMISSION}"
 fi
 
+# --- launch the worker (detached, single-flight) --------------------------
+# Sub-piece #3: pre-review-worker.sh drains the queue and writes verdict
+# files. Single-instance is guarded by flock inside the worker, so
+# concurrent launches from parallel hook fires are no-ops. Hook returns
+# immediately after the launch; it does not wait for the worker.
+
+WORKER="${PROJECT_DIR}/runner/pre-review-worker.sh"
+if [[ -x "${WORKER}" ]] && [[ ! -f "${VERDICT}" ]]; then
+  nohup "${WORKER}" "${PROJECT_DIR}" </dev/null \
+    >>"${PROJECT_DIR}/.tdd/pre-review-worker.log" 2>&1 &
+  disown 2>/dev/null || true
+fi
+
 # --- poll for verdict on bounded deadline ---------------------------------
 
 DEADLINE_S="${PRILIVE_PRE_REVIEW_DEADLINE_S:-90}"
