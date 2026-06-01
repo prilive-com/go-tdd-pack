@@ -23,6 +23,24 @@
 # blocks until adopters explicitly opt in AND sub-piece #3 ships the
 # runner-side verdict producer.
 #
+# Fail-closed contract (sub-piece #4) — when experimental is ON:
+#   The ONLY intentional pass-throughs are:
+#     1. PRILIVE_REVIEW_DISABLE=1 (global kill switch)
+#     2. TOOL_NAME is not Write|Edit|MultiEdit|NotebookEdit|Bash
+#        (the hook is intentionally scoped — read-only and MCP tools
+#         are not gated)
+#   Every other "something is wrong" path emits a deny with a specific
+#   reason so the adopter sees exactly what to fix. Specifically:
+#     - jq missing                  → deny ("install jq, or unset the flag")
+#     - empty stdin                 → deny ("PreToolUse received no input")
+#     - malformed payload           → deny ("could not extract tool payload")
+#     - bash with no command field  → deny ("no .tool_input.command")
+#     - hash failure                → deny ("content hashing failed")
+#     - mkdir .tdd/queue/ fails     → deny ("cannot create queue dir")
+#     - submission write fails      → deny ("failed to write submission")
+#     - deadline reached, no verdict → deny ("review pending — retry")
+#     - verdict with unknown decision → deny ("unknown decision")
+#
 # Verdict file shape (written by the runner — sub-piece #3):
 #   {
 #     "decision": "allow" | "deny" | "ask",
@@ -51,10 +69,11 @@ if [[ "${PRILIVE_PRE_REVIEW_EXPERIMENTAL:-0}" != "1" ]]; then
 fi
 
 if ! command -v jq >/dev/null 2>&1; then
-  # No jq → cannot parse stdin safely. Pass-through is the safer fallback
-  # here: denying every action because of a tooling gap would block all
-  # work on a misconfigured machine. The runner-side smoke would catch
-  # this in CI before adopters see it.
+  # Fail-closed (sub-piece #4): with experimental on, the adopter
+  # explicitly opted into gating. Silently passing through would defeat
+  # the point of the gate. Emit deny via plain printf (jq is the thing
+  # missing) so the adopter sees exactly what to fix.
+  printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"pre-review: jq is not installed. Install jq to use pre-write gating (apt: jq, brew: jq), or unset PRILIVE_PRE_REVIEW_EXPERIMENTAL to disable the gate."}}'
   exit 0
 fi
 
@@ -73,6 +92,17 @@ sha256_of() {
 
 INPUT=$(cat 2>/dev/null || true)
 if [[ -z "${INPUT}" ]]; then
+  # Fail-closed (sub-piece #4): PreToolUse always passes a JSON payload
+  # on stdin. Empty stdin means something is wrong upstream — denying is
+  # the safe move so the adopter sees the failure instead of silently
+  # waving actions through.
+  jq -nc '{
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: "pre-review: PreToolUse hook received no input on stdin. Action blocked. This is unexpected — check Claude Code logs."
+    }
+  }'
   exit 0
 fi
 
@@ -197,6 +227,21 @@ if [[ ! -f "${VERDICT}" ]] && [[ ! -f "${SUBMISSION}" ]]; then
     }' \
     > "${SUBMISSION}.tmp" 2>/dev/null \
     && mv "${SUBMISSION}.tmp" "${SUBMISSION}"
+
+  # Fail-closed (sub-piece #4): if write/mv failed (read-only mount, disk
+  # full, quota), there's no submission for the worker to pick up — the
+  # hook would time out 90s later with the generic "review pending"
+  # deny. Catch it now so the adopter sees a specific cause.
+  if [[ ! -f "${SUBMISSION}" ]]; then
+    jq -nc --arg hash "${HASH}" '{
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: ("pre-review: failed to write submission file for hash " + $hash + " into .tdd/queue/. Likely cause: filesystem error (read-only mount, disk full, quota). Action blocked.")
+      }
+    }'
+    exit 0
+  fi
 fi
 
 # --- launch the worker (detached, single-flight) --------------------------
