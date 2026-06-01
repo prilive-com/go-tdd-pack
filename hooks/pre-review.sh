@@ -80,9 +80,15 @@ TOOL_NAME=$(printf '%s' "${INPUT}" | jq -r '.tool_name // empty' 2>/dev/null)
 SESSION_ID=$(printf '%s' "${INPUT}" | jq -r '.session_id // empty' 2>/dev/null)
 
 case "${TOOL_NAME}" in
-  Write|Edit|MultiEdit|NotebookEdit) ;;
+  Write|Edit|MultiEdit|NotebookEdit)
+    KIND="file_change"
+    ;;
+  Bash)
+    KIND="bash_command"
+    ;;
   *)
-    # Includes Bash (sub-piece #2) and any read-only tool.
+    # Any other tool (read-only Read/Grep/Glob, MCP tools, etc.) is
+    # not gated by this hook. Pass-through.
     exit 0
     ;;
 esac
@@ -102,14 +108,20 @@ if ! mkdir -p "${QUEUE_DIR}" 2>/dev/null; then
 fi
 
 # --- build canonical payload ----------------------------------------------
-# Same JSON shape across all four tool names so the runner has one schema.
-# `kind: "file_change"` will distinguish this from `kind: "bash_command"`
-# in sub-piece #2.
+# Same JSON shape for every tool the hook gates, so the runner has one
+# schema to consume. The `kind` field tells the runner what fields are
+# load-bearing:
+#   kind=file_change  → write_content / edit_*_string / multi_edits / notebook_*
+#   kind=bash_command → bash_command / bash_description
+#
+# Sub-piece #5 teaches the reviewer how to classify bash_command payloads
+# as read-only vs state-changing. This hook only delivers the payload; it
+# does not judge it.
 
-PAYLOAD=$(printf '%s' "${INPUT}" | jq -c '
+PAYLOAD=$(printf '%s' "${INPUT}" | jq -c --arg kind "${KIND}" '
   def file_path: .tool_input.file_path // .tool_input.notebook_path // "";
   {
-    kind: "file_change",
+    kind: $kind,
     tool_name: .tool_name,
     file_path: file_path,
     write_content:    (.tool_input.content     // null),
@@ -117,7 +129,9 @@ PAYLOAD=$(printf '%s' "${INPUT}" | jq -c '
     edit_new_string:  (.tool_input.new_string  // null),
     multi_edits:      (.tool_input.edits       // null),
     notebook_source:  (.tool_input.new_source  // null),
-    notebook_cell_id: (.tool_input.cell_id     // null)
+    notebook_cell_id: (.tool_input.cell_id     // null),
+    bash_command:     (.tool_input.command     // null),
+    bash_description: (.tool_input.description // null)
   }
 ' 2>/dev/null)
 
@@ -130,6 +144,22 @@ if [[ -z "${PAYLOAD}" ]] || [[ "${PAYLOAD}" == "null" ]]; then
     }
   }'
   exit 0
+fi
+
+# Defensive: a bash_command payload with no command field is malformed input.
+# Fail closed rather than submit an empty command for review.
+if [[ "${KIND}" == "bash_command" ]]; then
+  BASH_CMD=$(printf '%s' "${PAYLOAD}" | jq -r '.bash_command // empty' 2>/dev/null)
+  if [[ -z "${BASH_CMD}" ]]; then
+    jq -nc '{
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: "pre-review hook: Bash PreToolUse input had no .tool_input.command. Action blocked."
+      }
+    }'
+    exit 0
+  fi
 fi
 
 HASH=$(printf '%s' "${PAYLOAD}" | sha256_of)
