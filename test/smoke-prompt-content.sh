@@ -65,6 +65,24 @@ for f in "${PROJECT_ROOT}/runner/review-runner.sh" "${PROJECT_ROOT}/runner/codex
   fi
 done
 
+info "[5] README.md — pre-write gate ceiling section (sub-piece #6)"
+README="${PROJECT_ROOT}/README.md"
+require_phrase "${README}" 'What the gate does NOT cover'      "README ceiling heading"
+require_phrase "${README}" 'Opaque payloads'                   "README opaque-payloads section"
+require_phrase "${README}" 'python -c'                         "README python -c example"
+require_phrase "${README}" 'node -e'                           "README node -e example"
+require_phrase "${README}" 'ssh host'                          "README ssh-host example"
+require_phrase "${README}" 'governed executor|OS-level'        "README mitigation options"
+
+info "[6] docs/ADOPTION_GUIDE.md — extended ceiling discussion"
+GUIDE="${PROJECT_ROOT}/docs/ADOPTION_GUIDE.md"
+require_phrase "${GUIDE}" 'Architectural ceiling'              "GUIDE ceiling heading"
+require_phrase "${GUIDE}" 'Opaque payloads'                    "GUIDE opaque-payloads subsection"
+require_phrase "${GUIDE}" 'fail closed on opaque wrappers|fail-closed on opaque' "GUIDE fail-closed-on-opaque rule cited"
+require_phrase "${GUIDE}" 'outside Claude.s tool API'          "GUIDE out-of-band class"
+require_phrase "${GUIDE}" 'governed executor'                  "GUIDE governed-executor mitigation"
+require_phrase "${GUIDE}" 'seccomp|eBPF|auditd'                "GUIDE OS-level mitigation"
+
 echo ""
 echo "================================================================"
 echo "  PROMPT CONTENT SMOKE — PASS (${PASS_COUNT} checks)"

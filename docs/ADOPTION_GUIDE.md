@@ -209,6 +209,79 @@ That's it.
 
 ---
 
+## Architectural ceiling — what the gate cannot catch
+
+The pre-write gate hooks into Claude Code's `PreToolUse` event for
+`Write`, `Edit`, `MultiEdit`, `NotebookEdit`, and `Bash`. Every action
+through Claude's tool API goes through the gate. **Anything that
+bypasses Claude's tool API is invisible to the gate.** This is a
+property of all client-side hook approaches, not a bug in this pack.
+
+Two classes you should know about:
+
+### 1. Opaque payloads — wrapper visible, content not
+
+For these commands, the reviewer sees the wrapper text Claude proposes
+but cannot read inside it:
+
+| Command pattern | What the reviewer sees | What it cannot inspect |
+|---|---|---|
+| `python -c '<script>'` | the `-c` flag and the literal string | the script's runtime behavior beyond the visible string |
+| `python -m foo` | the module name | the module's actual code (it runs from disk) |
+| `node -e '<script>'` | the `-e` flag and the literal string | same as Python |
+| `echo <base64> \| base64 -d \| sh` | the base64 blob | the decoded shell |
+| `eval "$(curl <url>)"` | the URL and `eval` | the fetched script |
+| `ssh host` | the connection itself | every command run inside the SSH session |
+| `bash -c "<chain>"` | the chain string | indirect through-variables (`$foo`) whose values come from elsewhere |
+
+The reviewer prompt (`prompts/codex-pre-review-system.md`) instructs
+Codex to **fail closed on opaque wrappers**: if it cannot be certain a
+command is read-only, it treats the command as state-changing. So
+opaque payloads do not slip through as "read-only" — they trigger the
+full review. But the review can only judge the visible wrapper text.
+
+If your threat model includes a malicious agent specifically trying to
+hide commands inside opaque wrappers, the gate slows that down but
+does not prevent it.
+
+### 2. Anything outside Claude's tool API
+
+The gate is a hook **inside Claude Code**. It does not see:
+
+- Cron jobs on the host.
+- Commands you (or anyone else) type in a different terminal.
+- Other agents running on the same machine.
+- Anything that happens on a server Claude SSHed into.
+- Background processes Claude itself spawned earlier in the session
+  (`nohup … &`, `&` jobs that survive the launching turn).
+- File changes from `git pull`, `git checkout`, IDE auto-save, formatter
+  hooks fired by your editor, etc.
+
+These are out-of-band changes. Claude Code's hook event never fires
+because Claude's tool API was never involved.
+
+### 3. What would close the ceiling
+
+Two real options, both outside the pack's scope:
+
+1. **Generic governed executor.** Deny raw `Bash`; force every command
+   Claude runs through a wrapper script (e.g. `safebash.sh '<cmd>'`)
+   that logs the `argv[]` chain and submits it for review. Removes
+   opaque payloads (the wrapper always sees the final array,
+   pre-shell-expansion). Costs: lose Bash flexibility, fight
+   shell-quoting in every reviewed command, deal with adopter
+   resistance.
+2. **OS-level audit / sandbox.** seccomp filter, eBPF tracepoint,
+   `auditd`, or a container with a syscall-gated runtime that hooks
+   `execve()` at the kernel boundary. Closes both classes (opaque
+   payloads + out-of-band changes) but is host-level work, not
+   pack-level.
+
+If you need either, treat this pack as defense in depth, not the only
+line.
+
+---
+
 ## Emergency switch
 
 ```bash

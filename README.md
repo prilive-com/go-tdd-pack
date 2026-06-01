@@ -237,6 +237,44 @@ export PRILIVE_REVIEW_DISABLE=1
 
 ---
 
+## What the gate does NOT cover
+
+The pre-write gate (`PRILIVE_PRE_REVIEW_EXPERIMENTAL=1`) reviews every `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, and `Bash` action **Claude Code is about to take** through its tool API. That covers a lot — but it does not cover everything. Two architectural ceilings to know about:
+
+### Opaque payloads
+
+The reviewer sees the command Claude proposes, not what it runs inside. Examples:
+
+- `python -c '<script>'` — the reviewer sees the `-c` flag, not the Python code's behavior beyond the visible string.
+- `node -e '<script>'` — same problem.
+- `echo <base64> | base64 -d | sh` — the reviewer sees the encoded blob, not the decoded command.
+- `ssh host` — opens an interactive shell on a remote host. **Every command run inside the SSH session is invisible to any Claude-side hook.** Only the `ssh host` invocation itself is reviewed.
+
+The classification prompt treats opaque wrappers as state-changing by default (fail-closed), so they don't slip through as "read-only". But for actual content review, the reviewer is judging only the visible wrapper text.
+
+### Remote-host changes (and any change outside Claude)
+
+The gate is a Claude Code hook. It cannot see:
+
+- Cron jobs running on the host.
+- Commands typed by a human in a different terminal.
+- Other agents running on the same machine.
+- Anything that happens on a server Claude SSHed into.
+- Background processes Claude itself spawned earlier in the session (`nohup … &`).
+
+These are not bugs. They are the architectural ceiling of any client-side hook approach.
+
+### What would close them
+
+The two real options if you need to cover these:
+
+1. **Route all shell through one governed executor.** Deny raw `Bash`; force every command through a wrapper script that logs + reviews each `argv[]`. Removes the opaque-payload class. Requires giving up `Bash` flexibility.
+2. **OS-level audit / sandbox.** seccomp, eBPF, `auditd`, or a container with a syscall-gated runtime. Closes both classes but is host-level work, not pack-level.
+
+Both are out of scope for this pack. If your threat model needs them, treat the gate as defense in depth — not the only line.
+
+---
+
 ## Security
 
 Found a security issue? Please **do not** open a public issue.
