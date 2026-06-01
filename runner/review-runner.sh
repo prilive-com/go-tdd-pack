@@ -251,7 +251,7 @@ fi
 
 # ---- rounds START_ROUND..MAX_ROUNDS (resume path only) ----
 
-MAX_ROUNDS=$(cfg_get "${CONFIG}" "review.max_rounds" "5")
+MAX_ROUNDS=$(cfg_get "${CONFIG}" "review.max_rounds" "4")
 
 for ROUND in $(seq "${START_ROUND}" "${MAX_ROUNDS}"); do
   RESPONSE_FILE="${CYCLE_DIR}/claude-response-${ROUND}.txt"

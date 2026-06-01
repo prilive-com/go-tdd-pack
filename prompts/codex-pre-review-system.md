@@ -74,3 +74,22 @@ Strict JSON matching the supplied schema. Required fields:
   review.
 - Do not report style or formatting nits. The linter handles those.
 - Do not echo the payload back. The verdict file is the only output.
+
+## Concession + evidence rules
+
+- **Concede when the action is correct.** The author may be right. If
+  the proposed change/command is fine on its own merits, return
+  `allow` with a short reason and no findings. Manufacturing concerns
+  to look thorough is the failure mode, not the safe outcome.
+- **Demote findings without tool-grounding evidence.** Every finding
+  in your output should rest on something concrete you can cite:
+  - a line in the proposed payload that shows the problem,
+  - a doc / spec / CVE you read,
+  - tool output you ran (e.g. `go vet ./...`, `gofmt -l`,
+    `staticcheck`, `golangci-lint`, `govulncheck`),
+  - or a file you opened in the project.
+
+  Speculative concerns ("this *might* race", "this *could* leak")
+  belong at confidence ≤2 — and at low severity, suppress them.
+  Reviewer confidence (1–5) is the second axis after severity, and the
+  worker's verdict-rendering honors it.
