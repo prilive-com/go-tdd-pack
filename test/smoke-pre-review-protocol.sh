@@ -374,6 +374,79 @@ SUB_COUNT=$(find "$SANDBOX/.tdd/queue" -maxdepth 1 -name '*.submission.json' 2>/
 pass "Bash missing command: hook fails closed before submitting"
 PASS_COUNT=$((PASS_COUNT+1))
 
+# ============================================================
+# Sub-piece #4 — fail-closed audit
+# ============================================================
+
+# ---- case 12: jq missing on PATH → deny (fail-closed) ----
+
+info "[12] jq missing from PATH + experimental on → fail-closed deny"
+SANDBOX=$(make_sandbox); CLEANUP_PATHS+=("$SANDBOX")
+# Strip jq from PATH in a subshell. Keep coreutils so the hook can still
+# run (sha256sum, awk, date, sleep). PATH=/usr/bin:/bin gives us
+# everything except jq (verified earlier in this branch).
+JQ_REAL=$(command -v jq)
+BIN_NO_JQ="$SANDBOX/bin-no-jq"
+mkdir -p "$BIN_NO_JQ"
+# Symlink every coreutil we care about, but NOT jq.
+for tool in sha256sum shasum awk date sleep cat printf mv basename find dirname rm bash; do
+  realp=$(command -v "$tool" 2>/dev/null) && ln -sf "$realp" "$BIN_NO_JQ/$tool"
+done
+OUT=$(
+  PATH="$BIN_NO_JQ" \
+  CLAUDE_PROJECT_DIR="$SANDBOX" \
+  PRILIVE_PRE_REVIEW_EXPERIMENTAL=1 \
+  bash "$HOOK" <<< "$(make_input Write "$SANDBOX/foo.go")"
+)
+# Re-enter parent shell context for parsing (jq is back on PATH).
+DECISION=$(echo "$OUT" | "$JQ_REAL" -r '.hookSpecificOutput.permissionDecision // empty' 2>/dev/null)
+REASON=$(echo "$OUT"   | "$JQ_REAL" -r '.hookSpecificOutput.permissionDecisionReason // empty' 2>/dev/null)
+[[ "$DECISION" == "deny" ]]              || fail "jq-missing: expected deny, got: $DECISION (out=$OUT)"
+[[ "$REASON" == *"jq is not installed"* ]] || fail "jq-missing: reason wrong: $REASON"
+pass "jq missing: hook emits deny with explicit 'install jq' hint"
+PASS_COUNT=$((PASS_COUNT+1))
+
+# ---- case 13: empty stdin → deny (fail-closed) ----
+
+info "[13] empty stdin + experimental on → fail-closed deny"
+SANDBOX=$(make_sandbox); CLEANUP_PATHS+=("$SANDBOX")
+OUT=$(
+  CLAUDE_PROJECT_DIR="$SANDBOX" \
+  PRILIVE_PRE_REVIEW_EXPERIMENTAL=1 \
+  bash "$HOOK" < /dev/null
+)
+DECISION=$(echo "$OUT" | jq -r '.hookSpecificOutput.permissionDecision // empty' 2>/dev/null)
+REASON=$(echo "$OUT"   | jq -r '.hookSpecificOutput.permissionDecisionReason // empty' 2>/dev/null)
+[[ "$DECISION" == "deny" ]]                  || fail "empty stdin: expected deny, got: $DECISION"
+[[ "$REASON" == *"no input on stdin"* ]]     || fail "empty stdin: reason wrong: $REASON"
+pass "empty stdin: hook emits deny with explicit reason"
+PASS_COUNT=$((PASS_COUNT+1))
+
+# ---- case 14: submission write fails (read-only queue dir) → deny ----
+
+info "[14] submission write fails (read-only queue dir) → fail-closed deny"
+SANDBOX=$(make_sandbox); CLEANUP_PATHS+=("$SANDBOX")
+# Make .tdd/queue read-only so the jq tmp-write and mv both fail. The
+# hook can still mkdir -p (mkdir is a no-op when the dir exists with any
+# mode), but cannot create files inside it.
+chmod a-w "$SANDBOX/.tdd/queue"
+# Restore writability for cleanup later.
+CLEANUP_PATHS+=("$SANDBOX")
+OUT=$(
+  CLAUDE_PROJECT_DIR="$SANDBOX" \
+  PRILIVE_PRE_REVIEW_EXPERIMENTAL=1 \
+  PRILIVE_PRE_REVIEW_DEADLINE_S=2 \
+  bash "$HOOK" <<< "$(make_input Write "$SANDBOX/foo.go")"
+)
+# Re-enable write so trap cleanup_all works.
+chmod u+w "$SANDBOX/.tdd/queue"
+DECISION=$(echo "$OUT" | jq -r '.hookSpecificOutput.permissionDecision // empty' 2>/dev/null)
+REASON=$(echo "$OUT"   | jq -r '.hookSpecificOutput.permissionDecisionReason // empty' 2>/dev/null)
+[[ "$DECISION" == "deny" ]]                       || fail "write-fail: expected deny, got: $DECISION"
+[[ "$REASON" == *"failed to write submission"* ]] || fail "write-fail: reason wrong: $REASON"
+pass "submission write fails: hook emits deny with specific cause (not the generic deadline message)"
+PASS_COUNT=$((PASS_COUNT+1))
+
 # ---- summary ----
 
 echo ""
