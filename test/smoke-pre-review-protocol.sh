@@ -2,12 +2,17 @@
 # test/smoke-pre-review-protocol.sh
 #
 # Protocol smoke test for hooks/pre-review.sh — the PreToolUse gate
-# for file-write tools (sub-piece #1 of task #109).
+# for file-write tools.
+#
+# v2.1: Bash cases removed when the matcher was retired from the
+# starter pack. The hook now covers Write|Edit|MultiEdit|NotebookEdit
+# only; runtime command safety is out of scope.
 #
 # Uses a fake reviewer subshell so the test runs offline (no Codex calls).
-# Covers: experimental gating off / global kill switch / Bash pass-through /
-# Write allow / Edit deny + findings rendered / timeout fail-closed /
-# verdict cache hit / MultiEdit payload shape / NotebookEdit payload shape.
+# Covers: experimental gating off / global kill switch / Write allow /
+# Edit deny + findings rendered / timeout fail-closed / verdict cache hit /
+# MultiEdit payload shape / NotebookEdit payload shape / fail-closed
+# audit cases / config-based activation.
 
 set -uo pipefail
 
@@ -41,7 +46,7 @@ make_sandbox() {
 
 # Spawn a background "reviewer" that watches QUEUE_DIR/*.submission.json
 # and writes a verdict JSON with the canned decision after delay_s seconds.
-# Mimics what sub-piece #3 will do for real.
+# Mimics what the worker does for real.
 spawn_reviewer() {
   local sandbox="$1" decision="$2" reason="$3" delay_s="${4:-0.05}"
   (
@@ -91,7 +96,7 @@ EOF
   CLEANUP_PIDS+=("$pid")
 }
 
-# Build a PreToolUse JSON for a given tool kind.
+# Build a PreToolUse JSON for a given tool kind (file-writers only).
 make_input() {
   local tool="$1" file="$2"
   case "$tool" in
@@ -117,11 +122,6 @@ func main(){}
       jq -nc \
         --arg t "$tool" --arg f "$file" \
         '{tool_name:$t, session_id:"sess-1", tool_input:{notebook_path:$f, new_source:"print(42)", cell_id:"abc"}}'
-      ;;
-    Bash)
-      jq -nc \
-        --arg t "$tool" \
-        '{tool_name:$t, session_id:"sess-1", tool_input:{command:"ls -la"}}'
       ;;
   esac
 }
@@ -159,27 +159,23 @@ else
   fail "global disable: expected no output, got: $OUT"
 fi
 
-# ---- case 3: Bash + fake APPROVE → permissionDecision=allow ----
+# ---- case 3: Bash tool → pass-through (v2.1 removed the Bash matcher) ----
 
-info "[3] Bash + fake APPROVE → allow + kind=bash_command in submission"
+info "[3] Bash tool → pass-through (v2.1 retired Bash matcher)"
 SANDBOX=$(make_sandbox); CLEANUP_PATHS+=("$SANDBOX")
-spawn_reviewer "$SANDBOX" "allow" "read-only command"
+# Build a Bash PreToolUse input by hand (make_input no longer supports Bash).
+BASH_INPUT=$(jq -nc '{tool_name:"Bash", session_id:"sess-1", tool_input:{command:"ls -la"}}')
 OUT=$(
   CLAUDE_PROJECT_DIR="$SANDBOX" \
   PRILIVE_PRE_REVIEW_EXPERIMENTAL=1 \
-  PRILIVE_PRE_REVIEW_DEADLINE_S=10 \
-  bash "$HOOK" <<< "$(make_input Bash "")"
+  bash "$HOOK" <<< "$BASH_INPUT"
 )
-DECISION=$(echo "$OUT" | jq -r '.hookSpecificOutput.permissionDecision // empty' 2>/dev/null)
-[[ "$DECISION" == "allow" ]] || fail "Bash + allow: expected allow, got: $DECISION (out=$OUT)"
-SUB_FILE=$(find "$SANDBOX/.tdd/queue" -maxdepth 1 -name '*.submission.json' 2>/dev/null | head -1)
-[[ -n "$SUB_FILE" ]] || fail "Bash submission file not written"
-KIND=$(jq -r '.payload.kind // empty' "$SUB_FILE" 2>/dev/null)
-CMD=$(jq -r '.payload.bash_command // empty' "$SUB_FILE" 2>/dev/null)
-[[ "$KIND" == "bash_command" ]] || fail "Bash submission kind should be bash_command; got: $KIND"
-[[ "$CMD" == "ls -la" ]] || fail "Bash submission bash_command should be 'ls -la'; got: $CMD"
-pass "Bash + allow: hook emitted allow + submission has kind=bash_command + command field"
-PASS_COUNT=$((PASS_COUNT+1))
+if [[ -z "$OUT" ]]; then
+  pass "Bash tool with gate ON: hook is silent (pass-through; gate covers file changes only)"
+  PASS_COUNT=$((PASS_COUNT+1))
+else
+  fail "Bash pass-through: expected no output, got: $OUT"
+fi
 
 # ---- case 4: Write + fake APPROVE → permissionDecision=allow ----
 
@@ -255,9 +251,7 @@ PAYLOAD=$(echo "$INPUT" | jq -c --arg kind "file_change" '
     edit_new_string:  (.tool_input.new_string  // null),
     multi_edits:      (.tool_input.edits       // null),
     notebook_source:  (.tool_input.new_source  // null),
-    notebook_cell_id: (.tool_input.cell_id     // null),
-    bash_command:     (.tool_input.command     // null),
-    bash_description: (.tool_input.description // null)
+    notebook_cell_id: (.tool_input.cell_id     // null)
   }
 ')
 if command -v sha256sum >/dev/null 2>&1; then
@@ -333,58 +327,16 @@ FILE_PATH=$(jq -r '.payload.file_path // empty' "$SUB_FILE" 2>/dev/null)
 pass "NotebookEdit: submission carries notebook source + cell_id + path"
 PASS_COUNT=$((PASS_COUNT+1))
 
-# ---- case 10: Bash + fake DENY with findings → deny + findings rendered ----
-
-info "[10] Bash + fake DENY → deny + findings rendered into reason"
-SANDBOX=$(make_sandbox); CLEANUP_PATHS+=("$SANDBOX")
-spawn_reviewer_deny_with_findings "$SANDBOX"
-OUT=$(
-  CLAUDE_PROJECT_DIR="$SANDBOX" \
-  PRILIVE_PRE_REVIEW_EXPERIMENTAL=1 \
-  PRILIVE_PRE_REVIEW_DEADLINE_S=10 \
-  bash "$HOOK" <<< "$(make_input Bash "")"
-)
-DECISION=$(echo "$OUT" | jq -r '.hookSpecificOutput.permissionDecision       // empty' 2>/dev/null)
-REASON=$(echo "$OUT"   | jq -r '.hookSpecificOutput.permissionDecisionReason // empty' 2>/dev/null)
-[[ "$DECISION" == "deny" ]]               || fail "Bash + deny: expected deny, got: $DECISION"
-[[ "$REASON" == *"unsafe edit"* ]]        || fail "Bash deny: reason missing top-level message"
-[[ "$REASON" == *"deletes guarded path"* ]] || fail "Bash deny: reason missing finding title"
-pass "Bash + deny: decision + findings rendered in permissionDecisionReason"
-PASS_COUNT=$((PASS_COUNT+1))
-
-# ---- case 11: Bash with missing .tool_input.command → fail-closed deny ----
-
-info "[11] Bash with no .tool_input.command → fail-closed deny"
-SANDBOX=$(make_sandbox); CLEANUP_PATHS+=("$SANDBOX")
-# Build a malformed Bash PreToolUse input: tool_input present but no command.
-MALFORMED=$(jq -nc '{tool_name:"Bash", session_id:"sess-1", tool_input:{description:"sneaky"}}')
-OUT=$(
-  CLAUDE_PROJECT_DIR="$SANDBOX" \
-  PRILIVE_PRE_REVIEW_EXPERIMENTAL=1 \
-  PRILIVE_PRE_REVIEW_DEADLINE_S=10 \
-  bash "$HOOK" <<< "$MALFORMED"
-)
-DECISION=$(echo "$OUT" | jq -r '.hookSpecificOutput.permissionDecision       // empty' 2>/dev/null)
-REASON=$(echo "$OUT"   | jq -r '.hookSpecificOutput.permissionDecisionReason // empty' 2>/dev/null)
-[[ "$DECISION" == "deny" ]]                    || fail "Bash missing command: expected deny, got: $DECISION"
-[[ "$REASON" == *"no .tool_input.command"* ]]  || fail "Bash missing command: reason wrong: $REASON"
-# Confirm we did NOT write a submission file for the empty command.
-SUB_COUNT=$(find "$SANDBOX/.tdd/queue" -maxdepth 1 -name '*.submission.json' 2>/dev/null | wc -l | tr -d ' ')
-[[ "$SUB_COUNT" == "0" ]] || fail "Bash missing command: hook should not submit; wrote $SUB_COUNT file(s)"
-pass "Bash missing command: hook fails closed before submitting"
-PASS_COUNT=$((PASS_COUNT+1))
-
 # ============================================================
-# Sub-piece #4 — fail-closed audit
+# Fail-closed audit
 # ============================================================
 
-# ---- case 12: jq missing on PATH → deny (fail-closed) ----
+# ---- case 10: jq missing on PATH → deny (fail-closed) ----
 
-info "[12] jq missing from PATH + experimental on → fail-closed deny"
+info "[10] jq missing from PATH + experimental on → fail-closed deny"
 SANDBOX=$(make_sandbox); CLEANUP_PATHS+=("$SANDBOX")
 # Strip jq from PATH in a subshell. Keep coreutils so the hook can still
-# run (sha256sum, awk, date, sleep). PATH=/usr/bin:/bin gives us
-# everything except jq (verified earlier in this branch).
+# run (sha256sum, awk, date, sleep).
 JQ_REAL=$(command -v jq)
 BIN_NO_JQ="$SANDBOX/bin-no-jq"
 mkdir -p "$BIN_NO_JQ"
@@ -406,9 +358,9 @@ REASON=$(echo "$OUT"   | "$JQ_REAL" -r '.hookSpecificOutput.permissionDecisionRe
 pass "jq missing: hook emits deny with explicit 'install jq' hint"
 PASS_COUNT=$((PASS_COUNT+1))
 
-# ---- case 13: empty stdin → deny (fail-closed) ----
+# ---- case 11: empty stdin → deny (fail-closed) ----
 
-info "[13] empty stdin + experimental on → fail-closed deny"
+info "[11] empty stdin + experimental on → fail-closed deny"
 SANDBOX=$(make_sandbox); CLEANUP_PATHS+=("$SANDBOX")
 OUT=$(
   CLAUDE_PROJECT_DIR="$SANDBOX" \
@@ -422,16 +374,14 @@ REASON=$(echo "$OUT"   | jq -r '.hookSpecificOutput.permissionDecisionReason // 
 pass "empty stdin: hook emits deny with explicit reason"
 PASS_COUNT=$((PASS_COUNT+1))
 
-# ---- case 14: submission write fails (read-only queue dir) → deny ----
+# ---- case 12: submission write fails (read-only queue dir) → deny ----
 
-info "[14] submission write fails (read-only queue dir) → fail-closed deny"
+info "[12] submission write fails (read-only queue dir) → fail-closed deny"
 SANDBOX=$(make_sandbox); CLEANUP_PATHS+=("$SANDBOX")
 # Make .tdd/queue read-only so the jq tmp-write and mv both fail. The
 # hook can still mkdir -p (mkdir is a no-op when the dir exists with any
 # mode), but cannot create files inside it.
 chmod a-w "$SANDBOX/.tdd/queue"
-# Restore writability for cleanup later.
-CLEANUP_PATHS+=("$SANDBOX")
 OUT=$(
   CLAUDE_PROJECT_DIR="$SANDBOX" \
   PRILIVE_PRE_REVIEW_EXPERIMENTAL=1 \
@@ -462,9 +412,9 @@ make_sandbox_with_config_libs() {
   echo "$d"
 }
 
-# ---- case 15: config enabled=true → gate active ----
+# ---- case 13: config enabled=true → gate active ----
 
-info "[15] tdd-pack.toml pre_review.enabled = true → gate ON"
+info "[13] tdd-pack.toml pre_review.enabled = true → gate ON"
 SANDBOX=$(make_sandbox_with_config_libs); CLEANUP_PATHS+=("$SANDBOX")
 cat > "$SANDBOX/tdd-pack.toml" <<'EOF'
 [pre_review]
@@ -481,9 +431,9 @@ DECISION=$(echo "$OUT" | jq -r '.hookSpecificOutput.permissionDecision // empty'
 pass "config enabled=true: gate active without env var, hook emitted allow"
 PASS_COUNT=$((PASS_COUNT+1))
 
-# ---- case 16: config enabled=false + no env → pass-through ----
+# ---- case 14: config enabled=false + no env → pass-through ----
 
-info "[16] tdd-pack.toml pre_review.enabled = false + no env → pass-through"
+info "[14] tdd-pack.toml pre_review.enabled = false + no env → pass-through"
 SANDBOX=$(make_sandbox_with_config_libs); CLEANUP_PATHS+=("$SANDBOX")
 cat > "$SANDBOX/tdd-pack.toml" <<'EOF'
 [pre_review]
@@ -500,9 +450,9 @@ else
   fail "config enabled=false: expected no output, got: $OUT"
 fi
 
-# ---- case 17: env override wins over config=false ----
+# ---- case 15: env override wins over config=false ----
 
-info "[17] env PRILIVE_PRE_REVIEW_EXPERIMENTAL=1 wins over config enabled=false"
+info "[15] env PRILIVE_PRE_REVIEW_EXPERIMENTAL=1 wins over config enabled=false"
 SANDBOX=$(make_sandbox_with_config_libs); CLEANUP_PATHS+=("$SANDBOX")
 cat > "$SANDBOX/tdd-pack.toml" <<'EOF'
 [pre_review]
@@ -520,9 +470,9 @@ DECISION=$(echo "$OUT" | jq -r '.hookSpecificOutput.permissionDecision // empty'
 pass "env override wins over config=false: gate active"
 PASS_COUNT=$((PASS_COUNT+1))
 
-# ---- case 18: global kill switch wins over BOTH env override and config=true ----
+# ---- case 16: global kill switch wins over BOTH env override and config=true ----
 
-info "[18] PRILIVE_REVIEW_DISABLE=1 wins over config=true and env override"
+info "[16] PRILIVE_REVIEW_DISABLE=1 wins over config=true and env override"
 SANDBOX=$(make_sandbox_with_config_libs); CLEANUP_PATHS+=("$SANDBOX")
 cat > "$SANDBOX/tdd-pack.toml" <<'EOF'
 [pre_review]

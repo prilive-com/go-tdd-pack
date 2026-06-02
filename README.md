@@ -239,39 +239,30 @@ export PRILIVE_REVIEW_DISABLE=1
 
 ## What the gate does NOT cover
 
-The pre-write gate (`[pre_review] enabled = true` in `tdd-pack.toml`, or the per-shell `PRILIVE_PRE_REVIEW_EXPERIMENTAL=1` env override) reviews every `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, and `Bash` action **Claude Code is about to take** through its tool API. That covers a lot — but it does not cover everything. Two architectural ceilings to know about:
+The pre-write gate (`[pre_review] enabled = true` in `tdd-pack.toml`, or the per-shell `PRILIVE_PRE_REVIEW_EXPERIMENTAL=1` env override) reviews every `Write`, `Edit`, `MultiEdit`, and `NotebookEdit` action **Claude Code is about to take** through its tool API. That covers file changes — it does not cover everything.
 
-### Opaque payloads
+### Scope: code changes, not commands
 
-The reviewer sees the command Claude proposes, not what it runs inside. Examples:
+v2.1 removed the Bash matcher. Runtime command safety is a separate concern from code review and out of scope for this pack:
 
-- `python -c '<script>'` — the reviewer sees the `-c` flag, not the Python code's behavior beyond the visible string.
-- `node -e '<script>'` — same problem.
-- `echo <base64> | base64 -d | sh` — the reviewer sees the encoded blob, not the decoded command.
-- `ssh host` — opens an interactive shell on a remote host. **Every command run inside the SSH session is invisible to any Claude-side hook.** Only the `ssh host` invocation itself is reviewed.
+- The starter pack's job is to catch bad code before it lands. The reviewer judges proposed file content for correctness, safety, and data-loss risk.
+- Sending every `pwd` / `ls` / `git status` through Codex was wasteful for ChatGPT-subscription users (~6s per call) and an architectural mismatch with the pack's mission.
+- If you need command-level safety (data-loss prevention, destructive-command interception), that's a runtime-ops concern — see devopspoint or a similar runtime-safety tool. Claude Code's own permission system already covers the obviously dangerous cases (`rm -rf /`, `sudo`, `kubectl delete`, etc.) at the prompt layer.
 
-The classification prompt treats opaque wrappers as state-changing by default (fail-closed), so they don't slip through as "read-only". But for actual content review, the reviewer is judging only the visible wrapper text.
+### Out-of-band changes
 
-### Remote-host changes (and any change outside Claude)
-
-The gate is a Claude Code hook. It cannot see:
+The gate is a Claude Code hook. It cannot see anything that bypasses Claude's tool API:
 
 - Cron jobs running on the host.
 - Commands typed by a human in a different terminal.
 - Other agents running on the same machine.
-- Anything that happens on a server Claude SSHed into.
-- Background processes Claude itself spawned earlier in the session (`nohup … &`).
+- File changes from `git pull`, IDE auto-save, formatter hooks fired by your editor.
 
 These are not bugs. They are the architectural ceiling of any client-side hook approach.
 
-### What would close them
+### What would close it
 
-The two real options if you need to cover these:
-
-1. **Route all shell through one governed executor.** Deny raw `Bash`; force every command through a wrapper script that logs + reviews each `argv[]`. Removes the opaque-payload class. Requires giving up `Bash` flexibility.
-2. **OS-level audit / sandbox.** seccomp, eBPF, `auditd`, or a container with a syscall-gated runtime. Closes both classes but is host-level work, not pack-level.
-
-Both are out of scope for this pack. If your threat model needs them, treat the gate as defense in depth — not the only line.
+If you need full coverage of file changes across all sources (not just Claude's tool API), the real option is **OS-level audit / sandbox** — seccomp, eBPF, `auditd`, or a container with a syscall-gated runtime. That's host-level work, not pack-level. Treat the gate as defense in depth — one strong line that covers what Claude itself does — not the only line.
 
 ---
 

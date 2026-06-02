@@ -1,12 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Pre-review verdict",
-  "description": "Codex output for a single PreToolUse review submission (file_change or bash_command). Strict-mode compatible: additionalProperties:false on every object, every property in required.",
+  "description": "Codex output for a single PreToolUse review submission (file_change only — v2.1 removed the bash_command path). Strict-mode compatible: additionalProperties:false on every object, every property in required.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "decision",
-    "classification",
     "reason",
     "findings"
   ],
@@ -14,12 +13,7 @@
     "decision": {
       "type": "string",
       "enum": ["allow", "deny", "ask"],
-      "description": "Maps directly to PreToolUse permissionDecision. `allow`: the action is safe to run; `deny`: the action has a clear problem; `ask`: needs operator approval."
-    },
-    "classification": {
-      "type": "string",
-      "enum": ["read_only", "state_changing", "file_change"],
-      "description": "What the reviewer judged the action to be. For bash_command: read_only (cannot change anything) or state_changing. For file_change kind: always file_change. Used by the worker for logging and by adopters reading the queue."
+      "description": "Maps directly to PreToolUse permissionDecision. `allow`: the change is safe to apply; `deny`: the change has a clear problem; `ask`: needs operator approval."
     },
     "reason": {
       "type": "string",
