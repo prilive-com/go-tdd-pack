@@ -50,6 +50,13 @@ require_phrase "${PRE}" 'Demote findings without tool-grounding evidence' "pre-r
 # Bash matcher was retired from the starter pack.
 require_phrase "${PRE}" 'file_change.*only.*runtime command safety|runtime command safety.*out of scope' "pre-review scope is file_change only (Bash removed)"
 
+# v2.1 PR 2: contradicts_grounding rule + carve-out
+info "[2b] prompts have the contradicts_grounding rule (v2.1 PR 2)"
+require_phrase "${SYS}" 'contradicts_grounding' "codex-system mentions contradicts_grounding flag"
+require_phrase "${SYS}" 'NEVER set .*contradicts_grounding.*true.*correctness|correctness.*NEVER' "codex-system carve-out for correctness"
+require_phrase "${PRE}" 'contradicts_grounding' "pre-review mentions contradicts_grounding flag"
+require_phrase "${PRE}" 'NEVER set .*contradicts_grounding.*true.*safety|safety.*correctness.*data_loss' "pre-review carve-out enumerated"
+
 info "[3] tdd-pack.toml — max_rounds default = 4"
 TOML="${PROJECT_ROOT}/tdd-pack.toml"
 ACTUAL=$(awk -F' = ' '/^max_rounds =/ {gsub(/ /,"",$2); print $2; exit}' "${TOML}")

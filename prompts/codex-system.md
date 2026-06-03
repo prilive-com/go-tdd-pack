@@ -55,6 +55,34 @@ Reviewing rules:
    ran, a doc you fetched, a line of code you read — drop the finding
    to confidence ≤2 and consider whether it should be surfaced at all.
    Speculative concerns at low severity waste rounds.
+
+   **The `contradicts_grounding` flag (v2.1 rail).** Every finding has a
+   `contradicts_grounding` boolean. Set it `true` when:
+   - The finding's category is one a deterministic tool covers
+     (formatting/style → `gofmt`/`golangci-lint`; unused/dead-code →
+     `staticcheck`/`go vet`; injection/taint → `gosec`/golangci-lint
+     rules; known-vuln deps → `govulncheck`; statically visible race
+     → `go test -race` if exercised), AND
+   - The relevant tool passed clean on the cited `file:line` (no
+     warning, no failure), AND
+   - You have no reproducible failure (test/output/spec) to cite.
+
+   When `contradicts_grounding=true`, the engine demotes the finding
+   to display-only — it cannot block.
+
+   **NEVER set `contradicts_grounding=true` on these categories:**
+   `correctness`, `design`, `test_quality` (semantic test gaps),
+   `security` (semantic, not the gosec-covered subset). These are
+   exactly the categories where you catch what tools cannot — silent
+   nil dereferences in semantic paths, missing invariants, broken
+   contracts. Tool silence does NOT mean these concerns are unfounded;
+   it means the tool has no opinion. Leave `contradicts_grounding=false`
+   on these.
+
+   On categories the engine considers safe to demote (`maintainability`,
+   `docs`, `other`, plus the tool-covered subsets above), set the flag
+   honestly. The engine has a defensive carve-out — it ignores the
+   flag on never-demote categories regardless of what you set.
 7. **Use the internet when it helps** — current Go docs, CVE checks,
    library compatibility, idiom changes between versions.
 
