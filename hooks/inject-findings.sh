@@ -141,7 +141,7 @@ VERDICT_SUMMARY=$(jq -r '.summary_one_sentence // "review requested"' "${ROUND1_
 MIN_SURFACE=$(cfg_get "${PROJECT_DIR}/tdd-pack.toml" "severity.min_surface" "nit")
 CONFIDENCE_FLOOR=$(cfg_get "${PROJECT_DIR}/tdd-pack.toml" "severity.confidence_floor" "4")
 
-# --- v2.1 rails: three layered demotion filters ----------------------------
+# --- v2.1 rails: four layered demotion filters -----------------------------
 #
 # Rail A — tool-grounding (spec §5.1):
 #   A finding with `contradicts_grounding: true` is one Codex flagged as
@@ -160,7 +160,21 @@ CONFIDENCE_FLOOR=$(cfg_get "${PROJECT_DIR}/tdd-pack.toml" "severity.confidence_f
 #   regardless of severity, category, or carve-out. Rail C overrides
 #   the never-demote category list (different rule, different reason).
 #
-# Any of the three rails can demote a finding to the speculative section.
+# Rail D — perspective-diverse consensus (spec §6, PR 9 infra):
+#   When Tier-1 round 1 ran in parallel through multiple angles
+#   (security/correctness/architecture, PR 9b producer), each angle
+#   tags its findings with raised_by_angle. The engine groups by
+#   file:line and keeps consensus findings (≥2 angles raised it);
+#   singletons are demoted to display-only — the whole point of
+#   multi-angle review IS the consensus signal, so a singleton is by
+#   definition the marginal-confidence case.
+#   Findings with raised_by_angle absent or "default" are from the
+#   single-reviewer path and bypass this rail entirely.
+#   The Rail A carve-out does NOT apply here — singletons demote
+#   regardless of category. Rationale: the consensus IS the protection
+#   against false positives in semantic categories too.
+#
+# Any of the four rails can demote a finding to the speculative section.
 # The reasons are tracked separately so adopters can tell why a finding
 # wasn't surfaced as blocking.
 #
@@ -185,16 +199,36 @@ NEVER_DEMOTE_CATEGORIES='correctness|design|test_quality|security|safety|data_lo
 # Tagging the demoted findings with a `demotion_reason` field lets the
 # rendering show why each was demoted.
 
-PROMOTED=$(jq -r --arg ms "${MIN_SURFACE}" --arg cf "${CONFIDENCE_FLOOR}" --arg nd "${NEVER_DEMOTE_CATEGORIES}" '
+# Precompute the multi-angle consensus map ONCE: a JSON array of
+# "file|line" keys that have ≥2 distinct non-default raised_by_angle
+# values among the findings. This lets jq decide Rail D per finding
+# with a simple lookup. The map is empty for single-reviewer cycles
+# (no findings have a non-default angle).
+CONSENSUS_KEYS=$(jq -c '
+  [.findings[]?
+    | select((.raised_by_angle // "default") != "default")
+    | {key: ((.file // "") + "|" + ((.line // 0) | tostring)),
+       angle: .raised_by_angle}]
+  | group_by(.key)
+  | map({key: .[0].key, angles: (map(.angle) | unique)})
+  | map(select(.angles | length >= 2) | .key)
+' "${ROUND1_JSON}" 2>/dev/null)
+[[ -z "${CONSENSUS_KEYS}" ]] && CONSENSUS_KEYS='[]'
+
+PROMOTED=$(jq -r --arg ms "${MIN_SURFACE}" --arg cf "${CONFIDENCE_FLOOR}" --arg nd "${NEVER_DEMOTE_CATEGORIES}" --argjson consensus "${CONSENSUS_KEYS}" '
   def sn($s): {"blocker":4, "major":3, "minor":2, "nit":1}[$s] // 0;
   def is_never_demote: (.category | test("^(" + $nd + ")$"));
   def demoted_by_grounding:  (.contradicts_grounding == true) and (is_never_demote | not);
   def demoted_by_confidence: ((.confidence // 5) < ($cf | tonumber));
   def demoted_by_scope:      ((.line_scope // "changed_line") == "pre_existing_unrelated");
+  def angle: (.raised_by_angle // "default");
+  def fkey:  ((.file // "") + "|" + ((.line // 0) | tostring));
+  def demoted_by_singleton: (angle != "default") and (([fkey] | inside($consensus)) | not);
   [.findings[]?
     | select(demoted_by_grounding  | not)
     | select(demoted_by_confidence | not)
     | select(demoted_by_scope      | not)
+    | select(demoted_by_singleton  | not)
     | select(sn(.severity) >= sn($ms))]
   | if length == 0 then "(no findings at or above min_surface=\($ms) with confidence ≥ \($cf))"
     else (
@@ -206,15 +240,18 @@ PROMOTED=$(jq -r --arg ms "${MIN_SURFACE}" --arg cf "${CONFIDENCE_FLOOR}" --arg 
     end
 ' "${ROUND1_JSON}" 2>/dev/null)
 
-DEMOTED=$(jq -r --arg ms "${MIN_SURFACE}" --arg cf "${CONFIDENCE_FLOOR}" --arg nd "${NEVER_DEMOTE_CATEGORIES}" '
+DEMOTED=$(jq -r --arg ms "${MIN_SURFACE}" --arg cf "${CONFIDENCE_FLOOR}" --arg nd "${NEVER_DEMOTE_CATEGORIES}" --argjson consensus "${CONSENSUS_KEYS}" '
   def sn($s): {"blocker":4, "major":3, "minor":2, "nit":1}[$s] // 0;
   def is_never_demote: (.category | test("^(" + $nd + ")$"));
   def demoted_by_grounding:  (.contradicts_grounding == true) and (is_never_demote | not);
   def demoted_by_confidence: ((.confidence // 5) < ($cf | tonumber));
   def demoted_by_scope:      ((.line_scope // "changed_line") == "pre_existing_unrelated");
+  def angle: (.raised_by_angle // "default");
+  def fkey:  ((.file // "") + "|" + ((.line // 0) | tostring));
+  def demoted_by_singleton: (angle != "default") and (([fkey] | inside($consensus)) | not);
   [.findings[]?
     | select(sn(.severity) >= sn($ms))
-    | select(demoted_by_grounding or demoted_by_confidence or demoted_by_scope)]
+    | select(demoted_by_grounding or demoted_by_confidence or demoted_by_scope or demoted_by_singleton)]
   | if length == 0 then ""
     else (
       "\n\nSpeculative (demoted; informational only, does NOT block):\n" + (
@@ -223,7 +260,8 @@ DEMOTED=$(jq -r --arg ms "${MIN_SURFACE}" --arg cf "${CONFIDENCE_FLOOR}" --arg n
           ([
             (if demoted_by_scope      then "pre-existing unrelated" else empty end),
             (if demoted_by_grounding  then "tool-clean" else empty end),
-            (if demoted_by_confidence then "low-confidence c=\(.confidence // "?") < floor \($cf)" else empty end)
+            (if demoted_by_confidence then "low-confidence c=\(.confidence // "?") < floor \($cf)" else empty end),
+            (if demoted_by_singleton  then "single-angle (" + angle + ", no consensus)" else empty end)
           ] | join(" + ")) as $reason
           | "- [" + $reason + "] [\(.severity)/\(.category) c=\(.confidence // "?")] \(.title)\n  \(.body)"
           + (if .file != "" then "\n  at \(.file):\(.line // 0)" else "" end)

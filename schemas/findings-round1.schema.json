@@ -76,6 +76,11 @@
             "type": "string",
             "enum": ["changed_line", "change_triggered_context", "pre_existing_unrelated"],
             "description": "v2.1 rail (spec §6): which payload section does this finding land in? `changed_line` = on a line in CHANGED; the author owns it and it can block. `change_triggered_context` = on a CONTEXT line that the change caused/surfaced; still the author's responsibility, still can block. `pre_existing_unrelated` = on a CONTEXT line the change did not touch or trigger; the engine routes these to display-only and they NEVER drive must-address regardless of severity. Test: if reverting just the CHANGED diff makes the issue go away, it's change_triggered_context; otherwise pre_existing_unrelated."
+          },
+          "raised_by_angle": {
+            "type": "string",
+            "enum": ["default", "security", "correctness", "architecture"],
+            "description": "v2.1 PR 9 (spec §6 consensus rule): for Tier-1 cycles, round 1 runs in parallel through multiple perspective lenses (security/correctness/architecture). Each angle tags its findings via this field. The engine groups findings by file:line; consensus findings (raised by ≥2 angles) drive must-address, singletons are demoted to display-only. When this field is absent or equals 'default', the finding came from the single-reviewer path and is not subject to consensus filtering. Optional field — non-Tier-1 cycles emit it absent or 'default'."
           }
         }
       }
