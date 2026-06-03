@@ -55,6 +55,7 @@ Options:
       --output-schema <FILE>
       --json
   -o, --output-last-message <FILE>
+      --ignore-user-config
 HELP
         exit 0
         ;;
@@ -139,7 +140,7 @@ ver=$(jq -r '.version' "$CACHE")
 pass "modern CLI: version captured ($ver)"
 PASS_COUNT=$((PASS_COUNT + 1))
 
-for cap in supports_json supports_output_last_message supports_output_schema_exec; do
+for cap in supports_json supports_output_last_message supports_output_schema_exec supports_ignore_user_config; do
   val=$(jq -r --arg c "$cap" '.[$c]' "$CACHE")
   if [[ "$val" == "true" ]]; then
     pass "modern CLI: $cap = true"
@@ -172,6 +173,12 @@ CACHE="${SANDBOX}/.tdd/.codex-capabilities.json"
 val=$(jq -r '.supports_json' "$CACHE")
 [[ "$val" == "false" ]] || fail "older CLI: supports_json should be false; got $val"
 pass "older CLI: supports_json correctly = false"
+PASS_COUNT=$((PASS_COUNT + 1))
+
+# v2.1 PR 7: --ignore-user-config wasn't in the old CLI either
+val=$(jq -r '.supports_ignore_user_config' "$CACHE")
+[[ "$val" == "false" ]] || fail "older CLI: supports_ignore_user_config should be false; got $val"
+pass "older CLI: supports_ignore_user_config correctly = false"
 PASS_COUNT=$((PASS_COUNT + 1))
 
 val=$(jq -r '.supports_output_last_message' "$CACHE")

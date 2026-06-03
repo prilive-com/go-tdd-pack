@@ -64,7 +64,8 @@ EOF
   "supports_json": true,
   "supports_output_last_message": true,
   "supports_output_schema_exec": true,
-  "supports_output_schema_resume": false
+  "supports_output_schema_resume": false,
+  "supports_ignore_user_config": true
 }
 EOF
   echo "$d"
@@ -81,6 +82,11 @@ install_fake_codex() {
 #!/usr/bin/env bash
 # fake codex for the pre-review worker smoke
 out=""
+# If FAKE_CODEX_ARGV_FILE is set, record the full argv to that file so
+# the test can assert on the flags the worker passed.
+if [[ -n "${FAKE_CODEX_ARGV_FILE:-}" ]]; then
+  printf '%s\n' "$*" > "${FAKE_CODEX_ARGV_FILE}"
+fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -o|--output-last-message)
@@ -89,6 +95,8 @@ while [[ $# -gt 0 ]]; do
       shift 2 ;;
     --model|-c|--cd)
       shift 2 ;;
+    --ignore-user-config|--skip-git-repo-check|--dangerously-bypass-approvals-and-sandbox)
+      shift ;;
     --version)
       echo "codex-cli 9.9.9-fake"; exit 0 ;;
     exec)
@@ -100,6 +108,7 @@ Options:
       --output-schema <FILE>
       --json
   -o, --output-last-message <FILE>
+      --ignore-user-config
 HELP
       exit 0 ;;
     *) shift ;;
@@ -274,6 +283,63 @@ VER_COUNT=$(find "$SANDBOX/.tdd/queue" -maxdepth 1 -name '*.verdict.json' 2>/dev
 [[ "$SUB_COUNT" -ge 1 ]] || fail "e2e: no submission file"
 [[ "$VER_COUNT" -ge 1 ]] || fail "e2e: no verdict file"
 pass "end-to-end: hook + worker produce permissionDecision=allow via verdict file"
+PASS_COUNT=$((PASS_COUNT + 1))
+
+# ---- case 6: --ignore-user-config is passed when supported (v2.1 PR 7) ----
+
+info "[6] worker passes --ignore-user-config to codex when supported"
+SANDBOX=$(make_sandbox); CLEANUP_PATHS+=("$SANDBOX")
+BINDIR="$SANDBOX/bin"; install_fake_codex "$BINDIR"
+RESP="$SANDBOX/fake-response.json"
+cat > "$RESP" <<'EOF'
+{"decision":"allow","reason":"mcp detach test","findings":[]}
+EOF
+HASH="7777777777777777777777777777777777777777777777777777777777777777"
+write_submission "$SANDBOX" "$HASH" "$FILE_CHANGE_PAYLOAD"
+ARGV_FILE="$SANDBOX/fake-codex-argv.txt"
+
+(
+  export PATH="${BINDIR}:${PATH}"
+  export FAKE_CODEX_RESPONSE="$RESP"
+  export FAKE_CODEX_ARGV_FILE="$ARGV_FILE"
+  bash "$SANDBOX/runner/pre-review-worker.sh" "$SANDBOX"
+)
+
+[[ -f "$ARGV_FILE" ]] || fail "argv file not captured"
+ARGV=$(cat "$ARGV_FILE")
+[[ "$ARGV" == *"--ignore-user-config"* ]] || fail "expected --ignore-user-config in argv; got: $ARGV"
+[[ "$ARGV" == *"--output-schema"* ]] || fail "expected --output-schema in argv (sanity check); got: $ARGV"
+pass "MCP detachment: worker passes --ignore-user-config alongside --output-schema"
+PASS_COUNT=$((PASS_COUNT + 1))
+
+# ---- case 7: --ignore-user-config is OMITTED when capability cache says false ----
+
+info "[7] worker omits --ignore-user-config when CLI doesn't support it (back-compat)"
+SANDBOX=$(make_sandbox); CLEANUP_PATHS+=("$SANDBOX")
+BINDIR="$SANDBOX/bin"; install_fake_codex "$BINDIR"
+RESP="$SANDBOX/fake-response.json"
+cat > "$RESP" <<'EOF'
+{"decision":"allow","reason":"older cli","findings":[]}
+EOF
+# Override the cache to mark --ignore-user-config as unsupported.
+jq '.supports_ignore_user_config = false' "$SANDBOX/.tdd/.codex-capabilities.json" > "$SANDBOX/.tdd/.codex-capabilities.json.tmp" \
+  && mv "$SANDBOX/.tdd/.codex-capabilities.json.tmp" "$SANDBOX/.tdd/.codex-capabilities.json"
+
+HASH="8888888888888888888888888888888888888888888888888888888888888888"
+write_submission "$SANDBOX" "$HASH" "$FILE_CHANGE_PAYLOAD"
+ARGV_FILE="$SANDBOX/fake-codex-argv.txt"
+
+(
+  export PATH="${BINDIR}:${PATH}"
+  export FAKE_CODEX_RESPONSE="$RESP"
+  export FAKE_CODEX_ARGV_FILE="$ARGV_FILE"
+  bash "$SANDBOX/runner/pre-review-worker.sh" "$SANDBOX"
+)
+
+[[ -f "$ARGV_FILE" ]] || fail "argv file not captured"
+ARGV=$(cat "$ARGV_FILE")
+[[ "$ARGV" != *"--ignore-user-config"* ]] || fail "should omit --ignore-user-config when unsupported; got: $ARGV"
+pass "back-compat: worker omits --ignore-user-config when capability says false"
 PASS_COUNT=$((PASS_COUNT + 1))
 
 # ---- summary ----
