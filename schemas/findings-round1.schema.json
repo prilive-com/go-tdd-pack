@@ -38,7 +38,8 @@
           "file",
           "line",
           "confidence",
-          "contradicts_grounding"
+          "contradicts_grounding",
+          "line_scope"
         ],
         "properties": {
           "severity": {
@@ -70,6 +71,11 @@
           "contradicts_grounding": {
             "type": "boolean",
             "description": "v2.1 rail (spec §5.1): set true when this finding's category is one a deterministic tool covers (gofmt/golangci-lint for style, staticcheck/go vet for unused/deadcode, gosec for taint, govulncheck for vulns, race for visible races) AND that tool passed clean on the cited file:line AND you have no reproducible failure to cite. NEVER set true on categories the tools cannot judge: correctness, design, security (semantic), test_quality (semantic), maintainability (semantic). When true, the engine demotes the finding to display-only so it cannot block. When false (default), the finding stays at its claimed severity."
+          },
+          "line_scope": {
+            "type": "string",
+            "enum": ["changed_line", "change_triggered_context", "pre_existing_unrelated"],
+            "description": "v2.1 rail (spec §6): which payload section does this finding land in? `changed_line` = on a line in CHANGED; the author owns it and it can block. `change_triggered_context` = on a CONTEXT line that the change caused/surfaced; still the author's responsibility, still can block. `pre_existing_unrelated` = on a CONTEXT line the change did not touch or trigger; the engine routes these to display-only and they NEVER drive must-address regardless of severity. Test: if reverting just the CHANGED diff makes the issue go away, it's change_triggered_context; otherwise pre_existing_unrelated."
           }
         }
       }
