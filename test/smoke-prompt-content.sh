@@ -69,6 +69,10 @@ require_phrase "${TOML}" 'enabled = (true|false)' "tdd-pack.toml [pre_review] ha
 require_phrase "${TOML}" 'Off by default'        "tdd-pack.toml documents the shipped default is off (intent, not current value)"
 require_phrase "${TOML}" 'Activation precedence' "tdd-pack.toml documents precedence order"
 
+# v2.1 PR 3: confidence_floor knob in [severity]
+require_phrase "${TOML}" 'confidence_floor = [0-9]'    "tdd-pack.toml [severity] has confidence_floor knob"
+require_phrase "${TOML}" 'SECOND axis after severity|second axis after severity'  "tdd-pack.toml documents confidence as the second axis"
+
 info "[4] runner fallback defaults match shipped config"
 for f in "${PROJECT_ROOT}/runner/review-runner.sh" "${PROJECT_ROOT}/runner/codex-round-n.sh"; do
   if grep -qE 'cfg_get.*review.max_rounds.*"4"' "${f}"; then

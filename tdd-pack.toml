@@ -72,6 +72,25 @@ min_surface = "nit"
 # converge if Codex returns a finding at this level or above.
 must_address = "major"
 
+# v2.1 rail (spec §5.2): confidence is the SECOND axis after severity.
+# A finding only drives must-address when severity ≥ must_address AND
+# confidence ≥ confidence_floor. Findings below the floor remain visible
+# (routed to a "Speculative (low confidence)" section in inject-findings)
+# but do not block.
+#
+# Confidence scale (anchored in the reviewer prompt):
+#   5 = verified by tool output / repro / official docs
+#   4 = strong static evidence, not runtime-verified
+#   3 = likely; pattern recognition + partial reading
+#   2 = plausible; not fully verified
+#   1 = guess; speculative
+#
+# Default 4 — Codex self-rates as 4 only when it has read the
+# surrounding code and the path is clear. Adopters seeing too many
+# false positives can raise to 5 (verified only); adopters wanting more
+# signal can drop to 3.
+confidence_floor = 4
+
 [gate]
 # OPT-IN shell git hooks. Default false (no blocking).
 # Set true to install pre-commit / pre-push hooks that block git commit/push
@@ -107,4 +126,4 @@ env_var = "PRILIVE_REVIEW_DISABLE"
 #   2. PRILIVE_PRE_REVIEW_EXPERIMENTAL=1 → gate ON (env override)
 #   3. pre_review.enabled in this file → persistent project default
 #   4. Otherwise → OFF
-enabled = false
+enabled = true
