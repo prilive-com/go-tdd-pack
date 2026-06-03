@@ -101,6 +101,19 @@ if [[ "${HAS_JSON_EVENTS}" == "true" ]]; then
   CODEX_FLAGS+=(--json)
 fi
 
+# v2.1 PR 7: MCP-detachment for the --output-schema call.
+# openai/codex#15451 — when MCP servers/tools are active in user config,
+# --output-schema is silently dropped and the response is unconstrained
+# (malformed JSON, missing braces, markdown fences). --ignore-user-config
+# skips $CODEX_HOME/config.toml on this invocation only; auth still works.
+# Bug is marked closed upstream but no confirmed fix on 0.129.x; the flag
+# is harmless when present even if the underlying bug is fixed, so we add
+# it unconditionally when the CLI supports it.
+HAS_IGNORE_USER_CFG="$(codex_cap_supports supports_ignore_user_config "${PROJECT_DIR}")"
+if [[ "${HAS_IGNORE_USER_CFG}" == "true" ]]; then
+  CODEX_FLAGS+=(--ignore-user-config)
+fi
+
 # --- invoke ---
 # When --json is enabled, stdout becomes JSONL events; redirect to file.
 # When not, stdout is unused (--output-schema + -o write to files).

@@ -21,6 +21,12 @@
 #                                  (openai/codex#14343 — false on 0.125-0.129;
 #                                  detected dynamically because future
 #                                  releases may fix it)
+#   supports_ignore_user_config  — --ignore-user-config skips $CODEX_HOME/
+#                                  config.toml on a per-invocation basis
+#                                  (v2.1 PR 7: MCP-detachment mechanism for
+#                                  openai/codex#15451; --output-schema is
+#                                  silently dropped when MCP servers are
+#                                  active in user config)
 
 if [[ -z "${__PRILIVE_CODEX_CAP_LIB_LOADED:-}" ]]; then
   __PRILIVE_CODEX_CAP_LIB_LOADED=1
@@ -63,12 +69,13 @@ codex_detect_capabilities() {
   exec_help=$(codex exec --help 2>&1 || true)
   resume_help=$(codex exec resume --help 2>&1 || true)
 
-  local sj=false slm=false sse=false ssr=false
+  local sj=false slm=false sse=false ssr=false siuc=false
 
   echo "${exec_help}"   | grep -q -- '--json'                 && sj=true
   echo "${exec_help}"   | grep -q -- '--output-last-message'  && slm=true
   echo "${exec_help}"   | grep -q -- '--output-schema'        && sse=true
   echo "${resume_help}" | grep -q -- '--output-schema'        && ssr=true
+  echo "${exec_help}"   | grep -q -- '--ignore-user-config'   && siuc=true
 
   jq -n \
     --arg version "${version}" \
@@ -77,13 +84,15 @@ codex_detect_capabilities() {
     --argjson slm "${slm}" \
     --argjson sse "${sse}" \
     --argjson ssr "${ssr}" \
+    --argjson siuc "${siuc}" \
     '{available:true,
       version:$version,
       detected_at:$ts,
       supports_json:$sj,
       supports_output_last_message:$slm,
       supports_output_schema_exec:$sse,
-      supports_output_schema_resume:$ssr}' \
+      supports_output_schema_resume:$ssr,
+      supports_ignore_user_config:$siuc}' \
     > "${cache_path}.tmp" 2>/dev/null && mv "${cache_path}.tmp" "${cache_path}"
 }
 

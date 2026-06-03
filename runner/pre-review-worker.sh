@@ -81,6 +81,11 @@ fi
 codex_detect_capabilities "${PROJECT_DIR}"
 HAS_LAST_MSG="$(codex_cap_supports supports_output_last_message "${PROJECT_DIR}")"
 HAS_SCHEMA_EXEC="$(codex_cap_supports supports_output_schema_exec "${PROJECT_DIR}")"
+# v2.1 PR 7: --ignore-user-config detaches user MCP servers for this
+# call (openai/codex#15451 — --output-schema is silently dropped when
+# MCP servers are active in user config). Harmless when present even
+# if the bug is fixed upstream.
+HAS_IGNORE_USER_CFG="$(codex_cap_supports supports_ignore_user_config "${PROJECT_DIR}")"
 
 # Config (model, reasoning, web_search) — falls back to codex-cli's own
 # defaults if the field is absent.
@@ -152,6 +157,9 @@ process_submission() {
   fi
   if [[ "${HAS_LAST_MSG}" == "true" ]]; then
     codex_flags+=(-o "${out_tmp}")
+  fi
+  if [[ "${HAS_IGNORE_USER_CFG}" == "true" ]]; then
+    codex_flags+=(--ignore-user-config)
   fi
   codex_flags+=(--skip-git-repo-check)
   codex_flags+=(--cd "${PROJECT_DIR}")
