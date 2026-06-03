@@ -77,6 +77,7 @@ require_phrase "${PRE}" 'file_change.*only.*runtime command safety|runtime comma
 info "[2b] prompts have the contradicts_grounding rule (v2.1 PR 2)"
 require_phrase "${SYS}" 'contradicts_grounding' "codex-system mentions contradicts_grounding flag"
 require_phrase "${SYS}" 'NEVER set .*contradicts_grounding.*true.*correctness|correctness.*NEVER' "codex-system carve-out for correctness"
+require_phrase "${SYS}" 'compiled or generated artifact|resolved artifact' "codex-system verify-override-claims rule"
 require_phrase "${PRE}" 'contradicts_grounding' "pre-review mentions contradicts_grounding flag"
 require_phrase "${PRE}" 'NEVER set .*contradicts_grounding.*true.*safety|safety.*correctness.*data_loss' "pre-review carve-out enumerated"
 
