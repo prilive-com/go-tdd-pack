@@ -15,6 +15,184 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 _No unreleased changes._
 
+## [2.1.0] - 2026-06-03
+
+Quality release. Twelve PRs (#19-#30) addressing false-positive control,
+review-cycle modernization, evidence-chain protection, and the Finding-
+Driven TDD foundation. Backwards-compatible with v2.0.x in the happy
+path; one user-visible default flip noted under Changed. All work
+landed via individual PRs against the protected `main` branch with the
+`test` / `lint` / `CodeQL` / `DCO` CI gates passing.
+
+### Added
+
+- **Four false-positive rails on round-1 findings** (#20, #21, #22, #27).
+  The runner now layers four demotion filters before findings are
+  surfaced to Claude, each addressing a distinct failure mode the prior
+  reviewer-only approach missed:
+  - **Rail A — tool-grounding demotion with semantic carve-out** (#20).
+    Findings whose category is covered by a deterministic tool that
+    passed clean (gofmt, staticcheck, go vet, gosec, govulncheck, race)
+    get `contradicts_grounding=true` and are demoted to display-only.
+    Carve-out preserves `correctness | design | test_quality | security`
+    — semantic categories no tool can judge — at their claimed severity.
+  - **Rail B — confidence floor** (#21). Findings below
+    `severity.confidence_floor` (default 4 = high static evidence) are
+    demoted. Configurable per project.
+  - **Rail C — line_scope routing** (#22). Round-1 prompt now ships a
+    CHANGED block (changed hunks) and a CONTEXT block (file headers,
+    types, signatures). Findings tagged `pre_existing_unrelated` —
+    not on changed lines or change-triggered context — are demoted.
+  - **Rail D — perspective-diverse consensus** (#27). Tier-1 paths run
+    multiple parallel review perspectives (correctness, security, perf
+    angles). Findings raised by only one angle without corroboration
+    are demoted. Tier-1 detector + angle prompts + singleton-demotion
+    logic land in this PR; the parallel producer that fills
+    `raised_by_angle` is foundation-only for v2.1 and ships in v2.2.
+- **Verify-only mode for review rounds N>1** (#23). Round-1 emits
+  structured findings via `--output-schema`. Rounds 2+ ask Codex to
+  verify each finding's `disposition` against the new diff
+  (`fixed | partial | unchanged | regressed`) instead of re-deriving the
+  finding set. Cuts cycle latency and stops cross-round drift.
+- **Gate 4 — engine-owned artifact protection** (#24, #30). New
+  `hooks/protect-tdd-artifacts.sh` PreToolUse hook blocks direct
+  Write/Edit/MultiEdit/NotebookEdit calls against `.tdd/findings/**`,
+  `.tdd/queue/**`, `.tdd/reviews/state.json`, the calibration ledger,
+  the cycle event log, and the FDTDD active-finding marker. The runner
+  writes those files via plain bash (no PreToolUse hook fires); Claude
+  cannot. v2.1 release cleanup (#30) canonicalizes paths via `pwd -P`
+  before matching so traversal / dot-relative / canonical-abs / symlink
+  routes can no longer bypass the gate.
+- **Origin-aware escalation** (#24). A/B/V escalation menus only render
+  when the session is interactive; non-interactive (CI, scheduled, MCP)
+  sessions drop the menu and route to the resolution path appropriate
+  for that origin. Driven by `TDD_REVIEW_ORIGIN` env var, not
+  `[ -t 0 ]` (which mis-classifies many real interactive sessions).
+- **Codex CLI MCP detachment** (#25). Structured-output calls
+  (`--output-schema`) now run with `--ignore-user-config` so a user's
+  global Codex MCP config can't break round-1 schema parsing — works
+  around upstream bug openai/codex#15451 where MCP servers swallow
+  `--output-schema` silently.
+- **Finding-Driven TDD foundation** (#26, #30). Tiers config in
+  `tdd-pack.toml`, `scripts/tdd/finding-start.sh` and
+  `finding-finish.sh` helpers, `.tdd/active-finding` marker, and the
+  Gate 4 protection that backs it. Stage 1 rails (Gate 1 Red-proof
+  required, Gate 3 test-lock during Green) are foundation-only for
+  v2.1 and ship in v2.2. The injected guidance is FDTDD-aware now —
+  strict_tdd/governed_tdd modes nudge toward Red proof first instead
+  of "fix the code" (the word "silently" is gone from every mode; #30).
+- **Aggressive tool-grounding suite** (#28). The tool-grounding step
+  now runs `staticcheck -checks=all`, `golangci-lint run --enable-all`,
+  `gosec -no-fail -quiet`, and optionally `go test -race -count=3`
+  (opt-in via `TDD_GROUNDING_RACE=1`) in addition to the v2.0 baseline.
+  Per-tool 60s timeout + 4KB output cap; total 30KB cap unchanged.
+  More signal for the reviewer at the same prompt budget.
+- **Five new guard smokes** (12 + 16 new assertions across #28 + #30):
+  `smoke-active-finding.sh`, `smoke-plugin-manifest-v21.sh`,
+  `smoke-config-default-consistency.sh`,
+  `smoke-carveout-schema-consistency.sh`,
+  `smoke-protect-tdd-artifacts-traversal.sh`. Each guards a specific
+  re-drift surface (manifest version, shipped default, schema/engine
+  carve-out parity, path-matching robustness, active-finding marker
+  protection).
+- **`scripts/tdd/`** helpers for FDTDD operators: `finding-start.sh`,
+  `finding-finish.sh`. Engine-owned writes route through these so the
+  marker and queue artifacts stay consistent.
+- **Prompt artifact verification** (#29). System and override prompts
+  now assert their override/equivalence claims against the compiled
+  artifacts they reference, catching drift between prose and code at
+  build time.
+
+### Changed
+
+- **Pre-write gating default is `false`** (#30). `[pre_review]` in
+  `tdd-pack.toml` ships with `enabled = false` to match the surrounding
+  "Off by default" docs. An earlier dogfooding flip had leaked into
+  shipped `true`, which silently turned on pre-write gating with
+  deny-on-Codex-unavailable for adopters who copied the shipped config.
+  Adopters who want pre-write gating set `enabled = true` or export
+  `PRILIVE_PRE_REVIEW_EXPERIMENTAL=1`; precedence is documented in the
+  `[pre_review]` block.
+- **Round-1 schema** `contradicts_grounding` description now lists the
+  exact never-demote categories (`correctness, design, security,
+  test_quality`), reconciled with the engine's `NEVER_DEMOTE_CATEGORIES`
+  (#30). `maintainability` is no longer claimed never-demote: it's too
+  broad and includes the refactor/style noise the rail should be
+  allowed to demote. A new smoke
+  (`smoke-carveout-schema-consistency.sh`) asserts schema/engine parity
+  to prevent future drift.
+- **Plugin manifest at `.claude-plugin/plugin.json` is v2.1.0** (#30)
+  with the v2.1 hook set, Gate 4 ordered before `pre-review.sh` on
+  PreToolUse, and `Edit|Write|MultiEdit` (file-only) as the PostToolUse
+  matcher. Adopters who install via `/plugin install go-tdd-pack@...`
+  get the correct v2.1 wiring on first install. The repo's own
+  `.claude/settings.json` no longer carries the leftover Bash
+  PostToolUse matcher that contradicted the v2.1 decision to remove
+  Bash-command review.
+- **Install paths are explicit** (#30). README and `docs/ADOPTION_GUIDE.md`
+  now warn adopters to pick exactly one install path (project-copy OR
+  plugin) since Claude Code stacks hook registrations across both
+  sources and dedup is by literal command string —
+  `${CLAUDE_PLUGIN_ROOT}/hooks/inject-findings.sh` and
+  `$CLAUDE_PROJECT_DIR/hooks/inject-findings.sh` count as two distinct
+  hooks, so a double install runs every review twice.
+
+### Removed
+
+- **Bash matcher removed from the review pre-gate** (#19). The starter
+  pack's `hooks/settings.json` and `.claude-plugin/plugin.json` no
+  longer register a Bash PostToolUse / PreToolUse matcher against
+  review hooks. Runtime command safety (rm -rf guards, force-push
+  guards, etc.) is out of scope for a dev-time review pack — that
+  belongs in the operator-side `devopspoint` pack, not the starter.
+  Existing v1.x guard hooks under `.claude/hooks/` (guard-dangerous-bash,
+  guard-bash-pipefail) are unaffected; they are a separate retire/keep
+  decision tracked outside this release.
+
+### Fixed
+
+- **Six release-blocker fixes shipped as v2.1 cleanup** (#30):
+  - B1: plugin manifest was stale at v2.0.1 with the obsolete Bash
+    matcher and missing v2.1 hook registrations.
+  - B2: `tdd-pack.toml` shipped `enabled = true` despite the comment
+    saying "off by default" (see Changed).
+  - B3: `.claude/settings.json` carried a leftover Bash PostToolUse
+    matcher contradicting the v2.1 Bash-matcher removal.
+  - B4: Rail A `NEVER_DEMOTE_CATEGORIES` contained
+    `safety|data_loss|blast_radius` (which do not exist in the round-1
+    schema enum) and the schema prose listed `maintainability` as
+    never-demote while the engine demoted it — reconciled both sides.
+  - B5: injected next-step guidance said "fix the code silently",
+    teaching the opposite of the FDTDD habit (finding → Red proof →
+    Green fix). Replaced with mode-aware guidance.
+  - B6: Gate 4 path matching was bypassable via traversal,
+    canonical-abs, dot-relative, and symlinked routes. Canonicalized
+    via `pwd -P` before matching.
+- **Spurious shellcheck SC2154 on trap bodies** (#30). The traversal
+  smoke's `trap 'for p in "${CLEANUP[@]}"; do ... done' EXIT` was
+  parsed as a separate mini-script by shellcheck, which mis-flagged the
+  for-loop variable as unassigned and broke CI under `shellcheck -S
+  warning`. Refactored to a `_cleanup()` function with `local path`.
+
+### Security
+
+- **Evidence-chain integrity boundary** (#24, #30). Gate 4 is the
+  primary integrity boundary against Claude editing the runner's own
+  artifacts (cycle state, findings, ledger, debate log, FDTDD active
+  marker, queue). Without canonicalization, four bypass routes resolved
+  to protected files but slipped past the literal prefix match to the
+  final allow — defeating the gate's purpose. v2.1 closes all four
+  routes with `pwd -P` canonicalization. The six new traversal-smoke
+  assertions are the regression boundary.
+- **Schema/engine carve-out parity is now asserted in CI** (#30). A
+  divergence between Codex's never-demote prose and the engine's
+  `NEVER_DEMOTE_CATEGORIES` set is the prior failure mode that
+  v2.1.0-rc shipped with. The new
+  `smoke-carveout-schema-consistency.sh` prevents the same drift from
+  shipping again.
+
+---
+
 ## [2.0.1] - 2026-05-31
 
 Patch release. Five focused improvements driven by external consultant
