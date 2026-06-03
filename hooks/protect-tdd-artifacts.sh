@@ -104,6 +104,10 @@ case "${REL_PATH}" in
     deny "${REL_PATH}" "Codex capability cache; rebuilt from `codex --version` on next runner invocation."
     exit 0
     ;;
+  .tdd/active-finding)
+    deny "${REL_PATH}" "FDTDD active-finding marker (v2.1 PR 8). Engine path: scripts/tdd/finding-start.sh and scripts/tdd/finding-finish.sh."
+    exit 0
+    ;;
 esac
 
 # Patterned files under .tdd/reviews/<cycle>/.

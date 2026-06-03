@@ -1,0 +1,47 @@
+# .tdd/tiers.toml.example — copy to .tdd/tiers.toml and edit.
+#
+# Defines which paths in your project are "Tier 1" — high-stakes code
+# that requires Finding-Driven TDD discipline (a Codex finding must
+# produce an accepted Red proof before driving a production fix).
+#
+# This file is shipped as inert configuration in v2.1 PR 8 (the
+# foundation slice). It becomes load-bearing in v2.1 PR 8b when
+# Gate 1 (require red-proof for Tier-1 prod fix) ships.
+#
+# Match semantics:
+#   - Globs match against PROJECT_DIR-relative paths.
+#   - ** matches any number of path components.
+#   - * matches a single path component (no slashes).
+#   - A path is Tier 1 if it matches ANY pattern in path_globs.
+#
+# Examples below cover the most common high-stakes domains. Trim or
+# extend per your project. Conservative starting point — fewer paths
+# means less FDTDD friction.
+
+[tier1]
+# Paths considered Tier 1. FDTDD applies here.
+path_globs = [
+  # Security / auth / crypto
+  "internal/security/**",
+  "internal/auth/**",
+  "internal/crypto/**",
+
+  # Money / billing / accounting
+  "internal/billing/**",
+  "internal/payments/**",
+  "internal/ledger/**",
+
+  # Database migrations (schema changes)
+  "migrations/**",
+
+  # The pack's own enforcement code — self-protect
+  "hooks/**",
+  "runner/**",
+  "schemas/**",
+]
+
+# Optional: explicit non-Tier-1 paths (overrides path_globs on conflict).
+# Useful when a glob is too broad. Default empty.
+allow_globs = [
+  # e.g. "internal/security/internal_tooling/**",
+]
