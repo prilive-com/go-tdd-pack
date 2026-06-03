@@ -97,6 +97,13 @@ The pack resolves tools from `PATH` and `$(go env GOPATH)/bin`.
 
 ## Install
 
+> **Pick exactly ONE install path: project-copy OR plugin. Never both.** Claude
+> Code stacks hook registrations across every source (project settings + plugin
+> manifests), and dedup is by literal command string — so installing both ways
+> runs every review twice. See
+> [Claude Code hooks docs](https://code.claude.com/docs/en/hooks) and the
+> warning in [`docs/ADOPTION_GUIDE.md`](docs/ADOPTION_GUIDE.md#step-3--install-the-pack).
+
 ### Clone into an existing Go project
 
 ```bash

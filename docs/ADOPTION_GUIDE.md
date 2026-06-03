@@ -74,6 +74,24 @@ Open a new terminal so the change takes effect.
 
 ## Step 3 — Install the pack
 
+> **Pick exactly ONE install path: plugin OR project-copy. Never both.**
+>
+> Claude Code stacks hook registrations across every source it loads
+> (plugin manifests, project `.claude/settings.json`, user settings).
+> Dedup is by literal command string, so `${CLAUDE_PLUGIN_ROOT}/hooks/inject-findings.sh`
+> and `$CLAUDE_PROJECT_DIR/hooks/inject-findings.sh` count as two distinct
+> hooks even though they resolve to the same file. An adopter who installs
+> via both paths will run every Codex review twice, doubling token spend
+> and producing duplicate finding banners. Reference:
+> https://code.claude.com/docs/en/hooks.
+>
+> If you previously installed via one path and want to switch, REMOVE the
+> old surface first: uninstall the plugin with `/plugin uninstall go-tdd-pack`
+> before copying files into `.claude/settings.json`, or delete the hook
+> entries from `.claude/settings.json` before running `/plugin install`.
+
+### Path A — project-copy install (this guide)
+
 ```bash
 git clone https://github.com/prilive-com/go-tdd-pack.git /tmp/go-tdd-pack
 cd ~/your-go-project
@@ -95,6 +113,20 @@ Then **merge the hook registration** from
 `.claude/settings.json`. Do NOT blind-overwrite — your project may
 have other hooks. Full merge procedure in
 [`V2_ROLLOUT_GUIDE.md`](V2_ROLLOUT_GUIDE.md) §2.
+
+### Path B — plugin install
+
+```
+/plugin install go-tdd-pack@prilive-com
+```
+
+The plugin manifest (`.claude-plugin/plugin.json`) registers every
+review hook automatically — do NOT also merge `hooks/settings.json` into
+your project's `.claude/settings.json` (that would re-register the same
+hooks via a second source; see warning above). The plugin path still
+expects `tdd-pack.toml`, `CLAUDE.md`, `AGENTS.md`, and the `runner/`,
+`prompts/`, `schemas/`, `test/` directories at the project root — those
+are project-owned content, not plugin-installable.
 
 ---
 

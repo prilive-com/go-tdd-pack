@@ -58,8 +58,49 @@ FILE_PATH=$(printf '%s' "${INPUT}" | jq -r '.tool_input.file_path // .tool_input
 
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 
-# Normalize to PROJECT_DIR-relative if the path is under PROJECT_DIR.
-REL_PATH="${FILE_PATH#${PROJECT_DIR}/}"
+# --- Canonicalize before matching (v2.1 release fix) ---------------------
+# Claude's Edit/Write tool_input.file_path may arrive non-canonical:
+#   - relative ("./.tdd/findings/x", ".tdd/findings/x")
+#   - with traversal ("sub/../.tdd/findings/x")
+#   - through a symlinked directory
+# The old code did a literal prefix strip ("${FILE_PATH#${PROJECT_DIR}/}")
+# and then literal prefix/case matching. Any non-canonical route to a
+# protected file slipped through to the final `exit 0` (ALLOW), silently
+# bypassing the gate. Gate 4 is the evidence-chain integrity boundary, so
+# the bypass defeats its purpose. Resolve the real path first.
+#
+# We canonicalize WITHOUT requiring the target file to exist (Claude may be
+# creating it): resolve the directory with `pwd -P` (follows symlinks,
+# collapses ..) and re-attach the basename. Fall back to the raw path if
+# the directory cannot be resolved.
+_canonicalize() {
+  local p="$1" dir base
+  dir=$(dirname -- "${p}")
+  base=$(basename -- "${p}")
+  local resolved_dir
+  if resolved_dir=$(cd "${dir}" 2>/dev/null && pwd -P); then
+    printf '%s/%s' "${resolved_dir}" "${base}"
+  else
+    printf '%s' "${p}"
+  fi
+}
+
+PROJECT_DIR_CANON=$(cd "${PROJECT_DIR}" 2>/dev/null && pwd -P) || PROJECT_DIR_CANON="${PROJECT_DIR}"
+FILE_PATH_CANON=$(_canonicalize "${FILE_PATH}")
+
+# If the path is not under PROJECT_DIR after canonicalization, it is not an
+# engine-owned artifact we protect — let it through (other hooks may judge it).
+# Quote the strip pattern so a PROJECT_DIR containing glob metacharacters
+# cannot alter the match.
+case "${FILE_PATH_CANON}" in
+  "${PROJECT_DIR_CANON}/"*)
+    REL_PATH="${FILE_PATH_CANON#"${PROJECT_DIR_CANON}/"}"
+    ;;
+  *)
+    # Outside the project tree → not ours to protect.
+    exit 0
+    ;;
+esac
 
 # Emit a deny with the engine-mediated-write hint.
 deny() {

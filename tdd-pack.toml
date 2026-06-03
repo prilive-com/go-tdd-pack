@@ -126,4 +126,4 @@ env_var = "PRILIVE_REVIEW_DISABLE"
 #   2. PRILIVE_PRE_REVIEW_EXPERIMENTAL=1 → gate ON (env override)
 #   3. pre_review.enabled in this file → persistent project default
 #   4. Otherwise → OFF
-enabled = true
+enabled = false
