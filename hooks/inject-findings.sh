@@ -130,22 +130,34 @@ fi
 
 VERDICT_SUMMARY=$(jq -r '.summary_one_sentence // "review requested"' "${ROUND1_JSON}" 2>/dev/null)
 
-# Filter by min_surface from tdd-pack.toml [severity] min_surface.
-# Confidence is shown as c=N (1-5); 5=verified, 1=guess.
+# Filter knobs from tdd-pack.toml:
+#   [severity] min_surface       — minimum severity surfaced to Claude
+#   [severity] must_address      — severity that drives a blocking finding
+#   [severity] confidence_floor  — confidence floor for blocking findings (v2.1)
 # Severity numeric order: blocker=4, major=3, minor=2, nit=1.
+# Confidence numeric order: 5=verified, 4=high static, 3=likely, 2=plausible, 1=guess.
 # shellcheck source=../runner/lib/config.sh
 . "${PROJECT_DIR}/runner/lib/config.sh"
 MIN_SURFACE=$(cfg_get "${PROJECT_DIR}/tdd-pack.toml" "severity.min_surface" "nit")
+CONFIDENCE_FLOOR=$(cfg_get "${PROJECT_DIR}/tdd-pack.toml" "severity.confidence_floor" "4")
 
-# --- v2.1 rail: tool-grounding demotion (spec §5.1) -----------------------
+# --- v2.1 rails: two layered demotion filters ------------------------------
 #
-# A finding with `contradicts_grounding: true` is one Codex flagged as
-# falling in a category a deterministic tool covers (gofmt, golangci-lint,
-# staticcheck, go vet, gosec, govulncheck, race) where the tool passed
-# clean on the cited line and Codex has no reproducible failure to cite.
-# Such findings are speculative and should not block.
+# Rail A — tool-grounding (spec §5.1):
+#   A finding with `contradicts_grounding: true` is one Codex flagged as
+#   falling in a category a deterministic tool covers (gofmt, golangci-lint,
+#   staticcheck, go vet, gosec, govulncheck, race) where the tool passed
+#   clean on the cited line and Codex has no reproducible failure to cite.
 #
-# DEFENSIVE CARVE-OUT — load-bearing.
+# Rail B — confidence floor (spec §5.2):
+#   A finding only drives must-address when severity ≥ must_address AND
+#   confidence ≥ confidence_floor. Below the floor → speculative.
+#
+# Either rail can demote a finding to the speculative section. The two
+# demotion reasons are tracked separately so adopters can tell why a
+# finding wasn't surfaced as blocking.
+#
+# DEFENSIVE CARVE-OUT — load-bearing for Rail A.
 # These categories catch what tools cannot judge: silent nil dereferences
 # in semantic paths, missing invariants, broken contracts. Tool silence
 # does NOT mean these concerns are unfounded. Even if Codex set
@@ -153,22 +165,29 @@ MIN_SURFACE=$(cfg_get "${PROJECT_DIR}/tdd-pack.toml" "severity.min_surface" "nit
 # (it shouldn't per the prompt, but might), the engine refuses to demote
 # it. The list is intentionally short — widening it would weaken the
 # tool's genuine strength.
+#
+# NOTE: the carve-out applies to Rail A only. Rail B (confidence floor)
+# does apply to every category — a low-confidence semantic finding is
+# still speculative until corroborated.
 NEVER_DEMOTE_CATEGORIES='correctness|design|test_quality|security|safety|data_loss|blast_radius'
 
-# Split findings into two groups via jq:
-#   promoted = effective_severity ≥ min_surface (drives the must-address list)
-#   demoted  = contradicts_grounding=true AND category NOT in never-demote
-#              (still shown to Claude as speculative, but not blocking)
+# Split findings via jq:
+#   promoted = passes both rails (drives the must-address list)
+#   demoted  = at least one rail demoted it (informational, not blocking)
 #
-# Findings whose category is in NEVER_DEMOTE_CATEGORIES stay in the
-# promoted bucket even if contradicts_grounding=true (the carve-out).
+# Tagging the demoted findings with a `demotion_reason` field lets the
+# rendering show why each was demoted.
 
-PROMOTED=$(jq -r --arg ms "${MIN_SURFACE}" --arg nd "${NEVER_DEMOTE_CATEGORIES}" '
+PROMOTED=$(jq -r --arg ms "${MIN_SURFACE}" --arg cf "${CONFIDENCE_FLOOR}" --arg nd "${NEVER_DEMOTE_CATEGORIES}" '
   def sn($s): {"blocker":4, "major":3, "minor":2, "nit":1}[$s] // 0;
   def is_never_demote: (.category | test("^(" + $nd + ")$"));
-  def should_demote: (.contradicts_grounding == true) and (is_never_demote | not);
-  [.findings[]? | select(should_demote | not) | select(sn(.severity) >= sn($ms))]
-  | if length == 0 then "(no findings at or above min_surface=\($ms))"
+  def demoted_by_grounding: (.contradicts_grounding == true) and (is_never_demote | not);
+  def demoted_by_confidence: ((.confidence // 5) < ($cf | tonumber));
+  [.findings[]?
+    | select(demoted_by_grounding | not)
+    | select(demoted_by_confidence | not)
+    | select(sn(.severity) >= sn($ms))]
+  | if length == 0 then "(no findings at or above min_surface=\($ms) with confidence ≥ \($cf))"
     else (
       map(
         "- [\(.severity)/\(.category) c=\(.confidence // "?")] \(.title)\n  \(.body)"
@@ -178,15 +197,26 @@ PROMOTED=$(jq -r --arg ms "${MIN_SURFACE}" --arg nd "${NEVER_DEMOTE_CATEGORIES}"
     end
 ' "${ROUND1_JSON}" 2>/dev/null)
 
-DEMOTED=$(jq -r --arg nd "${NEVER_DEMOTE_CATEGORIES}" '
+DEMOTED=$(jq -r --arg ms "${MIN_SURFACE}" --arg cf "${CONFIDENCE_FLOOR}" --arg nd "${NEVER_DEMOTE_CATEGORIES}" '
+  def sn($s): {"blocker":4, "major":3, "minor":2, "nit":1}[$s] // 0;
   def is_never_demote: (.category | test("^(" + $nd + ")$"));
-  def should_demote: (.contradicts_grounding == true) and (is_never_demote | not);
-  [.findings[]? | select(should_demote)]
+  def demoted_by_grounding: (.contradicts_grounding == true) and (is_never_demote | not);
+  def demoted_by_confidence: ((.confidence // 5) < ($cf | tonumber));
+  [.findings[]?
+    | select(sn(.severity) >= sn($ms))
+    | select(demoted_by_grounding or demoted_by_confidence)]
   | if length == 0 then ""
     else (
-      "\n\nSpeculative (demoted — tool-clean on the cited line, no reproducible failure cited; informational only, does NOT block):\n" + (
+      "\n\nSpeculative (demoted; informational only, does NOT block):\n" + (
         map(
-          "- [\(.severity)/\(.category) c=\(.confidence // "?")] \(.title)\n  \(.body)"
+          (if demoted_by_grounding and demoted_by_confidence then
+              "[tool-clean + low-confidence]"
+           elif demoted_by_grounding then
+              "[tool-clean]"
+           else
+              "[low-confidence c=\(.confidence // "?") < floor \($cf)]"
+           end) as $reason
+          | "- " + $reason + " [\(.severity)/\(.category) c=\(.confidence // "?")] \(.title)\n  \(.body)"
           + (if .file != "" then "\n  at \(.file):\(.line // 0)" else "" end)
         ) | join("\n")
       )
