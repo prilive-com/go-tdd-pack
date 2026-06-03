@@ -137,9 +137,37 @@ VERDICT_SUMMARY=$(jq -r '.summary_one_sentence // "review requested"' "${ROUND1_
 . "${PROJECT_DIR}/runner/lib/config.sh"
 MIN_SURFACE=$(cfg_get "${PROJECT_DIR}/tdd-pack.toml" "severity.min_surface" "nit")
 
-FINDINGS=$(jq -r --arg ms "${MIN_SURFACE}" '
+# --- v2.1 rail: tool-grounding demotion (spec §5.1) -----------------------
+#
+# A finding with `contradicts_grounding: true` is one Codex flagged as
+# falling in a category a deterministic tool covers (gofmt, golangci-lint,
+# staticcheck, go vet, gosec, govulncheck, race) where the tool passed
+# clean on the cited line and Codex has no reproducible failure to cite.
+# Such findings are speculative and should not block.
+#
+# DEFENSIVE CARVE-OUT — load-bearing.
+# These categories catch what tools cannot judge: silent nil dereferences
+# in semantic paths, missing invariants, broken contracts. Tool silence
+# does NOT mean these concerns are unfounded. Even if Codex set
+# contradicts_grounding=true on a finding in one of these categories
+# (it shouldn't per the prompt, but might), the engine refuses to demote
+# it. The list is intentionally short — widening it would weaken the
+# tool's genuine strength.
+NEVER_DEMOTE_CATEGORIES='correctness|design|test_quality|security|safety|data_loss|blast_radius'
+
+# Split findings into two groups via jq:
+#   promoted = effective_severity ≥ min_surface (drives the must-address list)
+#   demoted  = contradicts_grounding=true AND category NOT in never-demote
+#              (still shown to Claude as speculative, but not blocking)
+#
+# Findings whose category is in NEVER_DEMOTE_CATEGORIES stay in the
+# promoted bucket even if contradicts_grounding=true (the carve-out).
+
+PROMOTED=$(jq -r --arg ms "${MIN_SURFACE}" --arg nd "${NEVER_DEMOTE_CATEGORIES}" '
   def sn($s): {"blocker":4, "major":3, "minor":2, "nit":1}[$s] // 0;
-  [.findings[]? | select(sn(.severity) >= sn($ms))]
+  def is_never_demote: (.category | test("^(" + $nd + ")$"));
+  def should_demote: (.contradicts_grounding == true) and (is_never_demote | not);
+  [.findings[]? | select(should_demote | not) | select(sn(.severity) >= sn($ms))]
   | if length == 0 then "(no findings at or above min_surface=\($ms))"
     else (
       map(
@@ -150,16 +178,33 @@ FINDINGS=$(jq -r --arg ms "${MIN_SURFACE}" '
     end
 ' "${ROUND1_JSON}" 2>/dev/null)
 
+DEMOTED=$(jq -r --arg nd "${NEVER_DEMOTE_CATEGORIES}" '
+  def is_never_demote: (.category | test("^(" + $nd + ")$"));
+  def should_demote: (.contradicts_grounding == true) and (is_never_demote | not);
+  [.findings[]? | select(should_demote)]
+  | if length == 0 then ""
+    else (
+      "\n\nSpeculative (demoted — tool-clean on the cited line, no reproducible failure cited; informational only, does NOT block):\n" + (
+        map(
+          "- [\(.severity)/\(.category) c=\(.confidence // "?")] \(.title)\n  \(.body)"
+          + (if .file != "" then "\n  at \(.file):\(.line // 0)" else "" end)
+        ) | join("\n")
+      )
+    )
+    end
+' "${ROUND1_JSON}" 2>/dev/null)
+
 CONTEXT="[Codex review — cycle ${CYCLE_ID}, round ${ROUND}, status: changes requested]
 
 Summary: ${VERDICT_SUMMARY}
 
 Findings:
-${FINDINGS}
+${PROMOTED}${DEMOTED}
 
 What to do next:
 - If you agree with a finding, fix the code silently. The runner will re-review.
 - If you disagree, write a one-line rationale in a code comment or in your next response.
+- Speculative (demoted) findings are informational — address them if obvious, ignore otherwise.
 - Do NOT ask the user about review issues. Continue working.
 - Your next response will be captured and sent to Codex for re-review (Phase 2).
 - For MVP, you may continue iterating; the runner will not auto-re-fire until Phase 2 ships."

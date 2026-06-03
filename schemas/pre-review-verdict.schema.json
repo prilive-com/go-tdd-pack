@@ -31,7 +31,8 @@
           "category",
           "title",
           "body",
-          "confidence"
+          "confidence",
+          "contradicts_grounding"
         ],
         "properties": {
           "severity": {
@@ -58,6 +59,10 @@
             "minimum": 1,
             "maximum": 5,
             "description": "1=guess, 2=plausible, 3=likely, 4=high confidence, 5=verified"
+          },
+          "contradicts_grounding": {
+            "type": "boolean",
+            "description": "v2.1 rail (spec §5.1): set true when this finding's category is one a deterministic tool covers (gofmt/golangci-lint for style, staticcheck/go vet for unused/deadcode, gosec for taint, govulncheck for vulns, race for visible races) AND that tool passed clean on the cited line AND you have no reproducible failure to cite. NEVER set true on categories the tools cannot judge: safety, correctness, data_loss, blast_radius, design. When true, the engine demotes the finding to display-only so it cannot block."
           }
         }
       }

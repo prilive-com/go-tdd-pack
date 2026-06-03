@@ -72,3 +72,22 @@ Strict JSON matching the supplied schema. Required fields:
   belong at confidence ≤2 — and at low severity, suppress them.
   Reviewer confidence (1–5) is the second axis after severity, and the
   worker's verdict-rendering honors it.
+
+- **The `contradicts_grounding` flag (v2.1 rail).** Every finding has
+  a `contradicts_grounding` boolean. Set it `true` when:
+  - The finding's category is one a deterministic tool covers
+    (formatting/style → `gofmt`/`golangci-lint`; unused/dead-code →
+    `staticcheck`/`go vet`; injection/taint → `gosec`/golangci-lint
+    rules; known-vuln deps → `govulncheck`), AND
+  - The relevant tool passed clean on the cited file/line, AND
+  - You have no reproducible failure to cite.
+
+  When `contradicts_grounding=true`, the engine demotes the finding
+  to display-only.
+
+  **NEVER set `contradicts_grounding=true` on these categories:**
+  `safety`, `correctness`, `data_loss`, `blast_radius`, `design`.
+  These are semantic concerns that tools cannot judge; tool silence
+  does not mean the finding is unfounded. Leave the flag `false` on
+  these. The engine has a defensive carve-out that ignores the flag
+  on these categories anyway.
