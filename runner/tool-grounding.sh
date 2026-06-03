@@ -208,11 +208,26 @@ for mod in "${SORTED_MODULES[@]}"; do
     continue
   fi
 
-  run_tool "${mod}" "gofmt -l ./..." gofmt -l .
+  # v2.1 PR 10 — aggressive grounding suite.
+  # staticcheck: -checks=all turns on every check including experimental
+  #   SA-series ones. More signal for the reviewer.
+  # golangci-lint: --enable-all turns on every available linter (not
+  #   just the default subset). Slower; with subscription tokens free,
+  #   the latency is the only cost.
+  # gosec: security-focused static checker. Silently skipped if not
+  #   installed. -no-fail keeps exit-code from breaking the runner.
+  # go test -race -count=3: OPT-IN via TDD_GROUNDING_RACE=1. Heavy
+  #   (full test suite per module per cycle). When enabled, provides
+  #   concrete race evidence instead of speculation.
+  run_tool "${mod}" "gofmt -l ." gofmt -l .
   run_tool "${mod}" "go vet ./..." go vet ./...
-  run_tool "${mod}" "staticcheck ./..." staticcheck ./...
-  run_tool "${mod}" "golangci-lint run" golangci-lint run --timeout=50s ./...
+  run_tool "${mod}" "staticcheck -checks=all ./..." staticcheck -checks=all ./...
+  run_tool "${mod}" "golangci-lint run --enable-all" golangci-lint run --enable-all --timeout=50s ./...
   run_tool "${mod}" "govulncheck ./..." govulncheck ./...
+  run_tool "${mod}" "gosec -no-fail -quiet ./..." gosec -no-fail -quiet ./...
+  if [[ "${TDD_GROUNDING_RACE:-0}" == "1" ]]; then
+    run_tool "${mod}" "go test -race -count=3 ./..." go test -race -count=3 ./...
+  fi
 done
 
 # --- step 7: enforce total-output cap ---
