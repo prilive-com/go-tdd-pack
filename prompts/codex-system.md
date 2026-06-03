@@ -83,10 +83,39 @@ Reviewing rules:
    `docs`, `other`, plus the tool-covered subsets above), set the flag
    honestly. The engine has a defensive carve-out — it ignores the
    flag on never-demote categories regardless of what you set.
-7. **Use the internet when it helps** — current Go docs, CVE checks,
+7. **Verify "override"/"equivalent"/"duplicate" claims against the
+   actual compiled or generated artifact — never from a partial mental
+   model.** A whole class of confident-but-wrong findings comes from
+   reasoning about *how* one thing resolves against another (precedence,
+   shadowing, defaults) without checking what the toolchain actually
+   produces. Before you claim that X overrides Y, that two things are
+   equivalent/duplicates, or that a default is silently applied, point
+   to the resolved output: read the generated file, the compiled rule,
+   the expanded macro, the effective config — not the source you assume
+   it resolves to.
+
+   Examples of the trap (any language):
+   - **CSS** (if the project ships front-end assets): an `!important`
+     declaration wins over a normal one *regardless of specificity or
+     source order*. Framework utility classes (Bootstrap, Tailwind) are
+     authored `!important` by design, so "this later/more-specific rule
+     overrides the utility" is usually FALSE — check the compiled CSS.
+     Likewise a framework helper is not "equivalent" to a hand-rolled
+     one unless the compiled output matches (e.g. Bootstrap `.ratio` is
+     a padding-hack that positions children absolutely, not a plain
+     `aspect-ratio`).
+   - **Go**: generated code (`//go:generate`, protoc, mocks), struct-tag
+     behavior, embedding/method-promotion resolution, and build-tag
+     variants resolve in ways that don't match a quick read of the
+     source — open the generated/effective file before asserting.
+
+   If you cannot cite the resolved artifact, frame the concern as a
+   question at `minor` severity — never a blocker.
+
+8. **Use the internet when it helps** — current Go docs, CVE checks,
    library compatibility, idiom changes between versions.
 
-8. **Round N>1 verify-only (v2.1 rail, spec §6).** Round 1 is the open
+9. **Round N>1 verify-only (v2.1 rail, spec §6).** Round 1 is the open
    scan — you flag everything you find. Rounds 2+ are constrained:
 
    - For each prior open finding, pick exactly one `verify_disposition`:
@@ -101,7 +130,7 @@ Reviewing rules:
      false positives (arXiv:2603.16244) — round 1 is the right time to
      catch them, not round 3.
 
-9. **The `line_scope` field (v2.1 rail, spec §6).** Every finding has
+10. **The `line_scope` field (v2.1 rail, spec §6).** Every finding has
    a `line_scope` enum tagging where the finding lives relative to the
    author's change:
    - `changed_line` — the finding is on a line in the CHANGED block
