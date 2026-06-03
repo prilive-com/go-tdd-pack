@@ -59,7 +59,56 @@ else
   fail "case 1: missing or wrong summary line"
 fi
 
+# v2.1 PR 10: aggressive grounding suite — verify each expected tool
+# section header appears in the output. Section appears whether the
+# tool is installed (with output) or not (with "(skipped: ... not
+# installed)" line). We're verifying the SCRIPT wires up each tool,
+# not whether the tool is installed in the test environment.
+for header_check in \
+  "gofmt -l ." \
+  "go vet ./..." \
+  "staticcheck -checks=all ./..." \
+  "golangci-lint run --enable-all" \
+  "govulncheck ./..." \
+  "gosec -no-fail -quiet ./..."; do
+  if echo "${OUT}" | grep -qF "### ${header_check}"; then
+    pass "case 1: tool section '${header_check}' wired up"
+    PASS_COUNT=$((PASS_COUNT + 1))
+  else
+    fail "case 1: expected tool section '### ${header_check}' in output"
+  fi
+done
+
+# Race testing is opt-in — should NOT appear in default output.
+if echo "${OUT}" | grep -q "go test -race"; then
+  fail "case 1: race section should NOT appear without TDD_GROUNDING_RACE=1; got it in default output"
+else
+  pass "case 1: race testing correctly opt-in (absent by default)"
+  PASS_COUNT=$((PASS_COUNT + 1))
+fi
+
 rm -rf "${T1}"
+
+# ---- Case 1b: TDD_GROUNDING_RACE=1 adds the race section ----
+
+info "[1b] TDD_GROUNDING_RACE=1 → race section appears"
+T1B=$(mktemp -d)
+(
+  cd "${T1B}" || exit 1
+  init_git
+  printf 'module test/single\n\ngo 1.22\n' > go.mod
+  printf 'package main\nfunc main() {}\n' > main.go
+  git add -A && git commit -q -m init
+  printf 'package main\nfunc main() { _ = 42 }\n' > main.go
+) >/dev/null 2>&1
+OUT_RACE=$(TDD_GROUNDING_RACE=1 "${SCRIPT_PATH}" "${T1B}" 2>/dev/null)
+if echo "${OUT_RACE}" | grep -q "go test -race -count=3"; then
+  pass "case 1b: race section appears when TDD_GROUNDING_RACE=1"
+  PASS_COUNT=$((PASS_COUNT + 1))
+else
+  fail "case 1b: race section missing when env var set"
+fi
+rm -rf "${T1B}"
 
 # ---- Case 2: monorepo ----
 
