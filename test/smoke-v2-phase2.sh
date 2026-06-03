@@ -179,7 +179,12 @@ cat > "${SANDBOX}/tdd-pack.toml" <<'EOF'
 max_rounds = 4
 EOF
 
-OUT=$(${ES} "${CYCLE_ID}" "${SANDBOX}")
+# v2.1 PR 6: escalate.sh is now origin-aware. This test asserts the
+# interactive (A/B/V menu) output, so we force interactive origin via
+# TDD_REVIEW_ORIGIN regardless of the CI / GITHUB_ACTIONS env vars
+# that this test may be running under. The unattended-mode rendering
+# is exercised separately by test/smoke-escalate-origin-aware.sh.
+OUT=$(TDD_REVIEW_ORIGIN=interactive "${ES}" "${CYCLE_ID}" "${SANDBOX}")
 HAS_EVENT=$(echo "${OUT}" | jq -r '.hookSpecificOutput.hookEventName // empty' 2>/dev/null)
 expect_eq "escalate emits PostToolUse" "PostToolUse" "${HAS_EVENT}"
 
