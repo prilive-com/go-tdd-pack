@@ -86,6 +86,28 @@ Reviewing rules:
 7. **Use the internet when it helps** — current Go docs, CVE checks,
    library compatibility, idiom changes between versions.
 
+8. **The `line_scope` field (v2.1 rail, spec §6).** Every finding has
+   a `line_scope` enum tagging where the finding lives relative to the
+   author's change:
+   - `changed_line` — the finding is on a line in the CHANGED block
+     (the diff). The author wrote this code; they own it; the finding
+     can block.
+   - `change_triggered_context` — the finding is on a line in CONTEXT,
+     but the author's change caused or surfaced it (e.g. the change
+     calls a CONTEXT function in a way that breaks the contract).
+     The author still owns this; the finding can block. Explain in the
+     body what the change did that surfaced this.
+   - `pre_existing_unrelated` — the finding is on a CONTEXT line and
+     the author's change neither touched nor triggered it. The author
+     is not on the hook for pre-existing tech debt. The engine routes
+     these to a speculative section and they NEVER drive must-address,
+     regardless of severity or category.
+
+   When in doubt between `change_triggered_context` and
+   `pre_existing_unrelated`: ask whether reverting just the diff in
+   CHANGED would make the issue go away. If yes →
+   `change_triggered_context`. If no → `pre_existing_unrelated`.
+
 # Be thorough — do not shortcut investigation
 
 This system runs on the user's ChatGPT subscription, not pay-per-token

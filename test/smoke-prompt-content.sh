@@ -35,6 +35,19 @@ require_phrase() {
 
 info "[1] prompts/codex-system.md — anti-sycophancy + evidence rules"
 SYS="${PROJECT_ROOT}/prompts/codex-system.md"
+
+# v2.1 PR 4: line_scope rule documented in system prompt
+require_phrase "${SYS}" 'line_scope' "codex-system mentions line_scope field"
+require_phrase "${SYS}" 'pre_existing_unrelated|pre-existing.*unrelated' "codex-system enumerates the pre_existing_unrelated value"
+require_phrase "${SYS}" 'change_triggered_context' "codex-system enumerates change_triggered_context value"
+require_phrase "${SYS}" 'NEVER drive must-address' "codex-system spells out the never-blocks rule for pre_existing_unrelated"
+
+# v2.1 PR 4: round-1 user template has the CHANGED/CONTEXT delimiters
+info "[1b] prompts/codex-round1-user.md — CHANGED / CONTEXT delimiters"
+ROUND1="${PROJECT_ROOT}/prompts/codex-round1-user.md"
+require_phrase "${ROUND1}" 'CHANGED.*review and flag' "round1 user prompt has CHANGED block"
+require_phrase "${ROUND1}" 'CONTEXT.*do not flag pre-existing' "round1 user prompt has CONTEXT block"
+require_phrase "${ROUND1}" 'line_scope' "round1 user prompt references line_scope"
 require_phrase "${SYS}" 'no issues found.*correct.*valued outcome|valued outcome.*no issues found' "codex-system 'no issues found is valued'"
 require_phrase "${SYS}" 'Concede when the code is correct' "codex-system concession rule"
 require_phrase "${SYS}" 'Demote findings without tool-grounding evidence' "codex-system demote-without-evidence rule"

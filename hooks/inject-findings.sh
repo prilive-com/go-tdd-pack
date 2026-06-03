@@ -141,7 +141,7 @@ VERDICT_SUMMARY=$(jq -r '.summary_one_sentence // "review requested"' "${ROUND1_
 MIN_SURFACE=$(cfg_get "${PROJECT_DIR}/tdd-pack.toml" "severity.min_surface" "nit")
 CONFIDENCE_FLOOR=$(cfg_get "${PROJECT_DIR}/tdd-pack.toml" "severity.confidence_floor" "4")
 
-# --- v2.1 rails: two layered demotion filters ------------------------------
+# --- v2.1 rails: three layered demotion filters ----------------------------
 #
 # Rail A — tool-grounding (spec §5.1):
 #   A finding with `contradicts_grounding: true` is one Codex flagged as
@@ -153,9 +153,16 @@ CONFIDENCE_FLOOR=$(cfg_get "${PROJECT_DIR}/tdd-pack.toml" "severity.confidence_f
 #   A finding only drives must-address when severity ≥ must_address AND
 #   confidence ≥ confidence_floor. Below the floor → speculative.
 #
-# Either rail can demote a finding to the speculative section. The two
-# demotion reasons are tracked separately so adopters can tell why a
-# finding wasn't surfaced as blocking.
+# Rail C — line scope (spec §6):
+#   A finding with `line_scope: "pre_existing_unrelated"` is on a CONTEXT
+#   line that the author did NOT touch or trigger. The author is not on
+#   the hook for pre-existing tech debt — these findings are demoted
+#   regardless of severity, category, or carve-out. Rail C overrides
+#   the never-demote category list (different rule, different reason).
+#
+# Any of the three rails can demote a finding to the speculative section.
+# The reasons are tracked separately so adopters can tell why a finding
+# wasn't surfaced as blocking.
 #
 # DEFENSIVE CARVE-OUT — load-bearing for Rail A.
 # These categories catch what tools cannot judge: silent nil dereferences
@@ -181,11 +188,13 @@ NEVER_DEMOTE_CATEGORIES='correctness|design|test_quality|security|safety|data_lo
 PROMOTED=$(jq -r --arg ms "${MIN_SURFACE}" --arg cf "${CONFIDENCE_FLOOR}" --arg nd "${NEVER_DEMOTE_CATEGORIES}" '
   def sn($s): {"blocker":4, "major":3, "minor":2, "nit":1}[$s] // 0;
   def is_never_demote: (.category | test("^(" + $nd + ")$"));
-  def demoted_by_grounding: (.contradicts_grounding == true) and (is_never_demote | not);
+  def demoted_by_grounding:  (.contradicts_grounding == true) and (is_never_demote | not);
   def demoted_by_confidence: ((.confidence // 5) < ($cf | tonumber));
+  def demoted_by_scope:      ((.line_scope // "changed_line") == "pre_existing_unrelated");
   [.findings[]?
-    | select(demoted_by_grounding | not)
+    | select(demoted_by_grounding  | not)
     | select(demoted_by_confidence | not)
+    | select(demoted_by_scope      | not)
     | select(sn(.severity) >= sn($ms))]
   | if length == 0 then "(no findings at or above min_surface=\($ms) with confidence ≥ \($cf))"
     else (
@@ -200,23 +209,23 @@ PROMOTED=$(jq -r --arg ms "${MIN_SURFACE}" --arg cf "${CONFIDENCE_FLOOR}" --arg 
 DEMOTED=$(jq -r --arg ms "${MIN_SURFACE}" --arg cf "${CONFIDENCE_FLOOR}" --arg nd "${NEVER_DEMOTE_CATEGORIES}" '
   def sn($s): {"blocker":4, "major":3, "minor":2, "nit":1}[$s] // 0;
   def is_never_demote: (.category | test("^(" + $nd + ")$"));
-  def demoted_by_grounding: (.contradicts_grounding == true) and (is_never_demote | not);
+  def demoted_by_grounding:  (.contradicts_grounding == true) and (is_never_demote | not);
   def demoted_by_confidence: ((.confidence // 5) < ($cf | tonumber));
+  def demoted_by_scope:      ((.line_scope // "changed_line") == "pre_existing_unrelated");
   [.findings[]?
     | select(sn(.severity) >= sn($ms))
-    | select(demoted_by_grounding or demoted_by_confidence)]
+    | select(demoted_by_grounding or demoted_by_confidence or demoted_by_scope)]
   | if length == 0 then ""
     else (
       "\n\nSpeculative (demoted; informational only, does NOT block):\n" + (
         map(
-          (if demoted_by_grounding and demoted_by_confidence then
-              "[tool-clean + low-confidence]"
-           elif demoted_by_grounding then
-              "[tool-clean]"
-           else
-              "[low-confidence c=\(.confidence // "?") < floor \($cf)]"
-           end) as $reason
-          | "- " + $reason + " [\(.severity)/\(.category) c=\(.confidence // "?")] \(.title)\n  \(.body)"
+          # Build compound demotion reason from each fired rail.
+          ([
+            (if demoted_by_scope      then "pre-existing unrelated" else empty end),
+            (if demoted_by_grounding  then "tool-clean" else empty end),
+            (if demoted_by_confidence then "low-confidence c=\(.confidence // "?") < floor \($cf)" else empty end)
+          ] | join(" + ")) as $reason
+          | "- [" + $reason + "] [\(.severity)/\(.category) c=\(.confidence // "?")] \(.title)\n  \(.body)"
           + (if .file != "" then "\n  at \(.file):\(.line // 0)" else "" end)
         ) | join("\n")
       )
