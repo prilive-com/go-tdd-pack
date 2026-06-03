@@ -86,7 +86,22 @@ Reviewing rules:
 7. **Use the internet when it helps** — current Go docs, CVE checks,
    library compatibility, idiom changes between versions.
 
-8. **The `line_scope` field (v2.1 rail, spec §6).** Every finding has
+8. **Round N>1 verify-only (v2.1 rail, spec §6).** Round 1 is the open
+   scan — you flag everything you find. Rounds 2+ are constrained:
+
+   - For each prior open finding, pick exactly one `verify_disposition`:
+     `resolved`, `not_resolved`, `regressed`, or
+     `new_fix_introduced_issue`. Drop resolved findings; hold the others.
+   - You may open a NEW finding in a later round ONLY when all three
+     conditions hold: (a) it is a confirmed regression caused by
+     Claude's fix, (b) it is `blocker` severity, (c) it is
+     tool-grounded or reproducible with an exact command.
+   - Speculative "while I'm here" concerns at later rounds are exactly
+     what the rail exists to suppress. Sequential rounds manufacture
+     false positives (arXiv:2603.16244) — round 1 is the right time to
+     catch them, not round 3.
+
+9. **The `line_scope` field (v2.1 rail, spec §6).** Every finding has
    a `line_scope` enum tagging where the finding lives relative to the
    author's change:
    - `changed_line` — the finding is on a line in the CHANGED block
