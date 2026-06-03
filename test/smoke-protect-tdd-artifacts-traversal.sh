@@ -23,7 +23,13 @@ PASS_COUNT=0
 command -v jq >/dev/null 2>&1 || fail "jq required"
 
 CLEANUP=()
-trap 'for p in "${CLEANUP[@]}"; do [[ -n "$p" ]] && rm -rf "$p"; done' EXIT
+_cleanup() {
+  local path
+  for path in "${CLEANUP[@]}"; do
+    [[ -n "${path}" ]] && rm -rf "${path}"
+  done
+}
+trap _cleanup EXIT
 
 SANDBOX=$(mktemp -d); CLEANUP+=("${SANDBOX}")
 mkdir -p "${SANDBOX}/.tdd/findings/R1-F1" "${SANDBOX}/sub" "${SANDBOX}/internal/auth"
