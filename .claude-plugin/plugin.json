@@ -1,7 +1,7 @@
 {
   "name": "prilive-go-tdd-pack",
-  "version": "2.0.1",
-  "description": "Continuous silent peer review between Claude Code and OpenAI Codex CLI for Go projects. Codex reviews every meaningful Go change in the background; findings are silently injected into Claude's next turn. Includes monorepo-aware tool grounding (gofmt, go vet, staticcheck, golangci-lint, govulncheck), multi-round resume via codex exec resume, and A/B/V escalation when reviewers disagree.",
+  "version": "2.1.0",
+  "description": "Finding-aware continuous review for Go projects. Claude implements; OpenAI Codex CLI reviews in the background. v2.1 adds four false-positive rails (tool-grounding demotion with a semantic carve-out, confidence floor, changed/context line-scope, perspective-diverse consensus), verify-only later rounds, artifact protection (Gate 4), the Finding-Driven TDD active-finding foundation, MCP detachment for structured-output calls, and origin-aware escalation. The Bash command-review matcher was removed in v2.1 — runtime command safety is out of scope for a dev-time review pack.",
   "author": {
     "name": "Prilive",
     "url": "https://github.com/prilive-com"
@@ -23,6 +23,7 @@
     "codex",
     "continuous-review",
     "tdd",
+    "finding-driven-tdd",
     "monorepo",
     "static-analysis",
     "staticcheck",
@@ -65,6 +66,23 @@
     }
   ],
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/protect-tdd-artifacts.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pre-review.sh",
+            "timeout": 120
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Edit|Write|MultiEdit",
@@ -79,17 +97,6 @@
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inject-findings.sh",
             "timeout": 3
-          }
-        ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/post-edit-review.sh",
-            "async": true,
-            "timeout": 5
           }
         ]
       }
@@ -111,18 +118,20 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/stop-fingerprint.sh",
-            "timeout": 10
+            "async": true,
+            "timeout": 5
           }
         ]
       }
     ],
     "SessionStart": [
       {
+        "matcher": "startup|resume",
         "hooks": [
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh",
-            "timeout": 3
+            "timeout": 5
           }
         ]
       }

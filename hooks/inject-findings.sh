@@ -140,6 +140,7 @@ VERDICT_SUMMARY=$(jq -r '.summary_one_sentence // "review requested"' "${ROUND1_
 . "${PROJECT_DIR}/runner/lib/config.sh"
 MIN_SURFACE=$(cfg_get "${PROJECT_DIR}/tdd-pack.toml" "severity.min_surface" "nit")
 CONFIDENCE_FLOOR=$(cfg_get "${PROJECT_DIR}/tdd-pack.toml" "severity.confidence_floor" "4")
+REVIEW_MODE=$(cfg_get "${PROJECT_DIR}/tdd-pack.toml" "review.mode" "governed_tdd")
 
 # --- v2.1 rails: four layered demotion filters -----------------------------
 #
@@ -190,7 +191,10 @@ CONFIDENCE_FLOOR=$(cfg_get "${PROJECT_DIR}/tdd-pack.toml" "severity.confidence_f
 # NOTE: the carve-out applies to Rail A only. Rail B (confidence floor)
 # does apply to every category — a low-confidence semantic finding is
 # still speculative until corroborated.
-NEVER_DEMOTE_CATEGORIES='correctness|design|test_quality|security|safety|data_loss|blast_radius'
+# Reconciled v2.1 release: exactly the round-1 categories that are semantic
+# (tools cannot judge them). MUST stay a subset of the round-1 schema category
+# enum — smoke-carveout-schema-consistency.sh asserts this.
+NEVER_DEMOTE_CATEGORIES='correctness|design|test_quality|security'
 
 # Split findings via jq:
 #   promoted = passes both rails (drives the must-address list)
@@ -271,6 +275,15 @@ DEMOTED=$(jq -r --arg ms "${MIN_SURFACE}" --arg cf "${CONFIDENCE_FLOOR}" --arg n
     end
 ' "${ROUND1_JSON}" 2>/dev/null)
 
+if [[ "${REVIEW_MODE}" == "strict_tdd" || "${REVIEW_MODE}" == "governed_tdd" ]]; then
+  FIX_GUIDANCE="- If this is an ordinary continuous-review finding, fix it normally; the runner will re-review.
+- If this finding is being handled through Finding-Driven TDD (Tier-1 / high-risk),
+  do NOT edit production code until an active finding with accepted Red proof exists
+  (scripts/tdd/finding-start.sh). Prefer converting the finding into a failing test first."
+else
+  FIX_GUIDANCE="- If you agree with a finding, fix the code normally. The runner will re-review."
+fi
+
 CONTEXT="[Codex review — cycle ${CYCLE_ID}, round ${ROUND}, status: changes requested]
 
 Summary: ${VERDICT_SUMMARY}
@@ -279,7 +292,7 @@ Findings:
 ${PROMOTED}${DEMOTED}
 
 What to do next:
-- If you agree with a finding, fix the code silently. The runner will re-review.
+${FIX_GUIDANCE}
 - If you disagree, write a one-line rationale in a code comment or in your next response.
 - Speculative (demoted) findings are informational — address them if obvious, ignore otherwise.
 - Do NOT ask the user about review issues. Continue working.
