@@ -43,10 +43,12 @@ require_phrase "${SYS}" 'sycophancy theatre|sycophancy-theatre' "codex-system sy
 info "[2] prompts/codex-pre-review-system.md — same rules, pre-review path"
 PRE="${PROJECT_ROOT}/prompts/codex-pre-review-system.md"
 require_phrase "${PRE}" 'No issues found.*correct' "pre-review 'no issues found is correct'"
-require_phrase "${PRE}" 'Concede when the action is correct' "pre-review concession rule"
+require_phrase "${PRE}" 'Concede when the change is correct' "pre-review concession rule"
 require_phrase "${PRE}" 'Demote findings without tool-grounding evidence' "pre-review demote-without-evidence rule"
-require_phrase "${PRE}" 'read-only|state-changing' "pre-review classification rule still present"
-require_phrase "${PRE}" 'Fail-closed rule' "pre-review fail-closed rule still present"
+# v2.1: confirm the system prompt is scoped to file_change only — the bash
+# classification rules ("read-only vs state-changing") were removed when the
+# Bash matcher was retired from the starter pack.
+require_phrase "${PRE}" 'file_change.*only.*runtime command safety|runtime command safety.*out of scope' "pre-review scope is file_change only (Bash removed)"
 
 info "[3] tdd-pack.toml — max_rounds default = 4"
 TOML="${PROJECT_ROOT}/tdd-pack.toml"
@@ -56,7 +58,8 @@ pass "tdd-pack.toml max_rounds = 4"
 PASS_COUNT=$((PASS_COUNT + 1))
 
 require_phrase "${TOML}" '\[pre_review\]'        "tdd-pack.toml has [pre_review] section"
-require_phrase "${TOML}" 'enabled = false'       "tdd-pack.toml ships pre_review.enabled = false by default"
+require_phrase "${TOML}" 'enabled = (true|false)' "tdd-pack.toml [pre_review] has enabled field"
+require_phrase "${TOML}" 'Off by default'        "tdd-pack.toml documents the shipped default is off (intent, not current value)"
 require_phrase "${TOML}" 'Activation precedence' "tdd-pack.toml documents precedence order"
 
 info "[4] runner fallback defaults match shipped config"
@@ -69,22 +72,22 @@ for f in "${PROJECT_ROOT}/runner/review-runner.sh" "${PROJECT_ROOT}/runner/codex
   fi
 done
 
-info "[5] README.md — pre-write gate ceiling section (sub-piece #6)"
+info "[5] README.md — pre-write gate ceiling section (scope: file changes only post-v2.1)"
 README="${PROJECT_ROOT}/README.md"
 require_phrase "${README}" 'What the gate does NOT cover'      "README ceiling heading"
-require_phrase "${README}" 'Opaque payloads'                   "README opaque-payloads section"
-require_phrase "${README}" 'python -c'                         "README python -c example"
-require_phrase "${README}" 'node -e'                           "README node -e example"
-require_phrase "${README}" 'ssh host'                          "README ssh-host example"
-require_phrase "${README}" 'governed executor|OS-level'        "README mitigation options"
+require_phrase "${README}" 'code changes, not commands'        "README scope-is-file-changes message"
+require_phrase "${README}" 'v2.1 removed the Bash matcher'     "README documents Bash matcher removal"
+require_phrase "${README}" 'devopspoint|runtime-safety|sibling plugin' "README points to a sibling runtime-safety tool"
+require_phrase "${README}" 'OS-level audit|seccomp|eBPF|auditd' "README OS-level mitigation"
+require_phrase "${README}" 'Out-of-band|out-of-band|bypasses Claude.s tool API' "README out-of-band changes class"
 
 info "[6] docs/ADOPTION_GUIDE.md — extended ceiling discussion"
 GUIDE="${PROJECT_ROOT}/docs/ADOPTION_GUIDE.md"
 require_phrase "${GUIDE}" 'Architectural ceiling'              "GUIDE ceiling heading"
-require_phrase "${GUIDE}" 'Opaque payloads'                    "GUIDE opaque-payloads subsection"
-require_phrase "${GUIDE}" 'fail closed on opaque wrappers|fail-closed on opaque' "GUIDE fail-closed-on-opaque rule cited"
+require_phrase "${GUIDE}" 'file changes, not commands'         "GUIDE scope statement"
+require_phrase "${GUIDE}" 'v2.1 removed the Bash matcher'      "GUIDE documents Bash matcher removal"
+require_phrase "${GUIDE}" 'devopspoint|sibling plugin'         "GUIDE points to sibling runtime-safety tool"
 require_phrase "${GUIDE}" 'outside Claude.s tool API'          "GUIDE out-of-band class"
-require_phrase "${GUIDE}" 'governed executor'                  "GUIDE governed-executor mitigation"
 require_phrase "${GUIDE}" 'seccomp|eBPF|auditd'                "GUIDE OS-level mitigation"
 
 echo ""

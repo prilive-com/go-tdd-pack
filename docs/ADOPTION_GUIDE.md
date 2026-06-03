@@ -238,37 +238,29 @@ through Codex before it runs.
 ## Architectural ceiling — what the gate cannot catch
 
 The pre-write gate hooks into Claude Code's `PreToolUse` event for
-`Write`, `Edit`, `MultiEdit`, `NotebookEdit`, and `Bash`. Every action
-through Claude's tool API goes through the gate. **Anything that
-bypasses Claude's tool API is invisible to the gate.** This is a
-property of all client-side hook approaches, not a bug in this pack.
+`Write`, `Edit`, `MultiEdit`, and `NotebookEdit`. Every file-change
+action through Claude's tool API goes through the gate. Two scope
+boundaries to know about:
 
-Two classes you should know about:
+### 1. The pack reviews file changes, not commands
 
-### 1. Opaque payloads — wrapper visible, content not
+v2.1 removed the Bash matcher. Runtime command safety is a separate
+concern from code review and out of scope for this pack:
 
-For these commands, the reviewer sees the wrapper text Claude proposes
-but cannot read inside it:
-
-| Command pattern | What the reviewer sees | What it cannot inspect |
-|---|---|---|
-| `python -c '<script>'` | the `-c` flag and the literal string | the script's runtime behavior beyond the visible string |
-| `python -m foo` | the module name | the module's actual code (it runs from disk) |
-| `node -e '<script>'` | the `-e` flag and the literal string | same as Python |
-| `echo <base64> \| base64 -d \| sh` | the base64 blob | the decoded shell |
-| `eval "$(curl <url>)"` | the URL and `eval` | the fetched script |
-| `ssh host` | the connection itself | every command run inside the SSH session |
-| `bash -c "<chain>"` | the chain string | indirect through-variables (`$foo`) whose values come from elsewhere |
-
-The reviewer prompt (`prompts/codex-pre-review-system.md`) instructs
-Codex to **fail closed on opaque wrappers**: if it cannot be certain a
-command is read-only, it treats the command as state-changing. So
-opaque payloads do not slip through as "read-only" — they trigger the
-full review. But the review can only judge the visible wrapper text.
-
-If your threat model includes a malicious agent specifically trying to
-hide commands inside opaque wrappers, the gate slows that down but
-does not prevent it.
+- The starter pack's job is to catch bad code before it lands. The
+  reviewer judges proposed file content for correctness, safety, and
+  data-loss risk.
+- Sending every `pwd` / `ls` / `git status` through Codex was wasteful
+  for ChatGPT-subscription users (~6 seconds per call) and an
+  architectural mismatch with the pack's mission.
+- If you need command-level safety — destructive-command interception,
+  data-loss prevention against `rm -rf`, audit of every shell
+  invocation — that belongs in a runtime-ops tool, not a TDD pack.
+  Consider devopspoint (or a similar sibling plugin) for that
+  responsibility.
+- Claude Code's own permission system already covers the obviously
+  dangerous cases (`sudo`, `kubectl delete`, `rm -rf /`, etc.) at the
+  prompt layer, before they ever hit a hook.
 
 ### 2. Anything outside Claude's tool API
 
@@ -288,23 +280,15 @@ because Claude's tool API was never involved.
 
 ### 3. What would close the ceiling
 
-Two real options, both outside the pack's scope:
+If you need full coverage of file changes across all sources (not just
+Claude's tool API), the real option is **OS-level audit / sandbox** —
+seccomp filter, eBPF tracepoint, `auditd`, or a container with a
+syscall-gated runtime that hooks `execve()` at the kernel boundary.
+That closes both the out-of-band class and gives you universal coverage,
+but it is host-level work, not pack-level.
 
-1. **Generic governed executor.** Deny raw `Bash`; force every command
-   Claude runs through a wrapper script (e.g. `safebash.sh '<cmd>'`)
-   that logs the `argv[]` chain and submits it for review. Removes
-   opaque payloads (the wrapper always sees the final array,
-   pre-shell-expansion). Costs: lose Bash flexibility, fight
-   shell-quoting in every reviewed command, deal with adopter
-   resistance.
-2. **OS-level audit / sandbox.** seccomp filter, eBPF tracepoint,
-   `auditd`, or a container with a syscall-gated runtime that hooks
-   `execve()` at the kernel boundary. Closes both classes (opaque
-   payloads + out-of-band changes) but is host-level work, not
-   pack-level.
-
-If you need either, treat this pack as defense in depth, not the only
-line.
+Treat this pack as defense in depth — one strong line that covers what
+Claude itself does to your code — not the only line.
 
 ---
 

@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # hooks/pre-review.sh
 #
-# v2.2.0 sub-piece #1 — PreToolUse gate for file-write tools.
+# v2.1 — PreToolUse gate for file-write tools.
 #
-# Protocol (sub-piece #3 will replace file-IPC with a Unix socket):
+# Scope: this hook reviews code changes (Write/Edit/MultiEdit/NotebookEdit)
+# only. Bash command review was removed in the v2.1 cleanup — runtime
+# command safety is a separate concern (devopspoint's responsibility),
+# not a code-quality concern, and Codex review on every `pwd` was both
+# wasteful and an architectural mismatch with the starter pack's mission.
+#
+# Protocol:
 #
 #   1. Read PreToolUse JSON on stdin (tool_name, tool_input, session_id).
 #   2. Only act on Write | Edit | MultiEdit | NotebookEdit.
-#      Bash is wired to its own matcher in sub-piece #2 — pass-through here.
 #   3. Extract a canonical payload (kind, tool_name, file_path, change body).
 #   4. Compute content_hash = sha256(payload).
 #   5. If `.tdd/queue/<hash>.verdict.json` exists, use it (cache-by-hash).
@@ -23,18 +28,17 @@
 # blocks until adopters explicitly opt in AND sub-piece #3 ships the
 # runner-side verdict producer.
 #
-# Fail-closed contract (sub-piece #4) — when experimental is ON:
+# Fail-closed contract — when the gate is ON:
 #   The ONLY intentional pass-throughs are:
 #     1. PRILIVE_REVIEW_DISABLE=1 (global kill switch)
-#     2. TOOL_NAME is not Write|Edit|MultiEdit|NotebookEdit|Bash
-#        (the hook is intentionally scoped — read-only and MCP tools
-#         are not gated)
+#     2. TOOL_NAME is not Write|Edit|MultiEdit|NotebookEdit
+#        (the hook is intentionally scoped — read-only tools, Bash, and
+#         MCP tools are NOT gated; the gate covers file changes only)
 #   Every other "something is wrong" path emits a deny with a specific
 #   reason so the adopter sees exactly what to fix. Specifically:
 #     - jq missing                  → deny ("install jq, or unset the flag")
 #     - empty stdin                 → deny ("PreToolUse received no input")
 #     - malformed payload           → deny ("could not extract tool payload")
-#     - bash with no command field  → deny ("no .tool_input.command")
 #     - hash failure                → deny ("content hashing failed")
 #     - mkdir .tdd/queue/ fails     → deny ("cannot create queue dir")
 #     - submission write fails      → deny ("failed to write submission")
@@ -138,12 +142,10 @@ case "${TOOL_NAME}" in
   Write|Edit|MultiEdit|NotebookEdit)
     KIND="file_change"
     ;;
-  Bash)
-    KIND="bash_command"
-    ;;
   *)
-    # Any other tool (read-only Read/Grep/Glob, MCP tools, etc.) is
-    # not gated by this hook. Pass-through.
+    # Any other tool (read-only Read/Grep/Glob, Bash, MCP tools, etc.)
+    # is not gated by this hook. Pass-through. The gate covers file
+    # changes only — runtime command safety is out of scope.
     exit 0
     ;;
 esac
@@ -163,15 +165,12 @@ if ! mkdir -p "${QUEUE_DIR}" 2>/dev/null; then
 fi
 
 # --- build canonical payload ----------------------------------------------
-# Same JSON shape for every tool the hook gates, so the runner has one
-# schema to consume. The `kind` field tells the runner what fields are
-# load-bearing:
-#   kind=file_change  → write_content / edit_*_string / multi_edits / notebook_*
-#   kind=bash_command → bash_command / bash_description
-#
-# Sub-piece #5 teaches the reviewer how to classify bash_command payloads
-# as read-only vs state-changing. This hook only delivers the payload; it
-# does not judge it.
+# The `kind` is always file_change since v2.1 retired the Bash matcher.
+# The shape stays per-tool to give the reviewer the exact change semantics:
+#   Write        → write_content (full file replacement)
+#   Edit         → edit_old_string + edit_new_string
+#   MultiEdit    → multi_edits[] (array of old/new pairs)
+#   NotebookEdit → notebook_source + notebook_cell_id
 
 PAYLOAD=$(printf '%s' "${INPUT}" | jq -c --arg kind "${KIND}" '
   def file_path: .tool_input.file_path // .tool_input.notebook_path // "";
@@ -184,9 +183,7 @@ PAYLOAD=$(printf '%s' "${INPUT}" | jq -c --arg kind "${KIND}" '
     edit_new_string:  (.tool_input.new_string  // null),
     multi_edits:      (.tool_input.edits       // null),
     notebook_source:  (.tool_input.new_source  // null),
-    notebook_cell_id: (.tool_input.cell_id     // null),
-    bash_command:     (.tool_input.command     // null),
-    bash_description: (.tool_input.description // null)
+    notebook_cell_id: (.tool_input.cell_id     // null)
   }
 ' 2>/dev/null)
 
@@ -199,22 +196,6 @@ if [[ -z "${PAYLOAD}" ]] || [[ "${PAYLOAD}" == "null" ]]; then
     }
   }'
   exit 0
-fi
-
-# Defensive: a bash_command payload with no command field is malformed input.
-# Fail closed rather than submit an empty command for review.
-if [[ "${KIND}" == "bash_command" ]]; then
-  BASH_CMD=$(printf '%s' "${PAYLOAD}" | jq -r '.bash_command // empty' 2>/dev/null)
-  if [[ -z "${BASH_CMD}" ]]; then
-    jq -nc '{
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-        permissionDecisionReason: "pre-review hook: Bash PreToolUse input had no .tool_input.command. Action blocked."
-      }
-    }'
-    exit 0
-  fi
 fi
 
 HASH=$(printf '%s' "${PAYLOAD}" | sha256_of)

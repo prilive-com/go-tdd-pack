@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # test/smoke-pre-review-worker.sh
 #
-# End-to-end smoke for runner/pre-review-worker.sh (sub-piece #3 of task
-# #109). Uses a fake `codex` binary in PATH so the test runs offline.
+# End-to-end smoke for runner/pre-review-worker.sh.
+# Uses a fake `codex` binary in PATH so the test runs offline.
 #
-# Covers: file_change submission → verdict appears with allow; bash
-# read-only → verdict allow + classification=read_only; bash
-# state-changing → verdict deny + findings; Codex non-zero → fail-closed
-# deny; concurrent launches → single worker (flock); end-to-end hook +
+# v2.1: Bash cases removed when the matcher was retired. Worker now
+# handles file_change only; classification field dropped from the
+# verdict schema.
+#
+# Covers: file_change submission → verdict appears with allow;
+# Codex non-zero → fail-closed deny; Codex bad JSON → deny;
+# idempotency (existing verdict not overwritten); end-to-end hook +
 # worker handshake produces permissionDecision.
 
 set -uo pipefail
@@ -45,7 +48,6 @@ make_sandbox() {
   cp "${PROJECT_ROOT}/schemas/pre-review-verdict.schema.json" "$d/schemas/"
   cp "${PROJECT_ROOT}/prompts/codex-pre-review-system.md"     "$d/prompts/"
   cp "${PROJECT_ROOT}/prompts/codex-pre-review-file-user.md"  "$d/prompts/"
-  cp "${PROJECT_ROOT}/prompts/codex-pre-review-bash-user.md"  "$d/prompts/"
   # Minimal tdd-pack.toml so cfg_get has something to read.
   cat > "$d/tdd-pack.toml" <<'EOF'
 [codex]
@@ -131,17 +133,9 @@ write_submission() {
     > "$sandbox/.tdd/queue/${hash}.submission.json"
 }
 
-# Wait up to N seconds for a file to exist.
-wait_for_file() {
-  local path="$1" timeout="${2:-10}"
-  local attempts=$(( timeout * 10 ))
-  while [[ "$attempts" -gt 0 ]]; do
-    [[ -f "$path" ]] && return 0
-    sleep 0.1
-    attempts=$((attempts - 1))
-  done
-  return 1
-}
+# Canonical file_change payload (matches what hooks/pre-review.sh emits
+# in v2.1 — no bash_command/bash_description fields).
+FILE_CHANGE_PAYLOAD='{"kind":"file_change","tool_name":"Write","file_path":"x.go","write_content":"package x","edit_old_string":null,"edit_new_string":null,"multi_edits":null,"notebook_source":null,"notebook_cell_id":null}'
 
 # ---- case 1: file_change submission → verdict allow ----
 
@@ -150,11 +144,10 @@ SANDBOX=$(make_sandbox); CLEANUP_PATHS+=("$SANDBOX")
 BINDIR="$SANDBOX/bin"; install_fake_codex "$BINDIR"
 RESP="$SANDBOX/fake-response.json"
 cat > "$RESP" <<'EOF'
-{"decision":"allow","classification":"file_change","reason":"looks safe","findings":[]}
+{"decision":"allow","reason":"looks safe","findings":[]}
 EOF
 HASH="aaaa111111111111111111111111111111111111111111111111111111111111"
-PAYLOAD='{"kind":"file_change","tool_name":"Write","file_path":"x.go","write_content":"package x","edit_old_string":null,"edit_new_string":null,"multi_edits":null,"notebook_source":null,"notebook_cell_id":null,"bash_command":null,"bash_description":null}'
-write_submission "$SANDBOX" "$HASH" "$PAYLOAD"
+write_submission "$SANDBOX" "$HASH" "$FILE_CHANGE_PAYLOAD"
 
 (
   export PATH="${BINDIR}:${PATH}"
@@ -165,78 +158,19 @@ write_submission "$SANDBOX" "$HASH" "$PAYLOAD"
 VERDICT="$SANDBOX/.tdd/queue/${HASH}.verdict.json"
 [[ -f "$VERDICT" ]] || fail "verdict file not written"
 DEC=$(jq -r '.decision' "$VERDICT")
-CLS=$(jq -r '.classification' "$VERDICT")
-[[ "$DEC" == "allow" ]]       || fail "expected allow, got: $DEC"
-[[ "$CLS" == "file_change" ]] || fail "expected classification=file_change, got: $CLS"
-pass "file_change: verdict=allow, classification=file_change"
+REASON=$(jq -r '.reason' "$VERDICT")
+[[ "$DEC" == "allow" ]]            || fail "expected allow, got: $DEC"
+[[ "$REASON" == "looks safe" ]]    || fail "expected reason='looks safe', got: $REASON"
+pass "file_change: verdict=allow with reason intact"
 PASS_COUNT=$((PASS_COUNT + 1))
 
-# ---- case 2: bash read-only → allow + classification=read_only ----
+# ---- case 2: codex non-zero exit → fail-closed deny ----
 
-info "[2] bash_command (ls -la) read-only → allow + read_only"
-SANDBOX=$(make_sandbox); CLEANUP_PATHS+=("$SANDBOX")
-BINDIR="$SANDBOX/bin"; install_fake_codex "$BINDIR"
-RESP="$SANDBOX/fake-response.json"
-cat > "$RESP" <<'EOF'
-{"decision":"allow","classification":"read_only","reason":"read-only listing","findings":[]}
-EOF
-HASH="bbbb222222222222222222222222222222222222222222222222222222222222"
-PAYLOAD='{"kind":"bash_command","tool_name":"Bash","file_path":"","write_content":null,"edit_old_string":null,"edit_new_string":null,"multi_edits":null,"notebook_source":null,"notebook_cell_id":null,"bash_command":"ls -la","bash_description":"list files"}'
-write_submission "$SANDBOX" "$HASH" "$PAYLOAD"
-
-(
-  export PATH="${BINDIR}:${PATH}"
-  export FAKE_CODEX_RESPONSE="$RESP"
-  bash "$SANDBOX/runner/pre-review-worker.sh" "$SANDBOX"
-)
-
-VERDICT="$SANDBOX/.tdd/queue/${HASH}.verdict.json"
-[[ -f "$VERDICT" ]] || fail "verdict file not written"
-DEC=$(jq -r '.decision' "$VERDICT")
-CLS=$(jq -r '.classification' "$VERDICT")
-[[ "$DEC" == "allow" ]]      || fail "bash read-only: expected allow, got: $DEC"
-[[ "$CLS" == "read_only" ]]  || fail "bash read-only: expected classification=read_only, got: $CLS"
-pass "bash read-only: verdict=allow, classification=read_only"
-PASS_COUNT=$((PASS_COUNT + 1))
-
-# ---- case 3: bash state-changing → deny + findings ----
-
-info "[3] bash_command (rm -rf) state-changing → deny + findings rendered"
-SANDBOX=$(make_sandbox); CLEANUP_PATHS+=("$SANDBOX")
-BINDIR="$SANDBOX/bin"; install_fake_codex "$BINDIR"
-RESP="$SANDBOX/fake-response.json"
-cat > "$RESP" <<'EOF'
-{"decision":"deny","classification":"state_changing","reason":"rm -rf is irreversible","findings":[{"severity":"blocker","category":"data_loss","title":"recursive delete","body":"removes the entire build/ tree with no backup","confidence":5}]}
-EOF
-HASH="cccc333333333333333333333333333333333333333333333333333333333333"
-PAYLOAD='{"kind":"bash_command","tool_name":"Bash","file_path":"","write_content":null,"edit_old_string":null,"edit_new_string":null,"multi_edits":null,"notebook_source":null,"notebook_cell_id":null,"bash_command":"rm -rf ./build","bash_description":"clean build"}'
-write_submission "$SANDBOX" "$HASH" "$PAYLOAD"
-
-(
-  export PATH="${BINDIR}:${PATH}"
-  export FAKE_CODEX_RESPONSE="$RESP"
-  bash "$SANDBOX/runner/pre-review-worker.sh" "$SANDBOX"
-)
-
-VERDICT="$SANDBOX/.tdd/queue/${HASH}.verdict.json"
-[[ -f "$VERDICT" ]] || fail "verdict file not written"
-DEC=$(jq -r '.decision' "$VERDICT")
-CLS=$(jq -r '.classification' "$VERDICT")
-FCOUNT=$(jq -r '.findings | length' "$VERDICT")
-[[ "$DEC" == "deny" ]]            || fail "bash state-changing: expected deny, got: $DEC"
-[[ "$CLS" == "state_changing" ]]  || fail "bash state-changing: expected classification=state_changing, got: $CLS"
-[[ "$FCOUNT" -ge 1 ]]             || fail "bash state-changing: expected at least 1 finding; got $FCOUNT"
-pass "bash state-changing: verdict=deny, classification=state_changing, ${FCOUNT} finding(s)"
-PASS_COUNT=$((PASS_COUNT + 1))
-
-# ---- case 4: codex non-zero exit → fail-closed deny ----
-
-info "[4] codex exec non-zero → fail-closed deny verdict"
+info "[2] codex exec non-zero → fail-closed deny verdict"
 SANDBOX=$(make_sandbox); CLEANUP_PATHS+=("$SANDBOX")
 BINDIR="$SANDBOX/bin"; install_fake_codex "$BINDIR"
 HASH="dddd444444444444444444444444444444444444444444444444444444444444"
-PAYLOAD='{"kind":"file_change","tool_name":"Write","file_path":"x.go","write_content":"package x","edit_old_string":null,"edit_new_string":null,"multi_edits":null,"notebook_source":null,"notebook_cell_id":null,"bash_command":null,"bash_description":null}'
-write_submission "$SANDBOX" "$HASH" "$PAYLOAD"
+write_submission "$SANDBOX" "$HASH" "$FILE_CHANGE_PAYLOAD"
 
 (
   export PATH="${BINDIR}:${PATH}"
@@ -253,16 +187,15 @@ REASON=$(jq -r '.reason' "$VERDICT")
 pass "codex non-zero: worker writes fail-closed deny verdict"
 PASS_COUNT=$((PASS_COUNT + 1))
 
-# ---- case 5: codex output not valid JSON → deny ----
+# ---- case 3: codex output not valid JSON → deny ----
 
-info "[5] codex output not valid JSON → deny"
+info "[3] codex output not valid JSON → deny"
 SANDBOX=$(make_sandbox); CLEANUP_PATHS+=("$SANDBOX")
 BINDIR="$SANDBOX/bin"; install_fake_codex "$BINDIR"
 RESP="$SANDBOX/fake-response.json"
 echo 'this is not json' > "$RESP"
 HASH="eeee555555555555555555555555555555555555555555555555555555555555"
-PAYLOAD='{"kind":"file_change","tool_name":"Write","file_path":"x.go","write_content":"package x","edit_old_string":null,"edit_new_string":null,"multi_edits":null,"notebook_source":null,"notebook_cell_id":null,"bash_command":null,"bash_description":null}'
-write_submission "$SANDBOX" "$HASH" "$PAYLOAD"
+write_submission "$SANDBOX" "$HASH" "$FILE_CHANGE_PAYLOAD"
 
 (
   export PATH="${BINDIR}:${PATH}"
@@ -278,19 +211,18 @@ REASON=$(jq -r '.reason' "$VERDICT")
 pass "codex bad JSON: worker writes deny"
 PASS_COUNT=$((PASS_COUNT + 1))
 
-# ---- case 6: idempotency — verdict already present → worker skips ----
+# ---- case 4: idempotency — verdict already present → worker skips ----
 
-info "[6] worker is idempotent: existing verdict is not overwritten"
+info "[4] worker is idempotent: existing verdict is not overwritten"
 SANDBOX=$(make_sandbox); CLEANUP_PATHS+=("$SANDBOX")
 BINDIR="$SANDBOX/bin"; install_fake_codex "$BINDIR"
 RESP="$SANDBOX/fake-response.json"
 cat > "$RESP" <<'EOF'
-{"decision":"allow","classification":"file_change","reason":"fresh","findings":[]}
+{"decision":"allow","reason":"fresh","findings":[]}
 EOF
 HASH="ffff666666666666666666666666666666666666666666666666666666666666"
-PAYLOAD='{"kind":"file_change","tool_name":"Write","file_path":"x.go","write_content":"package x","edit_old_string":null,"edit_new_string":null,"multi_edits":null,"notebook_source":null,"notebook_cell_id":null,"bash_command":null,"bash_description":null}'
-write_submission "$SANDBOX" "$HASH" "$PAYLOAD"
-PRE_EXISTING='{"decision":"deny","classification":"file_change","reason":"pre-existing — must not be overwritten","findings":[]}'
+write_submission "$SANDBOX" "$HASH" "$FILE_CHANGE_PAYLOAD"
+PRE_EXISTING='{"decision":"deny","reason":"pre-existing — must not be overwritten","findings":[]}'
 echo "$PRE_EXISTING" > "$SANDBOX/.tdd/queue/${HASH}.verdict.json"
 
 (
@@ -304,14 +236,14 @@ REASON=$(jq -r '.reason' "$SANDBOX/.tdd/queue/${HASH}.verdict.json")
 pass "idempotency: pre-existing verdict survived a worker pass"
 PASS_COUNT=$((PASS_COUNT + 1))
 
-# ---- case 7: end-to-end hook + worker handshake ----
+# ---- case 5: end-to-end hook + worker handshake ----
 
-info "[7] end-to-end: hook writes submission, worker drains it, hook polls verdict"
+info "[5] end-to-end: hook writes submission, worker drains it, hook polls verdict"
 SANDBOX=$(make_sandbox); CLEANUP_PATHS+=("$SANDBOX")
 BINDIR="$SANDBOX/bin"; install_fake_codex "$BINDIR"
 RESP="$SANDBOX/fake-response.json"
 cat > "$RESP" <<'EOF'
-{"decision":"allow","classification":"file_change","reason":"e2e ok","findings":[]}
+{"decision":"allow","reason":"e2e ok","findings":[]}
 EOF
 # Build a Write PreToolUse input.
 INPUT=$(jq -nc \

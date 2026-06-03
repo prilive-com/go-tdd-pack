@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # runner/pre-review-worker.sh <project_dir>
 #
-# Task #109 sub-piece #3 — verdict producer for the pre-review queue.
+# v2.1 — verdict producer for the pre-review queue.
 #
 # Watches .tdd/queue/*.submission.json files written by
 # hooks/pre-review.sh. For each submission without a verdict, runs Codex
-# with the pre-review prompt for that payload `kind`
-# (file_change | bash_command) and writes
+# with the file-change pre-review prompt and writes
 # .tdd/queue/<hash>.verdict.json. The hook (still polling) picks up the
 # verdict file and emits the matching permissionDecision.
+#
+# Scope: file changes only. v2.1 removed the bash_command path — runtime
+# command safety is out of scope for the starter pack.
 #
 # Single-instance via flock on .tdd/queue/.worker.lock. Idempotent: if
 # a verdict already exists for a submission, the worker skips it.
@@ -39,7 +41,6 @@ LOCK="${QUEUE_DIR}/.worker.lock"
 SCHEMA="${PROJECT_DIR}/schemas/pre-review-verdict.schema.json"
 SYS_PROMPT="${PROJECT_DIR}/prompts/codex-pre-review-system.md"
 FILE_USER_TPL="${PROJECT_DIR}/prompts/codex-pre-review-file-user.md"
-BASH_USER_TPL="${PROJECT_DIR}/prompts/codex-pre-review-bash-user.md"
 CONFIG="${PROJECT_DIR}/tdd-pack.toml"
 
 mkdir -p "${QUEUE_DIR}" "${TDD_DIR}" 2>/dev/null
@@ -91,15 +92,14 @@ WEB_SEARCH=$(cfg_get "${CONFIG}" "codex.web_search" "live")
 
 # --- helpers --------------------------------------------------------------
 
-# write_verdict <verdict_path> <decision> <classification> <reason> <findings_json>
+# write_verdict <verdict_path> <decision> <reason> <findings_json>
 write_verdict() {
-  local path="$1" decision="$2" classification="$3" reason="$4" findings="$5"
+  local path="$1" decision="$2" reason="$3" findings="$4"
   jq -n \
     --arg d "${decision}" \
-    --arg c "${classification}" \
     --arg r "${reason}" \
     --argjson f "${findings}" \
-    '{decision:$d, classification:$c, reason:$r, findings:$f}' \
+    '{decision:$d, reason:$r, findings:$f}' \
     > "${path}.tmp" 2>/dev/null \
     && mv "${path}.tmp" "${path}"
 }
@@ -112,27 +112,16 @@ process_submission() {
 
   local kind
   kind=$(jq -r '.payload.kind // empty' "${sub}" 2>/dev/null)
-  case "${kind}" in
-    file_change|bash_command) ;;
-    *)
-      log "${hash}: unknown payload kind '${kind}' — deny"
-      write_verdict "${verdict}" deny "state_changing" \
-        "pre-review worker: unknown payload kind '${kind}'" "[]"
-      return 0
-      ;;
-  esac
-
-  # Pick the right user template per kind.
-  local user_tpl
-  if [[ "${kind}" == "file_change" ]]; then
-    user_tpl="${FILE_USER_TPL}"
-  else
-    user_tpl="${BASH_USER_TPL}"
+  if [[ "${kind}" != "file_change" ]]; then
+    log "${hash}: unsupported payload kind '${kind}' — deny"
+    write_verdict "${verdict}" deny \
+      "pre-review worker: unsupported payload kind '${kind}' (v2.1 supports file_change only)" "[]"
+    return 0
   fi
 
-  if [[ ! -f "${SYS_PROMPT}" ]] || [[ ! -f "${user_tpl}" ]] || [[ ! -f "${SCHEMA}" ]]; then
+  if [[ ! -f "${SYS_PROMPT}" ]] || [[ ! -f "${FILE_USER_TPL}" ]] || [[ ! -f "${SCHEMA}" ]]; then
     log "${hash}: missing prompt or schema files — deny"
-    write_verdict "${verdict}" deny "state_changing" \
+    write_verdict "${verdict}" deny \
       "pre-review worker: prompt or schema files missing (broken install)" "[]"
     return 0
   fi
@@ -142,7 +131,7 @@ process_submission() {
   local payload_json; payload_json=$(jq -c '.payload' "${sub}" 2>/dev/null)
   local user_prompt
   user_prompt=$(jq -rn \
-    --rawfile tpl "${user_tpl}" \
+    --rawfile tpl "${FILE_USER_TPL}" \
     --arg payload "${payload_json}" \
     '$tpl | gsub("\\{\\{PAYLOAD\\}\\}"; $payload)')
 
@@ -177,7 +166,7 @@ EOF
   then
     log "${hash}: codex exec non-zero; stderr follows"
     cat "${stderr_tmp}" >> "${LOG}" 2>/dev/null
-    write_verdict "${verdict}" deny "state_changing" \
+    write_verdict "${verdict}" deny \
       "pre-review: Codex returned non-zero. Check .tdd/pre-review-worker.log." "[]"
     rm -f "${out_tmp}" "${stderr_tmp}"
     return 0
@@ -189,7 +178,7 @@ EOF
   # adopter to upgrade.
   if [[ "${HAS_LAST_MSG}" != "true" ]]; then
     log "${hash}: --output-last-message unsupported on installed Codex — deny"
-    write_verdict "${verdict}" deny "state_changing" \
+    write_verdict "${verdict}" deny \
       "pre-review: installed Codex CLI does not support --output-last-message. Upgrade Codex CLI." "[]"
     rm -f "${out_tmp}" "${stderr_tmp}"
     return 0
@@ -197,7 +186,7 @@ EOF
 
   if [[ ! -s "${out_tmp}" ]]; then
     log "${hash}: Codex output empty"
-    write_verdict "${verdict}" deny "state_changing" \
+    write_verdict "${verdict}" deny \
       "pre-review: Codex produced empty output. Check .tdd/pre-review-worker.log." "[]"
     rm -f "${out_tmp}" "${stderr_tmp}"
     return 0
@@ -205,15 +194,14 @@ EOF
 
   if ! jq empty "${out_tmp}" 2>/dev/null; then
     log "${hash}: Codex output not valid JSON"
-    write_verdict "${verdict}" deny "state_changing" \
+    write_verdict "${verdict}" deny \
       "pre-review: Codex output was not valid JSON" "[]"
     rm -f "${out_tmp}" "${stderr_tmp}"
     return 0
   fi
 
-  local decision classification reason findings
+  local decision reason findings
   decision=$(jq -r '.decision // "deny"' "${out_tmp}")
-  classification=$(jq -r '.classification // "state_changing"' "${out_tmp}")
   reason=$(jq -r '.reason // ""' "${out_tmp}")
   findings=$(jq -c '.findings // []' "${out_tmp}")
 
@@ -224,15 +212,9 @@ EOF
       reason="pre-review: Codex returned unknown decision; treating as deny."
       ;;
   esac
-  case "${classification}" in
-    read_only|state_changing|file_change) ;;
-    *)
-      classification="state_changing"
-      ;;
-  esac
 
-  write_verdict "${verdict}" "${decision}" "${classification}" "${reason}" "${findings}"
-  log "${hash}: verdict=${decision} classification=${classification}"
+  write_verdict "${verdict}" "${decision}" "${reason}" "${findings}"
+  log "${hash}: verdict=${decision}"
 
   rm -f "${out_tmp}" "${stderr_tmp}"
 }
