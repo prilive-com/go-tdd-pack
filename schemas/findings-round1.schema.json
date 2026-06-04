@@ -39,7 +39,8 @@
           "line",
           "confidence",
           "contradicts_grounding",
-          "line_scope"
+          "line_scope",
+          "raised_by_angle"
         ],
         "properties": {
           "severity": {

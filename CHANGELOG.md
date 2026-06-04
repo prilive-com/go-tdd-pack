@@ -15,6 +15,57 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 _No unreleased changes._
 
+## [2.1.1] - 2026-06-04
+
+**Hotfix.** v2.1.0 shipped with two crashing bugs that prevented every
+fresh adopter from completing a single review cycle. Both reproduced on
+a real adopter install before v2.1.1 was cut. **Adopters on v2.1.0
+should upgrade immediately.**
+
+### Fixed
+
+- **Round-1 schema rejected by OpenAI strict mode** (regression from
+  v2.1 PR #27). `schemas/findings-round1.schema.json` declared
+  `raised_by_angle` under `properties` but did not list it in
+  `required`, while `additionalProperties: false` was set. OpenAI
+  strict mode (used by `codex exec --output-schema`) requires every
+  property to appear in `required` when `additionalProperties: false`,
+  so the first runner invocation rejected with HTTP 400
+  `invalid_json_schema`. Added `raised_by_angle` to `required`. New
+  smoke `test/smoke-schema-strict-mode.sh` walks every schema in
+  `schemas/` and asserts the invariant on every object node, so the
+  same class of bug cannot ship again.
+- **Default Codex model crashed on ChatGPT-subscription auth.**
+  `tdd-pack.toml` shipped `model = ""` (track Codex CLI's default).
+  Codex CLI 0.130 changed that default to `gpt-5.3-codex`, a paid-only
+  model that returns HTTP 400 on ChatGPT subscription accounts.
+  Combined with the schema bug above, every fresh subscription adopter
+  hit a crash on their first edit. Pinned to `model = "gpt-5.5"`
+  (verified working on both ChatGPT subscription and API-key auth).
+  Expanded `test/smoke-config-default-consistency.sh` with a check
+  that asserts the shipped `model` is concrete (non-empty), so future
+  attempts to revert to "track CLI default" can't ship a regression.
+
+### Changed
+
+- **`tdd-pack.toml` `model` default is now a concrete id, not an empty
+  string.** The new comment block explains the v2.1.0 failure mode and
+  documents how to opt back into "track Codex CLI default" (set
+  `model = ""` explicitly in your own copy after verifying your auth
+  mode supports whatever Codex ships).
+
+### Notes for adopters
+
+- v2.1.0 is now marked as a GitHub pre-release with a warning banner.
+  The tag itself cannot be deleted (tag-protection ruleset), but the
+  release page now steers new adopters to v2.1.1.
+- The v2.1.0 → v2.1.1 upgrade for adopters who already hot-patched
+  locally: pull `schemas/findings-round1.schema.json` and the new
+  smoke from v2.1.1; remove your local model override if it was just
+  the workaround.
+
+---
+
 ## [2.1.0] - 2026-06-03
 
 Quality release. Twelve PRs (#19-#30) addressing false-positive control,

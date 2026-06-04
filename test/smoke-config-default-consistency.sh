@@ -49,6 +49,45 @@ grep -q "PRILIVE_PRE_REVIEW_EXPERIMENTAL" <<< "${BLOCK}" \
 pass "opt-in path (PRILIVE_PRE_REVIEW_EXPERIMENTAL) documented"
 PASS_COUNT=$((PASS_COUNT+1))
 
+# v2.1.1: shipped `model` must be non-empty. v2.1.0 shipped `model = ""`
+# (intended: "track Codex CLI's default"), but Codex CLI 0.130 changed
+# its default to `gpt-5.3-codex`, a paid-only model that returns HTTP 400
+# on ChatGPT-subscription auth. Every fresh subscription adopter crashed
+# on the first runner cycle. Adopters who want "track Codex default" can
+# set `model = ""` themselves in their own copy; the shipped default
+# must always be a concrete model id we have verified works on both
+# auth modes.
+info "[3] [codex] ships a concrete (non-empty) model id"
+MODEL=$(awk '
+  /^\[codex\]/ { in_s=1; next }
+  /^\[/        { in_s=0 }
+  in_s && /^[[:space:]]*model[[:space:]]*=/ {
+    sub(/^[[:space:]]*model[[:space:]]*=[[:space:]]*/, "")
+    sub(/[[:space:]]*#.*$/, "")
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+    print; exit
+  }
+' "${TOML}")
+# Fall back to file-wide search if the file is not sectioned with [codex].
+if [[ -z "${MODEL}" ]]; then
+  MODEL=$(awk '
+    /^[[:space:]]*model[[:space:]]*=/ {
+      sub(/^[[:space:]]*model[[:space:]]*=[[:space:]]*/, "")
+      sub(/[[:space:]]*#.*$/, "")
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+      print; exit
+    }
+  ' "${TOML}")
+fi
+[[ -n "${MODEL}" ]] || fail "no model key found in tdd-pack.toml"
+# Strip surrounding quotes for the emptiness check.
+MODEL_UNQUOTED="${MODEL%\"}"
+MODEL_UNQUOTED="${MODEL_UNQUOTED#\"}"
+[[ -n "${MODEL_UNQUOTED}" ]] \
+  || fail "model = ${MODEL}; must be a concrete model id (empty defers to Codex CLI default which can crash on subscription auth — see v2.1.0 regression)"
+pass "model = ${MODEL} (non-empty)"
+PASS_COUNT=$((PASS_COUNT+1))
+
 echo ""
 echo "================================================================"
 echo "  CONFIG DEFAULT CONSISTENCY SMOKE — PASS (${PASS_COUNT} checks)"
