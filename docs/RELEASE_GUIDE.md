@@ -3,6 +3,13 @@
 > **Audience:** The pack maintainer (and any future co-maintainers).
 >
 > Process for cutting a release. Follow in order; skip none.
+>
+> **Read first if cutting a release after 2026-06-04:**
+> [`POSTMORTEM-v2.1.0.md`](POSTMORTEM-v2.1.0.md). That incident hardened
+> Phase 3 with a mandatory pre-tag live-smoke gate driven by
+> [`scripts/release/pre-tag-smoke.sh`](../scripts/release/pre-tag-smoke.sh).
+> Action items A1 and A2 from the postmortem are now part of the checklist
+> below; the gate is non-negotiable.
 
 ---
 
@@ -65,14 +72,18 @@ them is how broken releases happen.
 
 - [ ] All planned features merged to `main`.
 - [ ] Working tree clean: `git status` shows no uncommitted changes.
-- [ ] Run the full smoke suite:
+- [ ] Run every offline smoke:
   ```bash
-  bash test/smoke-v2-phase2.sh        # 25 unit checks
-  bash test/smoke-tool-grounding.sh   # 12 fixture checks
-  bash test/smoke-v2-mvp.sh           # 1 real Codex call
-  bash test/smoke-v2-phase2-live.sh   # 2 real Codex calls, multi-round
+  for s in test/smoke-*.sh; do
+    case "$(basename "$s")" in
+      smoke-v2-mvp.sh|smoke-v2-phase2-live.sh) continue ;;  # live; run in Phase 3
+    esac
+    bash "$s" || { echo "FAIL: $s"; break; }
+  done
   ```
-  All four must PASS.
+  Every smoke must PASS. (`smoke-v2-mvp.sh` and `smoke-v2-phase2-live.sh`
+  are deliberately deferred to the Phase 3 gate so they run against the
+  exact post-merge SHA we will tag.)
 - [ ] Validate every JSON file parses:
   ```bash
   for f in $(find . -name '*.json' -not -path './.git/*'); do
@@ -102,6 +113,53 @@ them is how broken releases happen.
 
 ### Phase 3 — Version bump and tag
 
+#### Phase 3a — Pre-tag live smoke gate (NON-NEGOTIABLE)
+
+Driven by action item A1 from
+[`POSTMORTEM-v2.1.0.md`](POSTMORTEM-v2.1.0.md).
+v2.1.0 shipped two crashing bugs that the offline smokes could not
+catch (an OpenAI strict-mode schema violation and an upstream Codex CLI
+default change). Only the live smokes hit those failure paths. They
+must run against the exact SHA you are about to tag.
+
+```bash
+# 0. Confirm you are on the post-merge clean main.
+git checkout main
+git pull --ff-only         # MUST fast-forward; if it doesn't, stop
+git status                 # MUST be clean
+git log -1 --oneline       # this is the SHA you will tag
+
+# 1. Run the gate. Both live smokes against current HEAD.
+#    Produces .tdd/release/pre-tag-smoke-<SHA>.txt as proof.
+bash scripts/release/pre-tag-smoke.sh
+```
+
+The script exits:
+
+- **`0`** — both live smokes PASS. The artifact at
+  `.tdd/release/pre-tag-smoke-<SHORT_SHA>.txt` records the SHA, the
+  Codex CLI version, and the timing of both runs. Proceed to Phase 3b.
+- **`1`** — at least one live smoke FAILED. **DO NOT TAG.** Read the
+  artifact, diagnose, fix on a hotfix branch, merge through CI, and
+  re-run the gate against the new SHA.
+- **`2`** — preconditions not met (dirty tree, missing `codex` /
+  `jq` / `git`, missing `codex login`). Fix the precondition; re-run.
+
+> **What the gate catches that offline smokes do not:**
+> OpenAI Structured-Outputs strict-mode validation
+> (`smoke-schema-strict-mode.sh` enforces the rule statically, but the
+> live smoke is the only thing that runs an actual rejected/accepted
+> validation against the live API), the resolved Codex model against
+> the current `codex login` auth backend, MCP detachment behavior in
+> the real CLI version, and round-N resume happy path. See the v2.1.0
+> postmortem for the failure modes that motivated this gate.
+
+The artifact is not committed (`.tdd/release/` is in `.gitignore`). It
+is a per-maintainer audit record — keep the file until you have
+confirmed the GitHub Release is published.
+
+#### Phase 3b — Tag and push
+
 ```bash
 # Update plugin.json version
 jq '.version = "X.Y.Z"' .claude-plugin/plugin.json > /tmp/plugin.json
@@ -110,6 +168,11 @@ mv /tmp/plugin.json .claude-plugin/plugin.json
 # Commit
 git add .claude-plugin/plugin.json CHANGELOG.md
 git commit -sm "release: vX.Y.Z"
+
+# Re-run the gate if the version-bump commit changed any file the
+# live smokes touch (rarely — usually only plugin.json and
+# CHANGELOG.md). If in doubt, re-run.
+# bash scripts/release/pre-tag-smoke.sh
 
 # Tag (signed if you have a GPG key set up)
 git tag -a vX.Y.Z -m "vX.Y.Z release notes" # or -s for signed tag

@@ -62,3 +62,4 @@ CLAUDE.local.md
 *.swp
 *~
 .tdd/second-opinion/reviews/
+/.tdd/release/
