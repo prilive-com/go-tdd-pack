@@ -29,13 +29,22 @@ max_cycle_minutes = 30
 [codex]
 # Model selection.
 #
-# DEFAULT: model = "" — the runner does NOT pass --model to codex exec, so
-# Codex CLI picks its own current default. As OpenAI ships newer Codex
-# models, the reviewer automatically uses the latest without config edits.
+# DEFAULT: model = "gpt-5.5" — verified working on both ChatGPT
+# subscription auth (Plus/Pro/Team) and API-key auth. v2.1.1 hotfix
+# changed this from `model = ""` (which deferred to Codex CLI's default)
+# because Codex CLI 0.130 changed that default to `gpt-5.3-codex`, a
+# paid-only model that returns HTTP 400 on ChatGPT-subscription auth.
+# Every fresh adopter on a subscription account hit the failure on
+# their first runner cycle. Pinning here insulates adopters from
+# upstream default changes.
 #
-# TO PIN A SPECIFIC MODEL: set model = "gpt-5-codex" (or whatever you want).
-# Use this only if you have a reason to lock in a specific version.
-model = ""
+# TO PIN A DIFFERENT MODEL: set model = "<id>" (e.g. "gpt-5-codex",
+# "gpt-5.5-codex"). Confirm your account has access first —
+# `codex models` lists what is reachable.
+#
+# TO TRACK CODEX CLI'S DEFAULT AGAIN: set model = "". You opt back in
+# to whatever the CLI ships. Re-verify after every Codex CLI upgrade.
+model = "gpt-5.5"
 
 # Reasoning effort: low | medium | high | xhigh
 # Quality-tuned default "xhigh" — maximum reasoning supported by ChatGPT
