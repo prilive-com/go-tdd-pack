@@ -1,8 +1,13 @@
-# Update notes: v2.0.x → v2.1.0
+# Update notes: v2.0.x → v2.1.0 (and v1.9.x → v2.1.0)
 
 > **Audience.** A developer who already installed the Prilive Go TDD
-> Pack at **v2.0.0 or v2.0.1** via the project-copy path (`git clone`
-> + `cp -R`) and wants to move to **v2.1.0**.
+> Pack at **v2.0.0, v2.0.1, or v1.9.x** via the project-copy path
+> (`git clone` + `cp -R`) and wants to move to **v2.1.0**.
+>
+> - **From v2.0.x:** read the main body of this guide top-to-bottom.
+> - **From v1.9.x:** read the main body of this guide AND the
+>   ["Coming from v1.x"](#coming-from-v1x) section below it for the
+>   extra cleanup work that does not apply to v2.0.x adopters.
 >
 > First time installing? Read
 > [`ADOPTION_GUIDE.md`](ADOPTION_GUIDE.md) instead.
@@ -263,10 +268,20 @@ bash test/smoke-active-finding.sh                  # FDTDD marker (NEW)
 bash test/smoke-grounding-demotion.sh              # Rail A
 bash test/smoke-perspective-ensemble.sh            # Rail D foundation
 bash test/smoke-escalate-origin-aware.sh           # origin-aware A/B/V
+
+# Plugin-install adopters ALSO run this; project-copy adopters skip:
+# bash test/smoke-plugin-manifest-v21.sh
 ```
 
-Expected: each prints `PASS` with a check count, exit 0. Total wall time
-under 5 seconds; no Codex calls.
+> **`smoke-plugin-manifest-v21.sh` is plugin-install only.** It hard-
+> fails with `plugin manifest not found` if `.claude-plugin/plugin.json`
+> is absent. Project-copy installs do not ship that file and do not
+> need it — hook registrations come from `.claude/settings.json` on
+> this path. Skip the smoke; nothing else in v2.1.0 depends on the
+> manifest existing.
+
+Expected: each smoke above prints `PASS` with a check count, exit 0.
+Total wall time under 5 seconds; no Codex calls.
 
 Live end-to-end (one real Codex call, ~30 s):
 
@@ -390,6 +405,161 @@ Report any test path that fails on a clean v2.1.0 install with:
 - The exact step from this guide where the failure started.
 
 File at https://github.com/prilive-com/go-tdd-pack/issues.
+
+---
+
+## Coming from v1.x
+
+This section is the extra work a v1.9.x adopter does on top of the
+main body above. Skip if you are already on v2.0.x.
+
+> **v1.x → v2.1.0 is a supported direct path.** There is no incremental
+> advantage to going through v2.0 first. v2.0.0 was the architectural
+> pivot — it dropped the v1.x ceremony model (Tier 1/2/3, SPEC.md,
+> second-opinion skill, blocking PreToolUse ceremony hooks) and
+> replaced it with continuous silent peer review. v2.1.0 adds rails,
+> Gate 4, and the FDTDD foundation on top. Going through v2.0 first
+> would mean doing the same v1.x cleanup twice.
+
+Read both CHANGELOG entries before starting:
+[`## [2.0.0]`](../CHANGELOG.md) is the heavy lift (architectural
+pivot); [`## [2.1.0]`](../CHANGELOG.md) is the polish on top.
+
+### How this changes the steps above
+
+| Step | v2.0.x adopter | v1.9.x adopter |
+|---|---|---|
+| Step 0 (starting state check) | Expect v2.0.0 or v2.0.1 in plugin.json | Expect v1.9.x in your hooks/scripts. Do NOT downgrade through v2.0 first. |
+| Step 2 (`cp -R` pack-owned trees) | Same | Same. There is no v1.x state worth preserving in `hooks/`, `runner/`, `prompts/`, `schemas/`, `test/`, `scripts/tdd/`. |
+| Step 3 (config merge) | Apply the small v2.0→v2.1 deltas | Do the full rewrites in [v1.x config rewrite](#v1x-config-rewrite) below — `tdd-pack.toml`, `.claude/settings.json`, and `CLAUDE.md` are all near-discard cases. |
+| Step 4 (verify) | Smokes pass clean | Same. Skip `smoke-plugin-manifest-v21.sh` (project-copy install). |
+| Step 5 (live end-to-end) | Same | Same. |
+
+### v1.x config rewrite
+
+#### `tdd-pack.toml` — no conversion script
+
+The v1.x `.tdd/tdd-config.json` and the v2.x `tdd-pack.toml` are
+fundamentally different models. There is no port script and most v1.x
+fields have no v2.x equivalent.
+
+| v1.x field | v2.x fate |
+|---|---|
+| Tier-1 path regexes | **Partial mapping** → `.tdd/tiers.toml` (rename `.example` → real file). Different semantics: Tier-1 in v2.x means "Codex runs multi-perspective review on these paths" (Rail D), not "must run SPEC.md ceremony". Copy your regex set, treat the routing as a fresh decision. |
+| Marker aliases | **Drop entirely.** All v1.x markers (SPEC.md, `current-plan.md`, `CYCLE_ABANDONED.txt`, Tier 1/2/3 stamps) are gone. The only v2.x marker is `.tdd/active-finding` and you do not alias it. |
+| `no_discretion` block | **Drop entirely.** v1.x: "Claude cannot bypass the second-opinion skill on these paths". v2.x: no skill to bypass — Codex reviews every file edit silently. Closest analogue is Tier-1 + `[pre_review] enabled = true`, but the semantics do not translate cleanly. |
+| Tier 2/3 path patterns | **Drop entirely.** v2.x doesn't classify paths into tiers for review beyond Tier-1 (for Rail D) vs everything else. |
+
+**What to do:** start from a fresh copy of v2.1.0 `tdd-pack.toml`, port
+only the Tier-1 path regexes into `.tdd/tiers.toml`, then delete
+`.tdd/tdd-config.json` after the new setup runs clean.
+
+#### `.claude/settings.json` — surgical removal, not wipe-and-restart
+
+Your file probably mixes three categories of hooks:
+
+1. **v1.x TDD ceremony hooks** — `require-second-opinion.sh`,
+   `pre-second-opinion.sh`, `post-second-opinion.sh`, any blocking
+   PreToolUse for ceremony. **REMOVE.** No v2 equivalent.
+2. **v1.x quality hooks** — `gofmt-after-edit.sh`,
+   `scan-for-secrets.sh`, `detect-ai-bloat.sh`,
+   `guard-protected-files.sh`, `guard-dangerous-bash.sh`,
+   `guard-bash-pipefail.sh`. Not part of v2's review pipeline, but
+   harmless if kept. **Recommendation: keep for now**, evaluate
+   separately later. They are orthogonal to the review path.
+3. **Your own project-specific hooks** — **KEEP.**
+
+Do NOT run `git checkout HEAD -- .claude/settings.json` — that mixes
+your last-committed v1.x state with your in-progress edits and is hard
+to reason about.
+
+```bash
+# 1. Back up the current file
+cp .claude/settings.json .claude/settings.json.pre-v2.1
+
+# 2. Surgically remove v1.x ceremony hooks. Open the file and delete
+#    any hook block whose command path references:
+#      require-second-opinion.sh
+#      pre-second-opinion.sh
+#      post-second-opinion.sh
+#      any *spec* or *ceremony* hook from v1.x
+
+# 3. Add the v2.1 PreToolUse block (file-matcher only):
+#    See "Config merge → .claude/settings.json" above. Order matters —
+#    protect-tdd-artifacts.sh BEFORE pre-review.sh.
+
+# 4. Add v2.1 PostToolUse + UserPromptSubmit + Stop + SessionStart
+#    entries from the v2.1 template:
+diff -u .claude/settings.json "$PACK/hooks/settings.json" | less
+
+# 5. Validate
+jq empty .claude/settings.json && echo OK
+```
+
+#### `CLAUDE.md` — delete the stale governance block, replace with v2.1 base, keep project-specific sections
+
+The v1.x patch notes block (`v1.9.4 + v1.9.8` patches, bootstrap
+bypasses, etc.) documents ceremony-model quirks that no longer exist.
+It is pure stale content on v2.x.
+
+```bash
+# 1. Diff your current CLAUDE.md against the v2.1 stock CLAUDE.md
+diff -u CLAUDE.md "$PACK/CLAUDE.md" | less
+
+# 2. KEEP from your current CLAUDE.md:
+#    - Project-specific sections (your domain conventions, your team's
+#      review norms, paths/patterns unique to your codebase)
+#    - CODEOWNERS / review-routing decisions
+#    - Project-domain rules NOT covered by v2.1 stock content
+
+# 3. DELETE entirely:
+#    - The v1.9.4 / v1.9.8 patch notes block (stale)
+#    - Bootstrap bypass documentation (no longer a thing in v2)
+#    - Any reference to SPEC.md, current-plan.md, second-opinion skill,
+#      Tier 1/2/3 ceremony, CYCLE_ABANDONED.txt
+#    - Any "require-second-opinion" guidance
+
+# 4. REPLACE with v2.1 stock content:
+#    - Continuous-review architecture explanation
+#    - Pack version reference
+#    - Hook contract
+#    - Available slash commands
+
+# Practical approach: take v2.1's CLAUDE.md as the base, layer your
+# project-specific sections at the bottom, commit, review, iterate.
+```
+
+Same approach for `AGENTS.md` if you have one.
+
+### v1.x cleanup checklist
+
+After the rewrite, delete files that no longer exist in v2.x. These
+were the v1.x ceremony state and live in the project tree:
+
+```bash
+rm -rf .tdd/current-plan.md
+rm -rf .tdd/cycles/
+rm -rf .tdd/exceptions/
+rm -rf .tdd/tdd-config.json        # after porting Tier-1 regexes
+rm -f  .claude/hooks/require-second-opinion.sh
+rm -f  SPEC.md                     # if you have a stale one at root
+rm -f  CYCLE_ABANDONED.txt         # if you have a stale one at root
+```
+
+Keep `.tdd/reviews/` (v2.x cycle artifacts) and `.tdd/findings/` (v2.1
+FDTDD artifacts) if they exist — those are the new state.
+
+### Rollback caveat for v1.x adopters
+
+The hard rollback procedure in this guide targets v2.0.1. If you came
+from v1.9.x and decide v2.1.0 does not work for you, do NOT try to
+"rollback to v1.9.x" with the same procedure — the v1.x ceremony
+files were already deleted as part of the upgrade. Either:
+
+1. Stay on v2.1.0 with `PRILIVE_REVIEW_DISABLE=1` until the cause is
+   understood.
+2. Restore your v1.9.x state from git: `git checkout pre-v2.1-backup`
+   (the safety branch you made in Step 0 of the TL;DR).
 
 ---
 
