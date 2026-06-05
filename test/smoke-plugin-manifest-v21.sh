@@ -30,15 +30,25 @@ VER=$(jq -r '.version // empty' "${MANIFEST}")
 pass "version = ${VER}"
 PASS_COUNT=$((PASS_COUNT+1))
 
-info "[2] NO Bash matcher anywhere in the manifest hook graph"
-BASH_MATCHERS=$(jq -r '
-  [.hooks // {} | to_entries[] | .value[]? | .matcher? // empty]
-  | map(select(. == "Bash" or test("(^|\\|)Bash(\\||$)")))
-  | length
+info "[2] Bash matchers in manifest: only the v2.2 ops-risk-triage hook (no PR-1-style code-review Bash matchers)"
+# v2.1 deleted the Bash matcher that fired post-edit-review.sh on every Bash
+# command (PR #19). v2.2 slice 1 re-introduces a Bash matcher for a DIFFERENT
+# purpose: ops-risk-triage classifies runtime safety, not code quality, and
+# is disabled-by-default. Any Bash matcher in the manifest MUST be wired only
+# to ops-risk-triage.sh. Anything else is a v2.1 regression.
+BASH_BLOCKS=$(jq -r '
+  [.hooks // {} | to_entries[] | .value[]?
+    | select((.matcher // "") | test("(^|\\|)Bash(\\||$)"))]
 ' "${MANIFEST}")
-[[ "${BASH_MATCHERS}" == "0" ]] \
-  || fail "manifest still has ${BASH_MATCHERS} Bash matcher(s) — PR 1 deletion not reflected in plugin path"
-pass "no Bash matcher in manifest"
+# Every Bash-matched hook must reference ops-risk-triage.sh (and nothing
+# else from the v2.1 code-review path).
+OFFENDERS=$(jq -r '
+  .[] | .hooks[] | .command
+  | select(test("ops-risk-triage\\.sh$") | not)
+' <<<"${BASH_BLOCKS}")
+[[ -z "${OFFENDERS}" ]] \
+  || fail "manifest has Bash matcher(s) wired to non-ops-triage hook(s) — v2.1 PR 1 regression: ${OFFENDERS}"
+pass "Bash matchers in manifest reference ops-risk-triage only (no PR 1 regression)"
 PASS_COUNT=$((PASS_COUNT+1))
 
 info "[3] PreToolUse registers protect-tdd-artifacts.sh BEFORE pre-review.sh"

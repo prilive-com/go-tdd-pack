@@ -1,0 +1,115 @@
+# config/ops-safe-allowlist.txt — USER-OWNED safe-command allowlist.
+#
+# Ships as .example. Copy to `config/ops-safe-allowlist.txt` and edit
+# to enable. The pack itself ships ZERO opinionated commands — this
+# .example file is a starting point you own and tune.
+#
+# How it's used:
+#   - Layer 1 of hooks/ops-risk-triage.sh checks each Bash command's
+#     first one, two, or three tokens against the entries below.
+#   - A command "fast-paths" (no AI call, no prompt) ONLY when:
+#       (a) its name (1/2/3 tokens) appears in this file, AND
+#       (b) its syntax shape is safe (no `>`, `>>`, `<`, `|`, `&&`,
+#           `||`, `;`, `$()`, backticks, `<()`, `>()`, sudo, or a
+#           secret-like path: .env, *.pem, *.key, *secret*,
+#           *credential*, id_rsa, .aws, .kube/config).
+#   - Commands that name-match but fail the shape check (e.g.
+#     `pwd > leak.txt` or `cat .env`) fall through to Layer 2 (LLM
+#     classifier) and will be classified there.
+#
+# Format:
+#   - One entry per line. Whitespace-trimmed. Literal string match
+#     (NOT regex).
+#   - Comments start with `#`. Blank lines ignored.
+#   - For multi-token commands like `git status`, write the full
+#     name verbatim. The matcher checks 1/2/3 token prefixes; the
+#     longest match wins.
+#
+# Tuning advice:
+#   - START NARROW. Anything you add here can fast-path with no
+#     review. If you're unsure, leave it off and let Layer 2 handle
+#     it.
+#   - Add aggressively only AFTER reviewing your `.tdd/ops-triage/
+#     observe.log` and seeing that the same trivially-safe command
+#     pattern keeps showing up.
+#   - DO NOT add anything that writes/moves/deletes files, restarts
+#     services, or touches the network. Those need at least Layer 2.
+
+# --- Basic read-only POSIX shell ---
+pwd
+ls
+cat
+head
+tail
+wc
+file
+stat
+echo
+which
+type
+env
+date
+whoami
+hostname
+uname
+df
+du
+true
+false
+
+# --- Git read-only ---
+git status
+git diff
+git log
+git show
+git branch
+git remote
+git tag
+git rev-parse
+git config
+
+# --- Docker read-only ---
+docker ps
+docker images
+docker logs
+docker inspect
+docker version
+docker info
+docker compose ps
+docker compose logs
+docker compose config
+
+# --- Kubernetes read-only ---
+kubectl get
+kubectl describe
+kubectl logs
+kubectl version
+kubectl config
+
+# --- Helm read-only ---
+helm list
+helm status
+helm get
+helm version
+
+# --- Terraform read-only ---
+terraform plan
+terraform validate
+terraform fmt
+terraform version
+terraform show
+
+# --- Go toolchain (read-only / non-mutating subset) ---
+go version
+go env
+go list
+go vet
+go fmt
+gofmt
+staticcheck
+golangci-lint
+govulncheck
+
+# --- Standard build / introspection ---
+make help
+make list

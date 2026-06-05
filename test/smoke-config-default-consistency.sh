@@ -88,6 +88,27 @@ MODEL_UNQUOTED="${MODEL_UNQUOTED#\"}"
 pass "model = ${MODEL} (non-empty)"
 PASS_COUNT=$((PASS_COUNT+1))
 
+# v2.2 slice 1: ops-triage ships disabled. Adopters opt in by editing
+# tdd-pack.toml + creating the two config/ops-*.txt files. The pack
+# itself must NOT ship enabled=true (same lesson as v2.1.1 Bug 2 —
+# shipped default must match the "off by default" promise).
+info "[4] [ops_triage] ships enabled = false (matches 'opt-in' docs)"
+OPS=$(awk '
+  /^\[ops_triage\]/ { in_s=1; next }
+  /^\[/             { in_s=0 }
+  in_s && /^[[:space:]]*enabled[[:space:]]*=/ {
+    sub(/^[[:space:]]*enabled[[:space:]]*=[[:space:]]*/, "")
+    sub(/[[:space:]]*#.*$/, "")
+    gsub(/[[:space:]]/, "")
+    print; exit
+  }
+' "${TOML}")
+[[ -n "${OPS}" ]] || fail "no enabled key found in [ops_triage] block"
+[[ "${OPS}" == "false" ]] \
+  || fail "[ops_triage] enabled = ${OPS}; must be false for the shipped default (slice 1 ships observe-mode logging only; adopters opt in explicitly)."
+pass "[ops_triage] enabled = false"
+PASS_COUNT=$((PASS_COUNT+1))
+
 echo ""
 echo "================================================================"
 echo "  CONFIG DEFAULT CONSISTENCY SMOKE — PASS (${PASS_COUNT} checks)"

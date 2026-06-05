@@ -136,3 +136,40 @@ env_var = "PRILIVE_REVIEW_DISABLE"
 #   3. pre_review.enabled in this file → persistent project default
 #   4. Otherwise → OFF
 enabled = false
+
+[ops_triage]
+# Ops risk triage (v2.2 slice 1: deterministic parser + observe-mode logging).
+# See docs/PROPOSAL-ops-risk-triage.md for the full three-layer design.
+#
+# Slice 1 status: SHIPPED. Layer 1 deterministic parser + Layer 1b
+# user-owned catastrophic denylist + observe-mode JSONL logging to
+# .tdd/ops-triage/observe.log. NEVER interrupts: the hook silently
+# allows everything in slice 1; the log is the entire deliverable.
+# Adopters review the log to see what their workload looks like, then
+# advance to slices 2-3 when the gate becomes useful.
+#
+# Slice 2-6 status: NOT YET SHIPPED. Layer 2 Haiku classifier + caching
+# + ask mode + Codex deep review + governed mode + session-tags
+# escalation. mode=ask and mode=governed currently degrade to observe
+# with a warning log entry (no actual gate yet).
+#
+# To enable observe-mode logging:
+#   1. Copy config/ops-safe-allowlist.txt.example to
+#      config/ops-safe-allowlist.txt and edit.
+#   2. Copy config/ops-catastrophic-denylist.txt.example to
+#      config/ops-catastrophic-denylist.txt and edit.
+#   3. Set enabled = true below and run normally for a week.
+#   4. Review .tdd/ops-triage/observe.log; tune the two configs based
+#      on what you see.
+#
+# Activation precedence (highest first):
+#   1. PRILIVE_REVIEW_DISABLE=1  → hook OFF (kill switch, applies to all)
+#   2. PRILIVE_OPS_TRIAGE=1      → triage ON for this shell (env override)
+#   3. ops_triage.enabled in this file → persistent project default
+#   4. Otherwise → OFF
+enabled = false
+
+# Slice 1 only supports "observe". "ask" and "governed" exist in the
+# config schema but the hook degrades them to observe with a warning
+# log entry until slices 3 + 5 ship.
+mode = "observe"  # off | observe | ask | governed
