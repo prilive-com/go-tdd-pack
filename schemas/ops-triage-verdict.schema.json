@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Ops Risk Triage Verdict",
+  "description": "Layer 2 LLM classifier output for a single Bash command. Slice 1 of v2.2 ships this schema but does NOT yet invoke the classifier; the hook's observe-mode log uses a different (looser) shape. Slice 2 will wire runner/ops-triage-classify.sh to emit objects conforming to this schema. Strict-mode compliant: additionalProperties:false requires every property in required (v2.1.0 Bug 1 lesson).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "risk",
+    "confidence",
+    "escalate_to_codex",
+    "reason"
+  ],
+  "properties": {
+    "risk": {
+      "type": "string",
+      "enum": [
+        "safe_readonly",
+        "local_read",
+        "external_read",
+        "local_mutation",
+        "code_mutation",
+        "infra_mutation",
+        "destructive",
+        "unknown"
+      ],
+      "description": "Single risk category. 'unknown' MUST be treated as escalate, never as safe — the 'unknown is not safe' rule (see PROPOSAL-ops-risk-triage.md §1)."
+    },
+    "confidence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5,
+      "description": "5 = trivially certain. A 'safe_readonly' or 'local_read' verdict below 4 MUST be treated as escalate by the hook (bias to escalate on low confidence)."
+    },
+    "escalate_to_codex": {
+      "type": "boolean",
+      "description": "True for anything that mutates state, reads externally, or is unknown — i.e. anything Layer 3 (Codex ops-preflight deep review) should look at before the operator approves."
+    },
+    "reason": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "One short factual sentence explaining the classification. No speculation, no fix suggestions, no conversational prose. Goes into the operator's ask prompt and the observe log."
+    }
+  }
+}

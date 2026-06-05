@@ -1,0 +1,77 @@
+# config/ops-catastrophic-denylist.txt — USER-OWNED catastrophic denylist.
+#
+# Ships as .example. Copy to `config/ops-catastrophic-denylist.txt` and
+# edit to enable. The pack itself ships ZERO opinionated commands — this
+# .example file is a starting point you own and tune.
+#
+# How it's used:
+#   - Layer 1b of hooks/ops-risk-triage.sh applies each pattern below
+#     against the full Bash command with `grep -E` (extended regex).
+#   - In slice 1 (observe mode): a match is LOGGED but the command
+#     proceeds — observe-only, never interrupts.
+#   - In slice 3+ (ask mode default and beyond): a match → hook emits
+#     `permissionDecision: "deny"`. The command is hard-blocked.
+#
+# Why this list exists:
+#   - The Layer 2 LLM classifier has a real false-negative tail
+#     (Anthropic reports ~17% FNR on their curated incident set; up to
+#     81% on adversarial scenarios per arXiv 2604.04978). For truly
+#     irreversible commands you do not want to bet on a 1-in-6 miss.
+#   - But it's TINY and USER-EDITABLE so the pack is not hardcoding
+#     policy on your behalf. You own it. Tune it.
+#
+# Format:
+#   - One pattern per line. Whitespace-trimmed. Extended regex.
+#   - Comments start with `#`. Blank lines ignored.
+#   - `[[:space:]]+` matches one-or-more whitespace; use it instead
+#     of literal spaces so quoted strings, tabs, etc. are caught.
+#   - Patterns should match the full command line as seen by the
+#     hook (after Claude expanded any variables but before the shell
+#     executes).
+#
+# Tuning advice:
+#   - START SMALL. Each entry is an absolute "this never proceeds"
+#     rule. If you have any doubt, leave it for Layer 2 to judge.
+#   - For each pattern, manually test both: (a) does it match the
+#     true-positive examples you care about, AND (b) does it NOT
+#     match obvious near-misses? `test/smoke-ops-triage.sh`
+#     enforces this for the patterns we ship.
+#   - Anti-pattern: do NOT add `helm upgrade` here. Helm has revision
+#     history + `helm rollback` + `--atomic`; the canonical recovery
+#     path means upgrade itself is reversible. Layer 2 will classify
+#     individual `helm upgrade` invocations by what they actually do.
+
+# --- Recursive root destruction ---
+# Matches: `rm -rf /`, `rm -rf ~`, `rm -rf $HOME`, `rm -rf ..`
+# Does NOT match: `rm -rf /tmp/build` (a contained path).
+rm[[:space:]]+(-[rRf]+|--recursive([[:space:]]|=)|--force([[:space:]]|=))+.*[[:space:]]+(/|~|\$HOME|\.\.|\$PWD)[[:space:]]*$
+
+# --- Filesystem destruction ---
+mkfs(\.|[[:space:]])
+dd[[:space:]]+.*[[:space:]]+of=/dev/(sd|nvme|disk|hd|mmcblk|vd)
+shred[[:space:]]+.*[[:space:]]+/dev/(sd|nvme|disk)
+
+# --- Fork bomb ---
+:[[:space:]]*\(\)[[:space:]]*\{[[:space:]]*:[[:space:]]*\|
+
+# --- Terraform irreversible ---
+terraform[[:space:]]+(destroy|apply)[[:space:]].*-auto-approve
+
+# --- Force-push to protected refs (both short and long flag) ---
+git[[:space:]]+push[[:space:]]+(-[a-zA-Z]*[fF][a-zA-Z]*|--force([[:space:]]|=)[^[:space:]]*).*[[:space:]]+(main|master|prod|production|release/)
+git[[:space:]]+push[[:space:]]+(-[a-zA-Z]*[fF][a-zA-Z]*|--force([[:space:]]|=)[^[:space:]]*).*refs/heads/(main|master|prod|production)
+
+# --- Database / schema destruction ---
+DROP[[:space:]]+(DATABASE|SCHEMA|TABLE)
+TRUNCATE[[:space:]]+TABLE
+drizzle-kit[[:space:]]+push[[:space:]]+.*--force
+
+# --- Kubernetes namespace / PVC / CRD destruction (flag-order tolerant) ---
+kubectl([[:space:]]+--?[^[:space:]]+([[:space:]]+[^[:space:]]+)?)*[[:space:]]+delete[[:space:]]+(namespace|ns|pv|pvc|crd|customresourcedefinition)
+kubectl([[:space:]]+--?[^[:space:]]+([[:space:]]+[^[:space:]]+)?)*[[:space:]]+delete[[:space:]]+--all([[:space:]]|$)
+
+# --- Helm uninstall (removes deployed resources) ---
+helm[[:space:]]+uninstall
+
+# --- Secret/cert rotation that we treat as irreversible ---
+(aws[[:space:]]+secretsmanager|gcloud[[:space:]]+secrets|vault[[:space:]]+kv)[[:space:]]+.*rotate
