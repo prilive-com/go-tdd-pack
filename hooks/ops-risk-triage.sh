@@ -78,7 +78,30 @@ CMD=$(printf '%s' "${INPUT}" | jq -r '.tool_input.command // empty' 2>/dev/null)
 # ---------------------------------------------------------------------------
 LOG_DIR="${PROJECT_DIR}/.tdd/ops-triage"
 LOG_FILE="${LOG_DIR}/observe.log"
+PENDING_REASON_FILE="${LOG_DIR}/pending-reason.txt"
 mkdir -p "${LOG_DIR}" 2>/dev/null
+
+# emit_decision — slice 3 active-gate helper.
+#   $1 = "ask" | "deny"
+#   $2 = human-readable reason
+# Three things happen, in order:
+#   1. The reason is written to .tdd/ops-triage/pending-reason.txt.
+#      This is the §9 fallback for #55889: if the operator's ask prompt
+#      doesn't visibly surface permissionDecisionReason text on Bash,
+#      they can `cat .tdd/ops-triage/pending-reason.txt` to see why.
+#      Documented in CLAUDE.md and adopter docs.
+#   2. The verdict is logged to the JSONL observe.log so retrospective
+#      analysis has a full trail.
+#   3. The PreToolUse JSON decision is emitted to stdout, and the hook
+#      exits.
+emit_decision() {
+  local decision="$1" reason="$2"
+  printf '%s\n' "${reason}" > "${PENDING_REASON_FILE}" 2>/dev/null || true
+  log_verdict "GATE" "${decision}" "reason=${reason}"
+  jq -nc --arg d "${decision}" --arg r "${reason}" \
+    '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:$d,permissionDecisionReason:$r}}'
+  exit 0
+}
 
 log_verdict() {
   # log_verdict <layer> <verdict> [extra_key=value ...]
@@ -177,10 +200,18 @@ if [[ -f "${DENY}" ]]; then
 fi
 
 if [[ -n "${DENY_MATCHED}" ]]; then
-  # Slice 1: LOG the match, do NOT deny (observe-only).
-  # Slice 3 will convert this branch to emit permissionDecision:"deny".
   log_verdict "L1b" "denylist_match" "pattern=${DENY_MATCHED}"
-  exit 0
+  # Slice 3: L1b is the fail-closed backstop. In any non-observe mode it
+  # ALWAYS denies — this is the user-owned catastrophic list; if the
+  # operator put a pattern here, they meant "never auto-run". The deny
+  # is mode-independent for non-observe.
+  case "${MODE}" in
+    observe) exit 0 ;;
+    *)
+      emit_decision "deny" \
+        "Catastrophic/irreversible pattern matched (config/ops-catastrophic-denylist.txt). Run the command manually if truly intended."
+      ;;
+  esac
 fi
 
 # ---------------------------------------------------------------------------
@@ -264,13 +295,16 @@ else
 fi
 
 if [[ -z "${VERDICT}" ]]; then
-  # Classifier returned nothing usable. Slice 2 in observe mode: LOG the
-  # failure and continue. Slice 3 (ask/governed) will fail-closed →
-  # escalate on classifier unavailability.
   log_verdict "L2" "classifier_unavailable" "cache_hit=${CACHE_HIT}"
+  # Slice 3: classifier-unavailable in non-observe modes FAILS CLOSED →
+  # escalate to operator with "classifier down" reason. Better an
+  # unwanted ask than silently passing through commands the gate is
+  # supposed to triage.
   case "${MODE}" in
+    observe) exit 0 ;;
     ask|governed)
-      log_verdict "MODE" "degraded_to_observe" "configured=${MODE}" "note=slice2_classifier_failed"
+      emit_decision "ask" \
+        "ops-triage: classifier unavailable (fail-closed escalate). Confirm the command yourself or fix the classifier (cat .tdd/ops-triage/observe.log for diagnostics)."
       ;;
   esac
   exit 0
@@ -303,12 +337,37 @@ log_verdict "L2" "${RISK}" \
   "cache_hit=${CACHE_HIT}" \
   "reason=${REASON}"
 
-# Slice 2 stays observe-only — never emit permissionDecision. Slice 3
-# converts WOULD_ESCALATE=true into an actual ask, and risk=destructive
-# into a deny.
+# ---------------------------------------------------------------------------
+# 5. Slice 3 routing: observe logs only; ask/governed actually gate.
+# ---------------------------------------------------------------------------
 case "${MODE}" in
-  ask|governed)
-    log_verdict "MODE" "degraded_to_observe" "configured=${MODE}" "note=slice2_observe_only"
+  observe)
+    exit 0   # log-only; never interrupts.
+    ;;
+  ask)
+    if [[ "${WOULD_ESCALATE}" == "true" ]]; then
+      emit_decision "ask" \
+        "ops-triage (${RISK}, conf=${CONF}): ${REASON} — State blast radius + rollback, then approve or deny."
+    fi
+    exit 0   # allow when verdict + confidence say "trivially safe"
+    ;;
+  governed)
+    # governed = ask for everything escalate-worthy, EXCEPT destructive
+    # which hard-denies. Slice 5 will add an artifact-based override for
+    # destructive (operator runs /ops-preflight to produce an artifact
+    # that re-enables the command). Until then, destructive is unconditional
+    # deny in governed mode.
+    case "${RISK}" in
+      destructive)
+        emit_decision "deny" \
+          "ops-triage (destructive, conf=${CONF}): ${REASON} — Governed mode hard-blocks irreversible commands. Run manually if truly intended (slice 5 will add a /ops-preflight artifact override)."
+        ;;
+    esac
+    if [[ "${WOULD_ESCALATE}" == "true" ]]; then
+      emit_decision "ask" \
+        "ops-triage (${RISK}, conf=${CONF}): ${REASON} — State blast radius + rollback, then approve or deny."
+    fi
+    exit 0
     ;;
 esac
 

@@ -169,7 +169,18 @@ enabled = false
 #   4. Otherwise → OFF
 enabled = false
 
-# Slice 1 only supports "observe". "ask" and "governed" exist in the
-# config schema but the hook degrades them to observe with a warning
-# log entry until slices 3 + 5 ship.
-mode = "observe"  # off | observe | ask | governed
+# Slice 3 SHIPPED. mode default = "ask" — the soft middle layer is live.
+# Modes:
+#   off       — gate disabled (pack as before v2.2).
+#   observe   — Layer 1+2 classify and log, but NEVER interrupt.
+#               Use this when you want a week of classification data
+#               from your real workload before turning on the gate.
+#   ask       — DEFAULT. Layer 1+2 active. Escalation-worthy commands
+#               prompt the operator with the classifier's reason
+#               (file fallback at .tdd/ops-triage/pending-reason.txt
+#               handles #55889 closed-not-planned UI rendering).
+#   governed  — Layer 1+2 active. Additionally: destructive verdicts
+#               HARD-DENY. Slice 5 will add an artifact-based override.
+#               Use governed for unattended/CI sessions or repos where
+#               an R3 mistake is unrecoverable.
+mode = "ask"  # off | observe | ask | governed
