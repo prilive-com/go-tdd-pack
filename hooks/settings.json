@@ -19,13 +19,13 @@
         ]
       },
       {
-        "_comment": "v2.2 slice 1: ops-risk-triage observe-mode (disabled by default; see tdd-pack.toml [ops_triage]). Hook exits 0 immediately when disabled — zero overhead.",
+        "_comment": "v2.2 slice 1+2: ops-risk-triage (disabled by default; see tdd-pack.toml [ops_triage]). Hook exits 0 immediately when disabled — zero overhead. Slice 2 calls the Haiku classifier with a 12s internal budget; hook timeout raised to 15s to leave headroom.",
         "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
             "command": "${CLAUDE_PROJECT_DIR}/hooks/ops-risk-triage.sh",
-            "timeout": 5
+            "timeout": 15
           }
         ]
       }

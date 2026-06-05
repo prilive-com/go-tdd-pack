@@ -184,18 +184,131 @@ if [[ -n "${DENY_MATCHED}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Fall-through: would-be-Layer-2 (LLM classifier — slice 2 will fill in)
+# 4. Layer 2: fast LLM classifier (slice 2)
 # ---------------------------------------------------------------------------
-log_verdict "L2" "would_classify_in_slice2"
+# The classifier runner is optional — if missing, fall back to slice 1's
+# placeholder log. This keeps slice 1 smokes green and lets adopters
+# enable slice 2 incrementally by dropping in the runner.
+CLASSIFIER_BIN="${CLAUDE_PLUGIN_ROOT:-${PROJECT_DIR}}/runner/ops-triage-classify.sh"
+if [[ ! -x "${CLASSIFIER_BIN}" ]]; then
+  log_verdict "L2" "would_classify_in_slice2" "note=classifier_runner_missing"
+  case "${MODE}" in
+    ask|governed)
+      log_verdict "MODE" "degraded_to_observe" "configured=${MODE}" "note=slice2_classifier_missing"
+      ;;
+  esac
+  exit 0
+fi
 
-# Slice 1: any mode other than off behaves as observe (never interrupt).
-# In slice 3 the ask/governed modes will actually gate here. Until then,
-# log a warning entry once per session for any non-observe mode so adopters
-# know they're not getting the gate they configured.
+# Build the minimal STRUCTURED context (facts only — NOT Claude's prose).
+# This matches Anthropic's Auto Mode "reasoning-blind" pattern: strip the
+# agent's narrative so the classifier cannot be talked past the gate.
+ENV_HINT=$(cfg_get "${TOML}" "ops_triage.environment_hint" "unknown")
+TAGS_FILE="${PROJECT_DIR}/.tdd/ops-triage/session-tags.txt"
+TAGS="[]"
+if [[ -f "${TAGS_FILE}" ]]; then
+  TAGS=$(jq -Rn '[inputs]' < "${TAGS_FILE}" 2>/dev/null || echo '[]')
+fi
+FILES=$(find "${PROJECT_DIR}" -maxdepth 2 -type f \
+          \( -name docker-compose.yml -o -name docker-compose.yaml \
+             -o -name Dockerfile -o -name '*.tf' -o -name values.yaml \
+             -o -name .env \) 2>/dev/null \
+        | head -20 \
+        | xargs -I{} basename {} 2>/dev/null \
+        | jq -Rn '[inputs]' 2>/dev/null || echo '[]')
+
+CTX=$(jq -nc --arg cmd "${CMD}" \
+              --arg cwd "${PWD}" \
+              --arg env "${ENV_HINT}" \
+              --argjson files "${FILES}" \
+              --argjson tags "${TAGS}" \
+              '{command:$cmd, cwd:$cwd, environment_hint:$env,
+                repo_files_present:$files, recent_operation_tags:$tags,
+                safe_if_uncertain:false}')
+
+# Cache key: hash of {command, cwd, env_hint, mode} plus the SHA of both
+# user-owned config files. Editing the allowlist/denylist invalidates the
+# cache automatically (open-question §16.2 of PROPOSAL-ops-risk-triage.md).
+SAFE_SHA=""
+DENY_SHA=""
+[[ -f "${PROJECT_DIR}/config/ops-safe-allowlist.txt" ]] && \
+  SAFE_SHA=$(sha256sum < "${PROJECT_DIR}/config/ops-safe-allowlist.txt" 2>/dev/null | cut -d' ' -f1)
+[[ -f "${PROJECT_DIR}/config/ops-catastrophic-denylist.txt" ]] && \
+  DENY_SHA=$(sha256sum < "${PROJECT_DIR}/config/ops-catastrophic-denylist.txt" 2>/dev/null | cut -d' ' -f1)
+KEY=$(printf '%s|%s|%s|%s|%s|%s' "${CMD}" "${PWD}" "${ENV_HINT}" "${MODE}" "${SAFE_SHA}" "${DENY_SHA}" \
+       | sha256sum | cut -d' ' -f1)
+CACHE_DIR="${PROJECT_DIR}/.tdd/ops-triage/cache"
+mkdir -p "${CACHE_DIR}" 2>/dev/null
+CACHE="${CACHE_DIR}/${KEY}.json"
+
+CLASSIFIER_BACKEND=$(cfg_get "${TOML}" "ops_triage.classifier" "haiku")
+VERDICT=""
+CACHE_HIT="false"
+if [[ -f "${CACHE}" ]]; then
+  VERDICT=$(cat "${CACHE}" 2>/dev/null)
+  CACHE_HIT="true"
+else
+  # Call the classifier; bound time generously. The hook's outer timeout
+  # (hooks/settings.json) must be larger than this.
+  VERDICT=$(printf '%s' "${CTX}" | timeout 12 "${CLASSIFIER_BIN}" "${CLASSIFIER_BACKEND}" 2>/dev/null)
+  # Validate before caching: must be a JSON object with the four required
+  # fields. Strict-mode schema invariant is enforced upstream by the
+  # classifier runner; this is the in-hook belt-and-suspenders.
+  if printf '%s' "${VERDICT}" \
+     | jq -e '.risk != null and .confidence != null and .escalate_to_codex != null and .reason != null' \
+       >/dev/null 2>&1; then
+    printf '%s' "${VERDICT}" > "${CACHE}"
+  else
+    VERDICT=""
+  fi
+fi
+
+if [[ -z "${VERDICT}" ]]; then
+  # Classifier returned nothing usable. Slice 2 in observe mode: LOG the
+  # failure and continue. Slice 3 (ask/governed) will fail-closed →
+  # escalate on classifier unavailability.
+  log_verdict "L2" "classifier_unavailable" "cache_hit=${CACHE_HIT}"
+  case "${MODE}" in
+    ask|governed)
+      log_verdict "MODE" "degraded_to_observe" "configured=${MODE}" "note=slice2_classifier_failed"
+      ;;
+  esac
+  exit 0
+fi
+
+RISK=$(jq -r '.risk // "unknown"' <<<"${VERDICT}")
+CONF=$(jq -r '.confidence // 0' <<<"${VERDICT}")
+REASON=$(jq -r '.reason // ""' <<<"${VERDICT}")
+ESC=$(jq -r '.escalate_to_codex // false' <<<"${VERDICT}")
+
+# Compute "would_escalate" per the slice-3 rules so observe-mode logs
+# preview what ask-mode would have done:
+#   - safe_readonly or local_read with confidence >= 4 → allow
+#   - code_mutation                                    → allow (routes to Rail 1)
+#   - everything else                                  → escalate (ask)
+WOULD_ESCALATE="true"
+case "${RISK}" in
+  safe_readonly|local_read)
+    [[ "${CONF}" -ge 4 ]] && WOULD_ESCALATE="false"
+    ;;
+  code_mutation)
+    WOULD_ESCALATE="false"
+    ;;
+esac
+
+log_verdict "L2" "${RISK}" \
+  "confidence=${CONF}" \
+  "escalate_to_codex=${ESC}" \
+  "would_escalate=${WOULD_ESCALATE}" \
+  "cache_hit=${CACHE_HIT}" \
+  "reason=${REASON}"
+
+# Slice 2 stays observe-only — never emit permissionDecision. Slice 3
+# converts WOULD_ESCALATE=true into an actual ask, and risk=destructive
+# into a deny.
 case "${MODE}" in
-  observe) ;;
   ask|governed)
-    log_verdict "MODE" "degraded_to_observe" "configured=${MODE}" "note=slice1_observe_only"
+    log_verdict "MODE" "degraded_to_observe" "configured=${MODE}" "note=slice2_observe_only"
     ;;
 esac
 
