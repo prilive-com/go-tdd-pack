@@ -288,15 +288,16 @@ log_has_field "verdict" "classifier_unavailable" \
 pass "empty classifier output handled"
 PASS_COUNT=$((PASS_COUNT+1))
 
-# --- check 13: ask/governed modes still degrade to observe (slice 2 is observe-only) ---
-info "[13] ask + governed still degrade to observe + warning log in slice 2"
-for m in "ask" "governed"; do
-  OUT=$(run_hook "docker compose restart app" "${m}")
-  [[ -z "${OUT}" ]] || fail "mode=${m} slice 2 must NOT emit JSON; got '${OUT}'"
-  log_has_field "verdict" "degraded_to_observe" \
-    || fail "mode=${m}: expected degraded_to_observe warning log"
-done
-pass "ask + governed modes degrade to observe with warning"
+# --- check 13: observe mode in slice 2 never emits a decision ---
+# (Slice 3 added ask/governed emission; this smoke focuses on classifier
+# + caching behavior in OBSERVE mode. Ask/deny emission is tested in
+# the slice 3 smoke.)
+info "[13] observe mode in slice 2: classifier ran + verdict logged, but NEVER emits JSON"
+OUT=$(run_hook "docker compose restart app" "observe")
+[[ -z "${OUT}" ]] || fail "observe mode must NOT emit JSON; got '${OUT}'"
+log_has_field "verdict" "infra_mutation" \
+  || fail "observe mode: expected classifier verdict in log"
+pass "observe mode classifies + logs but never emits decision"
 PASS_COUNT=$((PASS_COUNT+1))
 
 # --- check 14: Layer 1 fast-path is unaffected — classifier NOT called ---
