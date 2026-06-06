@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Ops Preflight Verdict",
+  "description": "Layer 3 Codex deep-review output for a single Bash command flagged by Layer 2 as state-changing. Strict-mode compliant per v2.1.0 Bug 1 lesson: additionalProperties:false and required matches properties exactly.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "risk",
+    "findings",
+    "required_prechecks",
+    "required_postchecks",
+    "rollback",
+    "human_summary"
+  ],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["approve", "approve_with_checks", "request_changes", "block"],
+      "description": "The reviewer's pre-execution recommendation. 'block' means do not run; 'request_changes' means modify the command or prep first."
+    },
+    "risk": {
+      "type": "string",
+      "enum": ["safe_readonly", "local_mutation", "infra_mutation", "destructive"],
+      "description": "Deep-review risk classification (narrower than the Layer 2 classifier's enum — Layer 3 is only called for commands that already escalated)."
+    },
+    "findings": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Specific operational concerns the reviewer identified. Empty array when approve."
+    },
+    "required_prechecks": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Concrete shell commands or actions the operator must run BEFORE the proposed command. Empty array when no prechecks needed."
+    },
+    "required_postchecks": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Concrete shell commands the operator must run AFTER the proposed command to confirm health. Empty array if not applicable."
+    },
+    "rollback": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Concrete rollback commands if the proposed command goes wrong. Empty array if reviewer says no rollback needed (e.g. read-only)."
+    },
+    "human_summary": {
+      "type": "string",
+      "maxLength": 400,
+      "description": "One or two plain sentences the operator sees. No speculation, no fixes — just the bottom line."
+    }
+  }
+}
