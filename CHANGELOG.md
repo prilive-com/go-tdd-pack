@@ -15,6 +15,190 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 _No unreleased changes._
 
+## [2.2.0] - 2026-06-07
+
+**Feature release.** Adds the **Ops Risk Triage rail** — a soft middle
+layer between "Claude runs whatever it wants" and "every command goes
+through Codex". Closes the runtime-safety gap v2.1 deliberately left
+open (PR #19 removed the Bash matcher entirely with the rationale
+"runtime command safety is out of scope for a dev-time review pack").
+The gap surfaced in a real adopter incident: a `chown -R 1000:1000`
+clobbered a container's required UID 1001, a subsequent
+`docker compose --build` re-baked the broken state into the image, and
+Claude never consulted Codex because nothing deterministic triggered
+it. That class of outage is now structurally caught.
+
+Six implementation PRs (#44–#49) + the design proposal (#43) + the
+postmortem A1–A5 follow-throughs from v2.1.0 (#38–#42).
+**Default-off** (`[ops_triage] enabled = false`); pure opt-in. Code-
+review-only adopters see zero behavior change from v2.1.1.
+
+### Added
+
+- **Ops Risk Triage rail** — a three-layer hook architecture for
+  Bash commands that ships under `[ops_triage]` in `tdd-pack.toml`:
+  - **Layer 1 — deterministic syntax parser** (`hooks/ops-risk-triage.sh`
+    in PreToolUse). Fast-paths trivially safe commands (name on the
+    user allowlist AND safe shape: no `>`, `>>`, `<`, `|`, `&&`, `||`,
+    `;`, `$()`, backticks, `<()`, `>()`, sudo, doas, su, or a
+    secret-like path like `.env`/`.pem`/`.key`/`secret`/`credential`/
+    `id_rsa`/`.aws`/`.kube/config`). No model call, no prompt, no log
+    entry for the fast-path case.
+  - **Layer 1b — user-owned catastrophic denylist**. Tiny user-editable
+    list of extended-regex patterns for truly irreversible commands
+    (`rm -rf /`, `terraform destroy`, force-push to protected refs,
+    `DROP DATABASE`, etc.). In ask/governed mode, a match → hard-deny
+    via `permissionDecision`. In observe mode → log only.
+  - **Layer 2 — fast LLM classifier** (`runner/ops-triage-classify.sh`)
+    via Claude Haiku 4.5 (Anthropic Messages API, `temperature: 0`,
+    `max_tokens: 256`). Returns strict-JSON verdict (`risk` ∈ {
+    `safe_readonly`, `local_read`, `external_read`, `local_mutation`,
+    `code_mutation`, `infra_mutation`, `destructive`, `unknown`},
+    `confidence` 1–5, `escalate_to_codex`, `reason`). "Unknown is not
+    safe" cardinal rule: only high-confidence safe verdicts allow;
+    everything else escalates. Cache by SHA of `{command, cwd, env,
+    mode, allowlist_sha, denylist_sha}` so editing the user configs
+    auto-invalidates the cache. Reasoning-blind input (structured
+    facts, not Claude's narrative) matches Anthropic's own Auto Mode
+    classifier pattern.
+  - **Layer 3 — Codex deep ops-safety review** (`runner/ops-preflight-
+    review.sh`, `/ops-preflight` skill with `disable-model-invocation:
+    true`). Manual playbook invoked by the operator after a Layer 2
+    `ask`. Returns structured verdict (`approve` / `approve_with_checks`
+    / `request_changes` / `block`) with findings, prechecks,
+    postchecks, rollback, human_summary. Strict-mode schema
+    (`schemas/ops-preflight-verdict.schema.json`) per the v2.1.0
+    Bug 1 lesson.
+- **Four modes** in `[ops_triage] mode`:
+  - `off` — gate disabled (pack as before v2.2).
+  - `observe` — classify and log only; never interrupts. The path
+    for adopters who want a week of classification data before
+    enabling the gate.
+  - `ask` (**default when enabled**) — escalation-worthy verdicts
+    emit `permissionDecision: ask` with the classifier's reason.
+    Operator decides allow/deny.
+  - `governed` — same as ask, plus `destructive` verdicts hard-DENY
+    unless a Codex `/ops-preflight` artifact (`.tdd/ops-preflight/<
+    sha256(command)>.json`) exists with `approve` or
+    `approve_with_checks`. For unattended/CI sessions.
+- **Session-tag escalation** for the specific incident pattern
+  (`hooks/ops-tag-session.sh` PostToolUse). Detects auth /
+  container_uid / config-changing commands and appends matching tags
+  to `.tdd/ops-triage/session-tags.txt`. When the classifier returns
+  `infra_mutation` AND the session has `auth` or `container_uid` tags,
+  the engine overrides risk to `destructive` and logs
+  `engine_escalated_from`. **Replays the original outage: `chown -R`
+  → `docker compose --build` is now structurally destructive.**
+- **Ops-debt accounting** (`hooks/ops-debt-track.sh` PostToolUse +
+  `hooks/ops-debt-stop.sh` Stop hook). Every mutating command that
+  ran without a `/ops-preflight` artifact gets a debt entry. Stop
+  hook blocks turn-end while debt files exist; lists open debts in
+  the reason. Auto-clears debt when a matching preflight artifact
+  appears.
+- **§9 file-based reason fallback** for bug
+  [#55889](https://github.com/anthropics/claude-code/issues/55889) (closed
+  not-planned — Bash `permissionDecisionReason` rendering may not
+  surface in the operator UI). Every ask/deny ALSO writes the reason
+  to `.tdd/ops-triage/pending-reason.txt`. Operator can
+  `cat` the file if the UI does not render the JSON reason text.
+  Zero downside: works whether or not the UI renders.
+- **Gate 4 extension** (`hooks/protect-tdd-artifacts.sh`). Three
+  new `PROTECTED_PREFIXES`: `.tdd/ops-triage/`, `.tdd/ops-preflight/`,
+  `.tdd/ops-debt/`. Claude cannot directly write any ops-rail
+  artifacts; only the runner / hooks may.
+- **Three user-editable `.example` config files** (the only hardcoded
+  surface — pack ships zero opinionated commands):
+  - `config/ops-safe-allowlist.txt.example` — safe command names
+    for the Layer 1 fast-path.
+  - `config/ops-catastrophic-denylist.txt.example` — extended-regex
+    patterns for the Layer 1b backstop.
+  - `config/ops-session-tags.txt.example` — `tag: regex` mappings
+    for the session-tag detector.
+- **`/ops-preflight` slash command** (`.claude/commands/ops-preflight.md`)
+  that loads the skill.
+- **`hooks/ops-risk-triage.sh` registered** as a `command`-type
+  PreToolUse hook on the Bash matcher (`timeout: 15`). Per the v2.2
+  proposal's verification: `command`-type hooks are the only path
+  that can emit the three-outcome `permissionDecision` (allow/ask/
+  deny); native `prompt`/`agent` hooks are binary-only.
+- **94 new smoke checks across 6 slice smokes** + updates to the
+  existing manifest and config-default smokes:
+  - `test/smoke-ops-triage-slice1.sh` (10) — Layer 1 parser +
+    catastrophic denylist + observe behavior. 13 shape-unsafe
+    counterfactuals + 17 denylist true-positives + 10 near-miss
+    counterfactuals.
+  - `test/smoke-ops-triage-slice2.sh` (15) — Haiku classifier path,
+    caching, would_escalate preview, all 4 classifier-failure modes.
+    Uses a stub classifier via `PRILIVE_OPS_TRIAGE_CLASSIFIER_BIN`
+    env var so smokes burn zero API tokens.
+  - `test/smoke-ops-triage-slice3.sh` (16) — ask/governed-mode
+    emission, §9 file-fallback content consistency, L1b mode-
+    independence, classifier-down fail-closed, kill-switch override.
+  - `test/smoke-ops-preflight-review.sh` (14) — Codex deep-review
+    runner happy paths for all 4 verdicts, artifact filename = sha256
+    of command, all validation rejection paths. Uses a stub Codex
+    via `PRILIVE_OPS_PREFLIGHT_BIN`.
+  - `test/smoke-ops-triage-slice5.sh` (19) — governed artifact
+    override (approve / approve_with_checks → allow; block / request_
+    changes / malformed → deny), ops-debt tracker creates/clears,
+    Stop hook block + mandatory `stop_hook_active` loop guard.
+  - `test/smoke-ops-triage-slice6.sh` (20) — tagger hook for all
+    three default tag classes + counterfactuals + engine R2→R3
+    escalation + **full incident replay (check 19): chown -R then
+    docker compose --build correctly escalates to destructive**.
+- Existing `test/smoke-schema-strict-mode.sh` now covers 4 schemas
+  (added `ops-triage-verdict.schema.json` and
+  `ops-preflight-verdict.schema.json` automatically; v2.1.0 Bug 1
+  prevention applied to both new schemas without prompting).
+
+### Changed
+
+- **Plugin manifest** (`.claude-plugin/plugin.json`) registers the
+  three new Bash hooks: `ops-risk-triage.sh` (PreToolUse, timeout 15),
+  `ops-debt-track.sh` (PostToolUse, timeout 3), `ops-tag-session.sh`
+  (PostToolUse, timeout 3). Stop hook adds `ops-debt-stop.sh`
+  alongside the existing `stop-fingerprint.sh`.
+- **`test/smoke-plugin-manifest-v21.sh`** check 2 (Bash matcher
+  allowlist) and check 4 (PostToolUse matcher constraints) updated
+  to permit the three v2.2 ops-rail Bash hooks while still blocking
+  any v2.1 PR 1 regression (`post-edit-review.sh` on Bash).
+- **`test/smoke-config-default-consistency.sh`** adds check #4 to
+  assert `[ops_triage] enabled = false` ships off (same shipped-
+  default discipline as v2.1.1's `[pre_review]` and `[codex] model`
+  pins).
+
+### Notes for adopters
+
+- **Default off.** Pack ships `[ops_triage] enabled = false`. Code-
+  review-only adopters see zero behavior change from v2.1.1.
+- **Opt-in** (recommended observe-first):
+  1. `cp config/ops-safe-allowlist.txt.example config/ops-safe-allowlist.txt`
+  2. `cp config/ops-catastrophic-denylist.txt.example config/ops-catastrophic-denylist.txt`
+  3. `cp config/ops-session-tags.txt.example config/ops-session-tags.txt`
+  4. Edit `tdd-pack.toml` `[ops_triage]` block: `enabled = true`,
+     `mode = "observe"`.
+  5. Run for a week against your real workload. Review
+     `.tdd/ops-triage/observe.log`.
+  6. Tune the three configs based on what fired (especially the
+     safe allowlist to reduce noise + the catastrophic denylist if
+     anything novel showed up).
+  7. Switch to `mode = "ask"` (the soft middle layer) when ready.
+  8. Switch to `mode = "governed"` for unattended sessions where
+     destructive commands must hard-deny until preflight-approved.
+- **Requires `ANTHROPIC_API_KEY`** for Layer 2 (Haiku classifier).
+  Adopters on Codex subscription only can set `classifier = "codex"`
+  (slower) or `classifier = "none"` (deterministic-only — Layer 2
+  disabled, fall-through escalates everything not on the safe
+  fast-path).
+- **§8 ask-visibility unknown.** Bug #55889 may suppress
+  `permissionDecisionReason` text on Bash matchers in the operator
+  UI. The §9 file fallback (`.tdd/ops-triage/pending-reason.txt`)
+  works regardless. If your UI renders the JSON reason, you see both.
+  If not, `cat` the file. Documented in the new
+  `docs/UPDATE_NOTES_v2.1-to-v2.2.md`.
+
+---
+
 ## [2.1.1] - 2026-06-04
 
 **Hotfix.** v2.1.0 shipped with two crashing bugs that prevented every
