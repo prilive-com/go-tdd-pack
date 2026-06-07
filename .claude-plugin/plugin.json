@@ -1,7 +1,7 @@
 {
   "name": "prilive-go-tdd-pack",
-  "version": "2.1.1",
-  "description": "Finding-aware continuous review for Go projects. Claude implements; OpenAI Codex CLI reviews in the background. v2.1 adds four false-positive rails (tool-grounding demotion with a semantic carve-out, confidence floor, changed/context line-scope, perspective-diverse consensus), verify-only later rounds, artifact protection (Gate 4), the Finding-Driven TDD active-finding foundation, MCP detachment for structured-output calls, and origin-aware escalation. The Bash command-review matcher was removed in v2.1 — runtime command safety is out of scope for a dev-time review pack.",
+  "version": "2.2.0",
+  "description": "Finding-aware continuous code review + opt-in runtime ops-safety triage for Go projects. Claude implements; OpenAI Codex CLI reviews in the background. v2.1 added four false-positive rails, verify-only later rounds, Gate 4 artifact protection, the FDTDD active-finding foundation, MCP detachment for structured-output calls, and origin-aware escalation. v2.2 added the Ops Risk Triage rail: a three-layer Bash-command gate (deterministic parser → fast Haiku classifier → Codex deep ops-preflight) with ask/governed modes, session-tag-driven R2→R3 escalation (the specific fix for chown→rebuild outages), and ops-debt accounting via Stop-hook block. Default off; pure opt-in.",
   "author": {
     "name": "Prilive",
     "url": "https://github.com/prilive-com"
