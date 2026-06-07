@@ -101,6 +101,11 @@
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/ops-debt-track.sh",
             "timeout": 3
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/ops-tag-session.sh",
+            "timeout": 3
           }
         ]
       },

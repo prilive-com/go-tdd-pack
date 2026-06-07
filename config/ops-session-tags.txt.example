@@ -1,0 +1,66 @@
+# config/ops-session-tags.txt — USER-OWNED session-tag pattern map.
+#
+# Ships as .example. Copy to `config/ops-session-tags.txt` and edit to
+# enable. The pack itself ships ZERO opinionated patterns — this .example
+# file is a starting point you own and tune.
+#
+# How it's used:
+#   - hooks/ops-tag-session.sh runs after every Bash command (PostToolUse).
+#   - For each line in this file (`tag: regex`), if the executed command
+#     matches the regex, the hook appends `<tag>` to
+#     `.tdd/ops-triage/session-tags.txt`.
+#   - hooks/ops-risk-triage.sh feeds session-tags.txt as
+#     `recent_operation_tags` to the Layer 2 classifier AND uses them
+#     itself for an engine-side R2→R3 escalation: when the classifier
+#     returns `infra_mutation` AND any of `auth` / `container_uid` are
+#     in the tag list, the hook escalates risk to `destructive`.
+#
+# Why this exists:
+#   The original outage that motivated v2.2 was a chown -R that clobbered
+#   a container's required UID, followed by a docker compose --build that
+#   re-baked the broken state into the image. Each command on its own
+#   was R2-ish; the COMBINATION was R3. Session-tag escalation captures
+#   that pattern: once an auth/UID change happened in the session, any
+#   subsequent rebuild/restart of a container that uses those credentials
+#   is destructive, not just routine.
+#
+# Format:
+#   - One mapping per line, syntax: `<tag>: <extended-regex>`.
+#   - Whitespace around the colon is OK.
+#   - Comments start with `#`. Blank lines ignored.
+#   - The regex is applied with `grep -E` against the full command line.
+#
+# Recommended tags (the hook + classifier use these names):
+#   auth          — anything touching user accounts, passwords, secrets,
+#                    auth tokens, SSH keys, kerberos, oauth flows.
+#   container_uid — chown / chmod on mounts, container exec UID changes,
+#                    Dockerfile USER changes, anything that drifts a
+#                    runtime UID.
+#   config        — edits to .env, /etc config files, container compose
+#                    files, k8s manifests, secrets files.
+#
+# You can invent your own tag names — just make sure the classifier
+# prompt knows about them. The default classifier prompt
+# (prompts/ops-risk-classifier.md) only recognizes the three above.
+
+# --- auth: anything touching user accounts / credentials / keys ---
+auth: ^(sudo[[:space:]]+)?(passwd|htpasswd|useradd|usermod|userdel|chage|groupadd|groupdel|groupmod)([[:space:]]|$)
+auth: ^(sudo[[:space:]]+)?ssh-keygen([[:space:]]|$)
+auth: ^(sudo[[:space:]]+)?(cp|mv|rm|chmod|chown)[[:space:]]+.*/etc/(passwd|shadow|sudoers|sudoers\.d|ssh)
+auth: ^(sudo[[:space:]]+)?(rm|mv|cp)[[:space:]]+.*\.(pem|key|p12|pfx|jks)([[:space:]]|$)
+auth: ^(sudo[[:space:]]+)?(rm|mv|cp)[[:space:]]+.*id_(rsa|ed25519|ecdsa)([[:space:]]|$)
+auth: vault[[:space:]]+(login|write|delete|kv|auth)
+auth: aws[[:space:]]+(iam|sts|secretsmanager)
+auth: gcloud[[:space:]]+(auth|iam|secrets)
+auth: kubectl[[:space:]]+(create|delete|patch|apply).*secret([[:space:]]|$)
+
+# --- container_uid: ownership / permission drift on container surfaces ---
+container_uid: ^(sudo[[:space:]]+)?chown[[:space:]]+-[a-zA-Z]*R[a-zA-Z]*[[:space:]]
+container_uid: ^(sudo[[:space:]]+)?chmod[[:space:]]+-[a-zA-Z]*R[a-zA-Z]*[[:space:]]
+container_uid: docker[[:space:]]+exec[[:space:]]+.*[[:space:]](chown|chmod|useradd|usermod)([[:space:]]|$)
+container_uid: docker[[:space:]]+cp[[:space:]]+.*:.*
+
+# --- config: env / config / manifest edits that change runtime behaviour ---
+config: ^(sudo[[:space:]]+)?(cp|mv|rm|tee|>)[[:space:]]*.*/etc/[a-zA-Z0-9_-]+\.(conf|cfg|toml|yaml|yml|ini)
+config: ^(sudo[[:space:]]+)?(cp|mv|rm|tee)[[:space:]]+.*\.env(\.[a-zA-Z0-9]+)?([[:space:]]|$)
+config: docker[[:space:]]+compose[[:space:]]+config
