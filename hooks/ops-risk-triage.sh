@@ -315,6 +315,29 @@ CONF=$(jq -r '.confidence // 0' <<<"${VERDICT}")
 REASON=$(jq -r '.reason // ""' <<<"${VERDICT}")
 ESC=$(jq -r '.escalate_to_codex // false' <<<"${VERDICT}")
 
+# v2.2 slice 6 — engine-side R2→R3 escalation.
+# The original outage: a chown -R 1000:1000 clobbered a container UID,
+# then a docker compose --build re-baked the broken state. Each command
+# alone was R2; the COMBINATION was R3. hooks/ops-tag-session.sh writes
+# session tags (auth / container_uid / config) on those upstream
+# commands; here we honor those tags as an engine-side safety net for
+# the LLM classifier (the classifier prompt also tells it to do this,
+# but a model can miss; the engine cannot).
+ESCALATED_FROM=""
+if [[ "${RISK}" == "infra_mutation" ]]; then
+  # Check the session-tags file (already read into TAGS above) for
+  # tokens that warrant escalation. We use the raw text content rather
+  # than the JSON array because it's simpler and faster.
+  if [[ -f "${TAGS_FILE}" ]]; then
+    if grep -qE '^(auth|container_uid)$' "${TAGS_FILE}" 2>/dev/null; then
+      ESCALATED_FROM="${RISK}"
+      RISK="destructive"
+      WOULD_ESCALATE="true"
+      REASON="${REASON} [engine-escalated to destructive: prior auth/UID change in this session]"
+    fi
+  fi
+fi
+
 # Compute "would_escalate" per the slice-3 rules so observe-mode logs
 # preview what ask-mode would have done:
 #   - safe_readonly or local_read with confidence >= 4 → allow
@@ -330,12 +353,22 @@ case "${RISK}" in
     ;;
 esac
 
-log_verdict "L2" "${RISK}" \
-  "confidence=${CONF}" \
-  "escalate_to_codex=${ESC}" \
-  "would_escalate=${WOULD_ESCALATE}" \
-  "cache_hit=${CACHE_HIT}" \
-  "reason=${REASON}"
+if [[ -n "${ESCALATED_FROM}" ]]; then
+  log_verdict "L2" "${RISK}" \
+    "confidence=${CONF}" \
+    "escalate_to_codex=${ESC}" \
+    "would_escalate=${WOULD_ESCALATE}" \
+    "cache_hit=${CACHE_HIT}" \
+    "engine_escalated_from=${ESCALATED_FROM}" \
+    "reason=${REASON}"
+else
+  log_verdict "L2" "${RISK}" \
+    "confidence=${CONF}" \
+    "escalate_to_codex=${ESC}" \
+    "would_escalate=${WOULD_ESCALATE}" \
+    "cache_hit=${CACHE_HIT}" \
+    "reason=${REASON}"
+fi
 
 # ---------------------------------------------------------------------------
 # 5. Slice 3 routing: observe logs only; ask/governed actually gate.

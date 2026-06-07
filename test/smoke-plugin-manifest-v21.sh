@@ -32,12 +32,14 @@ PASS_COUNT=$((PASS_COUNT+1))
 
 info "[2] Bash matchers in manifest: only v2.2 ops-rail hooks (no PR-1-style code-review Bash matchers)"
 # v2.1 deleted the Bash matcher that fired post-edit-review.sh on every Bash
-# command (PR #19). v2.2 re-introduces Bash matchers for a DIFFERENT purpose:
+# command (PR #19). v2.2 re-introduces Bash matchers for DIFFERENT purposes:
 #   - slice 1+2+3: hooks/ops-risk-triage.sh (PreToolUse) — runtime safety
 #     classification, not code quality. Disabled by default.
 #   - slice 5: hooks/ops-debt-track.sh (PostToolUse) — records mutating
 #     commands that ran without /ops-preflight. Disabled by default.
-# Any Bash matcher in the manifest MUST be wired only to one of those two
+#   - slice 6: hooks/ops-tag-session.sh (PostToolUse) — tags auth/UID/config
+#     changes for next-Bash session-context escalation. Disabled by default.
+# Any Bash matcher in the manifest MUST be wired only to one of those three
 # hooks. Anything else is a v2.1 PR 1 regression.
 BASH_BLOCKS=$(jq -r '
   [.hooks // {} | to_entries[] | .value[]?
@@ -45,7 +47,7 @@ BASH_BLOCKS=$(jq -r '
 ' "${MANIFEST}")
 OFFENDERS=$(jq -r '
   .[] | .hooks[] | .command
-  | select(test("(ops-risk-triage|ops-debt-track)\\.sh$") | not)
+  | select(test("(ops-risk-triage|ops-debt-track|ops-tag-session)\\.sh$") | not)
 ' <<<"${BASH_BLOCKS}")
 [[ -z "${OFFENDERS}" ]] \
   || fail "manifest has Bash matcher(s) wired to non-ops-rail hook(s) — v2.1 PR 1 regression: ${OFFENDERS}"
@@ -83,7 +85,7 @@ PT_BASH_OFFENDERS=$(jq -r '
   [.hooks.PostToolUse[]?
     | select((.matcher // "") | test("(^|\\|)Bash(\\||$)"))
     | .hooks[]? | .command
-    | select(test("ops-debt-track\\.sh$") | not)]
+    | select(test("(ops-debt-track|ops-tag-session)\\.sh$") | not)]
   | .[]
 ' "${MANIFEST}")
 [[ -z "${PT_BASH_OFFENDERS}" ]] \

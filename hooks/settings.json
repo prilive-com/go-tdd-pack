@@ -48,12 +48,17 @@
         ]
       },
       {
-        "_comment": "v2.2 slice 5: ops-debt tracker. Records mutating commands that ran without a /ops-preflight artifact so the Stop hook can block turn-end on unresolved debt. No-op in observe/off modes.",
+        "_comment": "v2.2 slice 5+6: ops-rail PostToolUse hooks. ops-debt-track records mutating commands that ran without a /ops-preflight artifact (slice 5). ops-tag-session writes auth/container_uid/config tags so the next Bash invocation's classifier knows what happened earlier in the session — engine-side R2→R3 escalation safety net (slice 6, the specific fix for the original outage pattern). Both no-op in observe/off modes.",
         "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
             "command": "${CLAUDE_PROJECT_DIR}/hooks/ops-debt-track.sh",
+            "timeout": 3
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/hooks/ops-tag-session.sh",
             "timeout": 3
           }
         ]
