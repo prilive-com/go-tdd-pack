@@ -353,14 +353,33 @@ case "${MODE}" in
     ;;
   governed)
     # governed = ask for everything escalate-worthy, EXCEPT destructive
-    # which hard-denies. Slice 5 will add an artifact-based override for
-    # destructive (operator runs /ops-preflight to produce an artifact
-    # that re-enables the command). Until then, destructive is unconditional
-    # deny in governed mode.
+    # which hard-denies UNLESS a Codex deep-review artifact exists for
+    # this exact command AND the verdict was approve / approve_with_checks.
+    # Slice 5 wires the override: operator runs /ops-preflight, which
+    # writes .tdd/ops-preflight/<sha256(command)>.json. Hook re-reads
+    # that artifact on the next attempt.
     case "${RISK}" in
       destructive)
+        ART_HASH=$(printf '%s' "${CMD}" | sha256sum | cut -d' ' -f1)
+        ART_FILE="${PROJECT_DIR}/.tdd/ops-preflight/${ART_HASH}.json"
+        if [[ -f "${ART_FILE}" ]]; then
+          ART_VERDICT=$(jq -r '.verdict.verdict // empty' "${ART_FILE}" 2>/dev/null)
+          case "${ART_VERDICT}" in
+            approve|approve_with_checks)
+              # Operator did the preflight; verdict approves. Allow,
+              # log the override so the trail shows it.
+              log_verdict "GATE" "governed_override_via_artifact" \
+                "artifact=${ART_HASH:0:12}" "art_verdict=${ART_VERDICT}"
+              exit 0
+              ;;
+            request_changes|block|*)
+              emit_decision "deny" \
+                "ops-triage (destructive, conf=${CONF}): ${REASON} — Codex preflight returned '${ART_VERDICT:-malformed}' for this command. Address the preflight findings, then re-run /ops-preflight, then try again."
+              ;;
+          esac
+        fi
         emit_decision "deny" \
-          "ops-triage (destructive, conf=${CONF}): ${REASON} — Governed mode hard-blocks irreversible commands. Run manually if truly intended (slice 5 will add a /ops-preflight artifact override)."
+          "ops-triage (destructive, conf=${CONF}): ${REASON} — Governed mode hard-blocks irreversible commands. Run /ops-preflight first to get a Codex verdict; if it approves, the command will be allowed."
         ;;
     esac
     if [[ "${WOULD_ESCALATE}" == "true" ]]; then

@@ -95,6 +95,16 @@
     ],
     "PostToolUse": [
       {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/ops-debt-track.sh",
+            "timeout": 3
+          }
+        ]
+      },
+      {
         "matcher": "Edit|Write|MultiEdit",
         "hooks": [
           {
@@ -130,6 +140,11 @@
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/stop-fingerprint.sh",
             "async": true,
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/ops-debt-stop.sh",
+            "timeout": 3
           }
         ]
       }
