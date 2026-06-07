@@ -46,6 +46,17 @@
             "timeout": 3
           }
         ]
+      },
+      {
+        "_comment": "v2.2 slice 5: ops-debt tracker. Records mutating commands that ran without a /ops-preflight artifact so the Stop hook can block turn-end on unresolved debt. No-op in observe/off modes.",
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/hooks/ops-debt-track.sh",
+            "timeout": 3
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
@@ -68,6 +79,12 @@
             "command": "${CLAUDE_PROJECT_DIR}/hooks/stop-fingerprint.sh",
             "async": true,
             "timeout": 5
+          },
+          {
+            "_comment": "v2.2 slice 5: blocks turn-end while .tdd/ops-debt/*.json entries exist. Honors stop_hook_active loop guard.",
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/hooks/ops-debt-stop.sh",
+            "timeout": 3
           }
         ]
       }

@@ -115,14 +115,22 @@ deny() {
 }
 
 # Prefix-match patterns (anything under these prefixes is protected).
+# v2.2 slice 5 added the three ops-triage rail prefixes: the LLM
+# classifier cache, the Codex deep-review artifacts (the gate
+# governed-mode reads), and the ops-debt records (what the Stop hook
+# blocks on). Claude cannot directly write any of these; only the
+# runner / hook may.
 PROTECTED_PREFIXES=(
   ".tdd/findings/"
   ".tdd/queue/"
+  ".tdd/ops-triage/"
+  ".tdd/ops-preflight/"
+  ".tdd/ops-debt/"
 )
 
 for prefix in "${PROTECTED_PREFIXES[@]}"; do
   if [[ "${REL_PATH}" == "${prefix}"* ]]; then
-    deny "${REL_PATH}" "Engine path: use the runner or a slash command (e.g. /accept-claude, /accept-codex, /abandon-review)."
+    deny "${REL_PATH}" "Engine path: use the runner or a slash command (e.g. /accept-claude, /accept-codex, /abandon-review, /ops-preflight)."
     exit 0
   fi
 done

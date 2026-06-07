@@ -30,25 +30,26 @@ VER=$(jq -r '.version // empty' "${MANIFEST}")
 pass "version = ${VER}"
 PASS_COUNT=$((PASS_COUNT+1))
 
-info "[2] Bash matchers in manifest: only the v2.2 ops-risk-triage hook (no PR-1-style code-review Bash matchers)"
+info "[2] Bash matchers in manifest: only v2.2 ops-rail hooks (no PR-1-style code-review Bash matchers)"
 # v2.1 deleted the Bash matcher that fired post-edit-review.sh on every Bash
-# command (PR #19). v2.2 slice 1 re-introduces a Bash matcher for a DIFFERENT
-# purpose: ops-risk-triage classifies runtime safety, not code quality, and
-# is disabled-by-default. Any Bash matcher in the manifest MUST be wired only
-# to ops-risk-triage.sh. Anything else is a v2.1 regression.
+# command (PR #19). v2.2 re-introduces Bash matchers for a DIFFERENT purpose:
+#   - slice 1+2+3: hooks/ops-risk-triage.sh (PreToolUse) — runtime safety
+#     classification, not code quality. Disabled by default.
+#   - slice 5: hooks/ops-debt-track.sh (PostToolUse) — records mutating
+#     commands that ran without /ops-preflight. Disabled by default.
+# Any Bash matcher in the manifest MUST be wired only to one of those two
+# hooks. Anything else is a v2.1 PR 1 regression.
 BASH_BLOCKS=$(jq -r '
   [.hooks // {} | to_entries[] | .value[]?
     | select((.matcher // "") | test("(^|\\|)Bash(\\||$)"))]
 ' "${MANIFEST}")
-# Every Bash-matched hook must reference ops-risk-triage.sh (and nothing
-# else from the v2.1 code-review path).
 OFFENDERS=$(jq -r '
   .[] | .hooks[] | .command
-  | select(test("ops-risk-triage\\.sh$") | not)
+  | select(test("(ops-risk-triage|ops-debt-track)\\.sh$") | not)
 ' <<<"${BASH_BLOCKS}")
 [[ -z "${OFFENDERS}" ]] \
-  || fail "manifest has Bash matcher(s) wired to non-ops-triage hook(s) — v2.1 PR 1 regression: ${OFFENDERS}"
-pass "Bash matchers in manifest reference ops-risk-triage only (no PR 1 regression)"
+  || fail "manifest has Bash matcher(s) wired to non-ops-rail hook(s) — v2.1 PR 1 regression: ${OFFENDERS}"
+pass "Bash matchers in manifest reference ops-rail hooks only (no PR 1 regression)"
 PASS_COUNT=$((PASS_COUNT+1))
 
 info "[3] PreToolUse registers protect-tdd-artifacts.sh BEFORE pre-review.sh"
@@ -70,11 +71,24 @@ REVIEW_POS=$(awk '{for(i=1;i<=NF;i++) if($i ~ /pre-review/) print i}' <<< "${PRE
 pass "Gate 4 registered before pre-review on PreToolUse"
 PASS_COUNT=$((PASS_COUNT+1))
 
-info "[4] PostToolUse matcher is file-only (no Bash)"
+info "[4] PostToolUse matchers: file-edit matcher present, any Bash matcher wired to ops-debt-track only"
 PT_MATCHERS=$(jq -r '[.hooks.PostToolUse[]? | .matcher // ""] | join(",")' "${MANIFEST}")
-grep -q "Bash" <<< "${PT_MATCHERS}" \
-  && fail "PostToolUse still has a Bash matcher: ${PT_MATCHERS}"
-pass "PostToolUse matchers are file-only: ${PT_MATCHERS}"
+# File-edit matcher must still be present for the code-review path.
+grep -q "Edit|Write|MultiEdit" <<< "${PT_MATCHERS}" \
+  || fail "PostToolUse missing the Edit|Write|MultiEdit matcher for code review"
+# Bash matcher is allowed in v2.2+ but ONLY if it routes to ops-debt-track.sh
+# (the v2.2 slice 5 ops-debt recorder). Any other Bash PostToolUse target
+# would be a PR 1 regression.
+PT_BASH_OFFENDERS=$(jq -r '
+  [.hooks.PostToolUse[]?
+    | select((.matcher // "") | test("(^|\\|)Bash(\\||$)"))
+    | .hooks[]? | .command
+    | select(test("ops-debt-track\\.sh$") | not)]
+  | .[]
+' "${MANIFEST}")
+[[ -z "${PT_BASH_OFFENDERS}" ]] \
+  || fail "PostToolUse Bash matcher(s) wired to non-ops-debt hook(s): ${PT_BASH_OFFENDERS}"
+pass "PostToolUse matchers: ${PT_MATCHERS} (file-edit present; any Bash wired to ops-debt-track only)"
 PASS_COUNT=$((PASS_COUNT+1))
 
 # Cross-check: the set of PreToolUse commands in the manifest matches the
