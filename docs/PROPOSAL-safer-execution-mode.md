@@ -362,6 +362,116 @@ examples of.
 
 ---
 
+## 13. Addendum — Codex review findings (2026-06-08)
+
+A second-model adversarial review by Codex (gpt-5.5, high reasoning)
+caught several real flaws in v1 of this proposal. Honest amendment:
+**the original Option-B recommendation was wrong.** Codex found that
+git worktree does not actually prevent the `--dangerously-bypass`
+write surface the proposal claims to close. Plus several real risk
+understatements and slice-order issues. The proposal as authored
+above is NOT implementation-ready; this addendum supersedes the
+recommendation and slice plan.
+
+Empirical bonus: the first batch of Codex calls running this review
+failed with the v2.1.0 Bug 2 model-default error (`gpt-5.3-codex`
+not on ChatGPT subscription auth). Even though `tdd-pack.toml` pins
+the model, **direct codex calls outside the runner bypass the pin**.
+This is live evidence for the proposal's "trust assumption invisible
+until something fails" framing — and reinforces the case for ripping
+out `--dangerously-bypass`.
+
+### BLOCKER findings (3) — all accepted
+
+1. **Option B is NOT a safety fallback.** Git worktree only protects
+   the live checkout from relative-path writes. `codex exec
+   --dangerously-bypass` can still write any absolute path:
+   `$HOME`, `/tmp`, `/etc`, SSH config, hooks. The proposed
+   `/tmp/sandbox-canary` counterfactual smoke would FAIL under
+   Option B because bypass mode bypasses everything.
+   - **Change**: Option B is downgraded from "safe fallback" to
+     "live-tree-write protection only — does NOT remove the
+     `--dangerously-bypass` risk surface". Recommendation flipped
+     (see below). If Option C is unavailable, Option A becomes the
+     primary path; OS-level sandboxing (bubblewrap, mount
+     namespaces) is a separate v2.4 consideration.
+
+2. **No threat model in §1.** The proposal cites prompt injection /
+   jailbreaks as motivation but explicitly preserves unrestricted
+   reads. Exfiltration via stdout / artifacts / network is
+   unaddressed.
+   - **Change**: Add an explicit threat model to §1 in v2 of this
+     proposal: the goal is **write-integrity to the project tree +
+     adjacent surfaces**. Read containment + network egress are
+     declared out-of-scope for v2.3 with a follow-up tracked for
+     v2.4+. State this explicitly so adopters know what's NOT
+     covered.
+
+3. **Verification recipe in §5 isn't yet executable.** The example
+   command contains `--dangerously-bypass-approvals-and-sandbox-NO`
+   (a placeholder that looks like a real flag). The exact Codex CLI
+   flag/config shape for writable-allowlist is unknown. Not
+   implementation-ready beyond slice 1.
+   - **Change**: §5 is reframed as "this is a research spike, not a
+     verification recipe". Slice 1 deliverable is a
+     `docs/RESEARCH-codex-sandbox-features.md` reporting empirical
+     findings; slices 2+ are gated on that report producing exact
+     flag/version evidence. Slice 2 does NOT start automatically
+     after slice 1.
+
+### MAJOR findings (5) — all accepted
+
+| # | Finding | Change |
+|---|---|---|
+| M1 | Option A dismissed too quickly. It is the only option that actually removes Codex disk writes without unverified allowlist semantics. | Recommendation reordered: **Option C if §5 confirms support, ELSE Option A** (not Option B). Slice 2 builds runner-side stdout/stderr capture for Option A. |
+| M2 | Sandbox boundary for artifact writes unspecified. `codex exec -o`, shell redirection, `tee`, and model-invoked shell may all behave differently under the sandbox. | Slice 1 (research) explicitly tests `-o`, stdout redirection, stderr capture, model-triggered shell writes separately. Document the boundary before Option C is committed. |
+| M3 | Auto-mode probe caching is fragile. Stale across Codex upgrades / config changes / concurrent cycles. | Cache key extended to include `{codex_binary_path, codex_version_string, resolved_sandbox_config_sha, probe_result_sha}`. Fail-closed if probe is ambiguous. |
+| M4 | "Zero observable behavior change" is wrong — existing tool writes (caches, temp files, coverage, module downloads, diagnostics) may break under strict sandboxing. | Slice 1 inventories Codex-side write paths from real cycles; slice 5 ships a migration note + diagnostic escape hatches before flipping the default. |
+| M5 | Slice 2 is not independently shippable — it would ship the flawed Option B path before slice 1 resolves the backend choice. | Slice plan reordered: slice 1 = research spike; slice 2 = Option A (the proven path that doesn't depend on Codex CLI feature support); slice 3 = Option C only if §5 passes; slices 4-6 unchanged. |
+
+### MINOR findings (2) — accepted
+
+- **Worktree lifecycle** (concurrent cycles, locks, submodules, LFS,
+  sparse checkouts): if Option B survives at all (as artifact-
+  isolation rather than safety), spec the full lifecycle: unique
+  naming, max-age sweep, concurrent-cycle behavior, submodule /
+  LFS / sparse-checkout policy.
+- **Smoke counterfactuals** must align with the security claim each
+  smoke tests. The proposed `/tmp/sandbox-canary` smoke is correct
+  for Option A or C; it's a misleading smoke for Option B (which
+  doesn't claim to prevent `/tmp` writes).
+
+### Revised recommendation
+
+**Original**: "Verify Option C feasibility first. If supported, ship Option C. If not, ship Option B (worktree)."
+
+**Revised**: "Slice 1 is a research spike (`docs/RESEARCH-codex-sandbox-features.md`). After slice 1 lands, the recommendation is **Option C if §5 confirms writable-allowlist sandbox support, ELSE Option A** (runner captures Codex stdout instead of letting Codex write disk artifacts). Option B is downgraded to optional artifact-isolation layer, not a safety layer. `--dangerously-bypass` still leaves the default path, just via a different mechanism than v1 proposed."
+
+### Revised slice plan
+
+| Slice | v1 scope | v2 scope (post-addendum) |
+|---|---|---|
+| 1 | §5 verification work | **Research spike**: `docs/RESEARCH-codex-sandbox-features.md` reporting exact flags + write boundaries + write-path inventory + worktree-isn't-sandbox empirical proof. Hard gate before slice 2. |
+| 2 | Option B (worktree) | **Option A** (runner captures stdout; Codex sandboxed read-only). Refactor `runner/codex-round1.sh` + `codex-round-n.sh` + ops-triage runners. Counterfactual smoke uses `$HOME`/`/tmp`/`/etc` write attempts. |
+| 3 | Option C | Option C (only if slice 1 confirmed feasibility) — write-allowlist sandbox, simpler runner. |
+| 4 | `sandbox = "auto"` selection | Same, with cache-key extended per M3. Probe is fail-closed. |
+| 5 | Flip default + `smoke-config-default-consistency.sh` check | Same + the M4 migration inventory note + diagnostic escape hatches. |
+| 6 | Deprecate `bypass` | Unchanged. |
+
+### What stays solid in v1
+
+- The defense-in-depth framing (sandbox + prompt + smoke, in that
+  order) holds.
+- The mode hierarchy (off / strict / worktree / bypass) is sound,
+  though `worktree` mode is now framed as artifact-isolation, not
+  safety.
+- The trip-wire pattern from `PROPOSAL-release-gate-coupling.md` is
+  the right shape for the deprecation rollout.
+- The counterfactual-smoke discipline (per v2.1.1 lesson) holds —
+  just smokes must align with what each option actually claims.
+
+---
+
 ## References
 
 - [Anthropic Claude Code: sandboxing](https://code.claude.com/docs/en/sandbox)
