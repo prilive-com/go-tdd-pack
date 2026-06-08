@@ -408,6 +408,126 @@ been talked about since v2.1 PR #26; v2.3 makes it real.
 
 ---
 
+## 14. Addendum — Codex review findings (2026-06-08)
+
+A second-model adversarial review by Codex (gpt-5.5, high reasoning)
+was harsh on this proposal — 3 BLOCKER + 5 MAJOR + 2 MINOR — and
+identified a genuinely important framing problem. Codex's closing
+verdict deserves a direct quote:
+
+> *"the largest issue is that the rail proves and scopes much less
+> than it claims: any accepted finding can unlock unrelated Tier-1
+> prod edits, and 'Red proof' is currently just operator metadata
+> unless the failing test is mechanically captured."*
+
+That critique is correct. v1 of this proposal sold the rail as
+"mechanical FDTDD enforcement" but in practice the two key claims
+(scoped unlock + actual Red proof) are operator-attested, not
+mechanically enforced. v2 of the proposal fixes both.
+
+### BLOCKER findings (3) — all accepted
+
+1. **Gate 1 is too coarse.** Once ANY active finding has
+   `red_proof_accepted = true`, v1's Gate 1 allows edits to ANY
+   Tier-1 prod file. An auth finding can unlock billing / session /
+   capital edits. `prod_files` is described as optional → not
+   enforced. The "Red proof gates the scope of unlock" claim is
+   false in v1.
+   - **Change**: `prod_files` becomes REQUIRED for strict/governed
+     modes. Gate 1's allow-condition extended: `red_proof_accepted
+     == true` AND `file_path` in the active finding's `prod_files`
+     OR in the same Tier-1 directory tree as a file in
+     `prod_files`. Off-scope Tier-1 edits get the same deny as if
+     no finding existed. `finding-accept-red.sh` MUST collect both
+     test files AND the operator-declared prod-file scope; without
+     prod_files, slice 2 refuses to transition to Green.
+
+2. **"Red proof" is not actually proved.** v1's
+   `finding-accept-red.sh` only validates that test files exist
+   and parse as Go test files. It does NOT prove the test currently
+   fails, fails for the intended reason, or demonstrates the
+   finding. The "Red proof" guarantee is mostly social.
+   - **Change**: `finding-accept-red.sh` v2 MUST run the declared
+     test command (e.g. `go test -run <TestName> ./<pkg>`) and
+     record the failing exit code + the last ~200 lines of failure
+     output into the marker's new `red_proof_record` field. The
+     transition to Green is gated on a non-zero test exit. If the
+     test passes (i.e. the bug is not reproduced), the operator
+     gets a clear "test must fail to be a Red proof" error and the
+     marker stays in `red`. Mechanical Red, not social.
+
+3. **Marker layout self-contradicts.** v1 alternates between
+   `.tdd/active-finding` as a JSON file AND
+   `.tdd/active-finding/pending-reason.txt` as if it were a
+   directory, AND suggests moving to `.tdd/findings/active.json`.
+   Breaks Gate 4, helpers, smokes, docs.
+   - **Change**: Lock the filesystem contract before slice 1 ships.
+     v2 contract: `.tdd/findings/active.json` is the canonical
+     marker (JSON file); `.tdd/findings/pending-reason.txt` is the
+     §9 fallback (separate sibling file in the same directory). The
+     legacy `.tdd/active-finding` path (v2.1 PR #26) is read by
+     slice 1's helpers for backward-compat but is migrated to
+     `.tdd/findings/active.json` on first `finding-start.sh`
+     invocation. Gate 4's PROTECTED_PREFIXES gets `.tdd/findings/`
+     instead of `.tdd/active-finding`. Smokes updated.
+
+### MAJOR findings (5) — all accepted
+
+| # | Finding | Change |
+|---|---|---|
+| M1 | Path normalization unspecified. Gate 3 compares `tool_input.file_path` to `test_files` via exact string match, but real inputs vary: absolute / relative / `./` prefix / symlinked / case-different. Either misses locked files or falsely blocks unrelated ones. | v2 §4 adds canonicalization rules: paths are stored repo-root-relative + cleaned (`./x/../y` → `y`); symlinks resolved via `pwd -P` (same pattern as Gate 4 §6 canonicalization); both `test_files` and `tool_input.file_path` canonicalized before comparison. Smokes cover all four input variants. |
+| M2 | MultiEdit semantics likely wrong. Claude Code's `MultiEdit` typically targets ONE `file_path` with multiple edits, not multiple files. v1's "check ALL of them" is misleading. | v2 slice 1's pre-checklist adds an empirical task: capture real PreToolUse JSON for Edit, Write, and MultiEdit. Spec the gate parsers against the observed payloads. If MultiEdit is single-file, the "check ALL files" requirement is dropped; if it's multi-file, the requirement holds with explicit per-file evaluation. |
+| M3 | Test-lock during Green is too rigid. Real Green work often requires mechanical test maintenance (fix imports, helper placement, table cases, snapshots) after prod changes. Strict-mode deny forces noisy `restart-red` churn. | v2 adds an "amend-red-proof" flow: `scripts/tdd/finding-amend-red.sh <test-file>` lets the operator declare a mechanical test change (imports / helpers / etc.) WITHOUT regressing to Red. The marker records `amendments: [{ts, file, rationale}]`. Gate 3 allows test edits within an active amendment window. Soft modes are unaffected. |
+| M4 | No stale-marker recovery. If a marker stays in Green after an interrupted session, Tier-1 edits stay unlocked indefinitely. No policy on staleness. | v2 §11 adds a new helper `scripts/tdd/finding-status.sh` that detects staleness (active marker > 24h old, or with no recent commits / test runs); reports it on `SessionStart` via the existing `session-start.sh` hook. Gate 1 + Gate 3 become CONSERVATIVE when timestamps are inconsistent (e.g. `green_started_at` before `red_accepted_at`): treat as `phase: "red"` for gating until operator resolves. |
+| M5 | Slice order strands users. v1 ships Gate 1 (slice 2) before `finding-accept-red.sh` (slice 3); ships Gate 3 (slice 4) before `finding-restart-red.sh` (slice 5). In strict mode, operators would hit deny without the ergonomic escape hatch. | v2 reorders to vertical slices: slice 2 = schema + start/finish + accept-red helper (Gate 1 ready-but-not-active in soft mode); slice 3 = Gate 1 fires in governed/strict; slice 4 = Gate 3 + restart-red + amend-red helpers (Gate 3 ready); slice 5 = Gate 3 fires in governed/strict; slices 6-7 unchanged. Each slice ships a usable unit. |
+
+### MINOR findings (2) — accepted
+
+- **Mode naming divergence** (`off/observe/ask/governed` for v2.2
+  ops-triage vs `off/soft/governed_tdd/strict_tdd` for FDTDD)
+  creates adopter confusion. v2 includes a compatibility table in
+  the adopter docs (slice 7) showing the parallel (governed_tdd ≈
+  ask + scope; strict_tdd ≈ ask + scope + deny). Names stay
+  different because the rails serve different purposes (ops-triage
+  observe is data-collection; FDTDD has no data-collection phase),
+  but the parallel is documented.
+- **Load-bearing claims unverified**: "review.mode already accepts
+  governed_tdd/strict_tdd", "Gate 4 protects the marker",
+  "permissionDecisionReason may not render". Slice 1 pre-checklist
+  adds explicit verification steps with exact file/test/command
+  references for each.
+
+### Revised slice plan (vertical, per M5)
+
+| Slice | v1 scope | v2 scope (post-addendum) |
+|---|---|---|
+| 1 | Lock marker schema + JSON Schema + backward-compat | Same, plus the BLOCKER 3 filesystem-contract lock (`.tdd/findings/active.json` + sibling `pending-reason.txt`) + Gate 4 PROTECTED_PREFIXES update + M2 empirical PreToolUse JSON capture + M5's pre-checklist verifying load-bearing claims. Migration shim for v2.1 `.tdd/active-finding` markers. |
+| 2 | Gate 1 hook + register | **Schema + finding-start/finish + accept-red helper** (with BLOCKER 2's mechanical test-run + BLOCKER 1's required prod_files). Gate 1 implementation lands here too but DEFAULT MODE is soft — it doesn't fire yet. |
+| 3 | accept-red helper | **Activate Gate 1 in governed_tdd / strict_tdd modes**. Mode toggle smoke + counterfactual that soft mode still allows. Migration note in adopter docs. |
+| 4 | Gate 3 hook | **Gate 3 hook + restart-red + amend-red helpers** (M3's mechanical-test-maintenance flow). Gate 3 ready-but-not-active. |
+| 5 | restart-red helper | **Activate Gate 3 in governed_tdd / strict_tdd modes**. Smokes cover lock-during-Green, restart-red, amend-red, all with M1 path canonicalization. |
+| 6 | inject-findings guidance + §9 file fallback | Unchanged, with §9 fallback path now `.tdd/findings/pending-reason.txt` per BLOCKER 3 resolution. |
+| 7 | UPDATE_NOTES_v2.2-to-v2.3 | Unchanged + add the mode-parallel table from MINOR 1. |
+
+### What stays solid in v1
+
+- The two-rail concept (Gate 1 = "Red required for Tier-1 prod
+  fix"; Gate 3 = "test-lock during Green") is the right
+  factorization.
+- The shared §9 file-fallback pattern with v2.2 ops-triage is the
+  right move (Codex did not push back on this).
+- Mode hierarchy (`off / soft / governed_tdd / strict_tdd`)
+  matches the proven v2.2 ops-triage shape applied to a different
+  rail.
+- Backward-compat: v2.1-era markers without new fields read as
+  `phase: "red"`, `red_proof_accepted: false`. (Codex did not
+  challenge this; the backward-compat smoke remains load-bearing.)
+- The marker-schema-strict-mode lesson from v2.1.0 applies
+  automatically via `smoke-schema-strict-mode.sh` once
+  `schemas/active-finding.schema.json` ships.
+
+---
+
 ## 13. Related
 
 - v2.1 PR #26 — FDTDD foundation (the marker, the helpers, the
