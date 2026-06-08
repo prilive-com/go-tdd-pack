@@ -220,12 +220,15 @@ export PRILIVE_REVIEW_DISABLE=1
 | Topic | File |
 |---|---|
 | Install into a new or existing project | [`docs/ADOPTION_GUIDE.md`](docs/ADOPTION_GUIDE.md) |
-| How AI developers should work with v2.0 | [`docs/AI_DEVELOPER_GUIDE.md`](docs/AI_DEVELOPER_GUIDE.md) |
+| How AI developers should work with the pack | [`docs/AI_DEVELOPER_GUIDE.md`](docs/AI_DEVELOPER_GUIDE.md) |
 | Hook setup, config reference, state machine | [`docs/INTEGRATION_GUIDE.md`](docs/INTEGRATION_GUIDE.md) |
 | Go monorepo specifics | [`docs/MONOREPO_ADOPTION_GUIDE.md`](docs/MONOREPO_ADOPTION_GUIDE.md) |
 | Rollout / install instructions for AI assistants | [`docs/V2_ROLLOUT_GUIDE.md`](docs/V2_ROLLOUT_GUIDE.md) |
-| v2.0 design spec | [`docs/V2_IMPLEMENTATION_SPEC.md`](docs/V2_IMPLEMENTATION_SPEC.md) |
-| Latest update instructions | [`docs/UPDATE_2026-05-17.md`](docs/UPDATE_2026-05-17.md) + [monorepo fix](docs/UPDATE_2026-05-17_monorepo-fix.md) |
+| v2.0 architecture spec (still load-bearing for v2.x) | [`docs/V2_IMPLEMENTATION_SPEC.md`](docs/V2_IMPLEMENTATION_SPEC.md) |
+| **v2.1 → v2.2 upgrade guide** | [`docs/UPDATE_NOTES_v2.1-to-v2.2.md`](docs/UPDATE_NOTES_v2.1-to-v2.2.md) |
+| v2.0 → v2.1 upgrade guide | [`docs/UPDATE_NOTES_v2.0-to-v2.1.md`](docs/UPDATE_NOTES_v2.0-to-v2.1.md) |
+| v2.1.0 postmortem (the schema-strict + model-pin lesson) | [`docs/POSTMORTEM-v2.1.0.md`](docs/POSTMORTEM-v2.1.0.md) |
+| v2.2 design (the opt-in ops-triage rail) | [`docs/PROPOSAL-ops-risk-triage.md`](docs/PROPOSAL-ops-risk-triage.md) |
 | Release history | [`CHANGELOG.md`](CHANGELOG.md) |
 | Claude operating rules | [`CLAUDE.md`](CLAUDE.md) |
 | Codex operating rules | [`AGENTS.md`](AGENTS.md) |
@@ -248,13 +251,13 @@ export PRILIVE_REVIEW_DISABLE=1
 
 The pre-write gate (`[pre_review] enabled = true` in `tdd-pack.toml`, or the per-shell `PRILIVE_PRE_REVIEW_EXPERIMENTAL=1` env override) reviews every `Write`, `Edit`, `MultiEdit`, and `NotebookEdit` action **Claude Code is about to take** through its tool API. That covers file changes — it does not cover everything.
 
-### Scope: code changes, not commands
+### Scope: code review by default; opt-in runtime safety in v2.2
 
-v2.1 removed the Bash matcher. Runtime command safety is a separate concern from code review and out of scope for this pack:
+The default code-review path reviews **file edits only** — `Write`, `Edit`, `MultiEdit`, `NotebookEdit`. v2.1 removed the v2.0-era Bash matcher from the default path because sending every `pwd` / `ls` / `git status` through Codex was wasteful for ChatGPT-subscription users (~6s per call) and an architectural mismatch with code review.
 
-- The starter pack's job is to catch bad code before it lands. The reviewer judges proposed file content for correctness, safety, and data-loss risk.
-- Sending every `pwd` / `ls` / `git status` through Codex was wasteful for ChatGPT-subscription users (~6s per call) and an architectural mismatch with the pack's mission.
-- If you need command-level safety (data-loss prevention, destructive-command interception), that's a runtime-ops concern — see devopspoint or a similar runtime-safety tool. Claude Code's own permission system already covers the obviously dangerous cases (`rm -rf /`, `sudo`, `kubectl delete`, etc.) at the prompt layer.
+**v2.2 added an opt-in Ops Risk Triage rail** for adopters who *also* want runtime-command safety inside the same pack. It is **default-off** (`[ops_triage] enabled = false` in `tdd-pack.toml`); code-review-only adopters see zero behavior change from v2.1.1. When enabled, the rail does NOT route every command through Codex — it uses a three-layer gate (deterministic parser → fast Haiku classifier → Codex deep ops-preflight on escalation only) to keep the hot path fast. See [`docs/PROPOSAL-ops-risk-triage.md`](docs/PROPOSAL-ops-risk-triage.md) and [`docs/UPDATE_NOTES_v2.1-to-v2.2.md`](docs/UPDATE_NOTES_v2.1-to-v2.2.md) for the opt-in flow.
+
+If you don't want any runtime-command safety from this pack at all — that's the default, and your adoption story is unchanged. If you do — copy the three `.example` configs, flip `enabled = true`, and run for a week in `mode = "observe"` before turning the gate on. Claude Code's own permission system still covers obviously dangerous cases (`rm -rf /`, `sudo`, etc.) at the prompt layer regardless.
 
 ### Out-of-band changes
 
@@ -300,12 +303,12 @@ git commit -s -m "Your change description"
 
 ## Project status
 
-- **Current public line:** v2.0.x
+- **Current public line:** v2.2.x (v2.2.0 released 2026-06-07).
 - **License:** Apache-2.0
 - **Maintainer:** Prilive ([github.com/prilive-com](https://github.com/prilive-com))
 - **Primary audience:** Go teams using Claude Code and Codex CLI
-- **Production usage:** validated on one real Go monorepo as of 2026-05-18
-- **Legacy support:** v1.x ceremony architecture is no longer maintained. New adoption should use v2.0.
+- **Production usage:** validated on one real Go monorepo since 2026-05-18; v2.1.0 + v2.2.0 verified via the postmortem A1/A2 live-smoke gate against post-merge clean `main` ([`docs/RELEASE_GUIDE.md`](docs/RELEASE_GUIDE.md) Phase 3a).
+- **Legacy support:** v1.x ceremony architecture is no longer maintained; v2.0.x / v2.1.0 are superseded. New adoption should use v2.2.x.
 
 ---
 

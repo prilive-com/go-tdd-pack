@@ -274,25 +274,32 @@ The pre-write gate hooks into Claude Code's `PreToolUse` event for
 action through Claude's tool API goes through the gate. Two scope
 boundaries to know about:
 
-### 1. The pack reviews file changes, not commands
+### 1. The pack reviews file changes by default; runtime-command safety is opt-in (v2.2+)
 
-v2.1 removed the Bash matcher. Runtime command safety is a separate
-concern from code review and out of scope for this pack:
+The default code-review path covers `Write`, `Edit`, `MultiEdit`,
+`NotebookEdit` — file edits only. v2.1 removed the v2.0-era Bash
+matcher from the default path:
 
-- The starter pack's job is to catch bad code before it lands. The
-  reviewer judges proposed file content for correctness, safety, and
-  data-loss risk.
-- Sending every `pwd` / `ls` / `git status` through Codex was wasteful
-  for ChatGPT-subscription users (~6 seconds per call) and an
-  architectural mismatch with the pack's mission.
-- If you need command-level safety — destructive-command interception,
-  data-loss prevention against `rm -rf`, audit of every shell
-  invocation — that belongs in a runtime-ops tool, not a TDD pack.
-  Consider devopspoint (or a similar sibling plugin) for that
-  responsibility.
+- The starter pack's default job is to catch bad code before it
+  lands. The reviewer judges proposed file content for correctness,
+  safety, and data-loss risk.
+- Sending every `pwd` / `ls` / `git status` through Codex was
+  wasteful for ChatGPT-subscription users (~6 seconds per call) and
+  an architectural mismatch with code review.
 - Claude Code's own permission system already covers the obviously
-  dangerous cases (`sudo`, `kubectl delete`, `rm -rf /`, etc.) at the
-  prompt layer, before they ever hit a hook.
+  dangerous cases (`sudo`, `kubectl delete`, `rm -rf /`, etc.) at
+  the prompt layer.
+
+**v2.2 added an opt-in Ops Risk Triage rail** for adopters who also
+want runtime-command safety inside the same pack. **Default-off**
+(`[ops_triage] enabled = false`); code-review-only adopters see zero
+behavior change. When enabled, it uses a three-layer gate
+(deterministic parser → fast Haiku classifier → Codex deep ops-
+preflight on escalation only) — not "every command through Codex".
+See [`UPDATE_NOTES_v2.1-to-v2.2.md`](UPDATE_NOTES_v2.1-to-v2.2.md)
+for the opt-in flow. If you don't want runtime-command safety from
+this pack at all, leave it disabled — your adoption story is
+unchanged.
 
 ### 2. Anything outside Claude's tool API
 
@@ -364,10 +371,14 @@ and don't want review yet, or the pack misbehaves.
 ## Next steps
 
 - Read [`AI_DEVELOPER_GUIDE.md`](AI_DEVELOPER_GUIDE.md) — what your AI
-  assistant should know about working under v2.0.
+  assistant should know about working under this pack.
 - Skim [`INTEGRATION_GUIDE.md`](INTEGRATION_GUIDE.md) if you want to
   understand the hook/runner mechanics.
+- (Optional, v2.2+) Read
+  [`UPDATE_NOTES_v2.1-to-v2.2.md`](UPDATE_NOTES_v2.1-to-v2.2.md)
+  "Enable the ops rail" if you want runtime-command safety on top of
+  code review. Default-off; opt-in.
 
 ---
 
-_Last updated: 2026-05-18 for v2.0._
+_Last updated: 2026-06-08 for v2.2.0._

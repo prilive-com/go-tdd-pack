@@ -8,6 +8,24 @@
 
 ---
 
+## Version-specific upgrade guides
+
+For known upgrade paths, follow the per-version guide first — it
+covers config-merge deltas, mode-flip surprises, and per-slice
+opt-in flows that the generic TL;DR below does not:
+
+| You are on | You want | Read |
+|---|---|---|
+| v2.1.x | v2.2.0 | [`UPDATE_NOTES_v2.1-to-v2.2.md`](UPDATE_NOTES_v2.1-to-v2.2.md) |
+| v2.0.x | v2.1.0 (then v2.2.0) | [`UPDATE_NOTES_v2.0-to-v2.1.md`](UPDATE_NOTES_v2.0-to-v2.1.md), then the v2.1→v2.2 guide |
+| v1.9.x | v2.1.0 (then v2.2.0) | "Coming from v1.x" section in [`UPDATE_NOTES_v2.0-to-v2.1.md`](UPDATE_NOTES_v2.0-to-v2.1.md), then the v2.1→v2.2 guide |
+
+The TL;DR below is the generic recipe for releases that DON'T have a
+dedicated upgrade guide (typically patch releases with no config or
+hook-registration changes).
+
+---
+
 ## TL;DR
 
 ```bash

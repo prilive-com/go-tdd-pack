@@ -352,4 +352,12 @@ quality caps, etc.).
 
 ---
 
-_Last updated: 2026-05-18 for v2.0._
+_Last updated: 2026-06-08 for v2.2.0._
+
+_v2.1 added four false-positive rails on round-1 findings + the FDTDD
+active-finding foundation + Gate 4 artifact protection. v2.2 added
+the opt-in Ops Risk Triage rail (a three-layer Bash gate, default-
+off). Working under v2.2 is the same as working under v2.0 unless an
+adopter opts into the ops-triage rail — see
+[`UPDATE_NOTES_v2.1-to-v2.2.md`](UPDATE_NOTES_v2.1-to-v2.2.md) for
+what changes when they do._
