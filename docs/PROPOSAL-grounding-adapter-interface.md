@@ -336,6 +336,97 @@ a one-line config edit. The 80% of the runner stays shared.
 
 ---
 
+## 12. Addendum — Codex review findings (2026-06-08)
+
+A second-model adversarial review by Codex (gpt-5.5, high reasoning)
+caught real flaws in v1 of this proposal. The architectural
+direction (extract Go bits behind a contract) is right; the
+operational details around install / parsing / compatibility need
+hardening before slice 2 starts.
+
+### BLOCKER findings (2) — both accepted
+
+1. **No plugin install / ownership model.** v1 says "sibling packs
+   ship JUST `runner/grounding-adapters/<lang>.sh`" but hand-waves
+   how that file lands in an existing adopter repo, who owns it
+   during base-pack upgrades, how collisions are detected, and what
+   happens when an adopter has both Go-only and Python-via-sibling-
+   pack installs side by side.
+   - **Change**: Add a new §3.5 "Adapter installation + ownership"
+     to v2 covering: (a) sibling-pack `install.sh` writes adapters
+     to `runner/grounding-adapters/` under canonical names matching
+     pack name; (b) base-pack upgrades NEVER overwrite files in
+     `runner/grounding-adapters/` (they're sibling-owned); (c)
+     collision detection: install script aborts with a clear error
+     if an adapter name already exists from a different source; (d)
+     adopter docs explain the install/uninstall/upgrade flow per
+     pack.
+
+2. **Acceptance-criteria contradiction.** v1 claims "output format
+   unchanged" AND "byte-for-byte equality for Go-only adopters" AND
+   introduces a new `## Tool grounding — go (...)` header. Current
+   `tool-grounding.sh` does NOT emit that exact header (it emits
+   `## Tool grounding (pre-executed before this review)`). Slice 2
+   cannot satisfy all three constraints simultaneously.
+   - **Change**: Define the current `runner/tool-grounding.sh`
+     output exactly as the COMPATIBILITY BASELINE. Then either (a)
+     keep the Go adapter's output byte-identical to today's
+     header, and only multi-adapter mode adds language headers; or
+     (b) explicitly declare the user-visible header change in
+     `CHANGELOG.md` and update prompts that rely on the header
+     text. v2 picks (a) — the v1.0 adapter interface emits the
+     legacy header when there's exactly one adapter; the new
+     per-language header only appears in polyglot mode.
+
+### MAJOR findings (6) — all accepted
+
+| # | Finding | Change |
+|---|---|---|
+| M1 | JSON stdin + TOML config parser dependency not specified. Bash adapters need reliable JSON parsing; orchestrator needs reliable TOML parsing. Ad-hoc breaks on valid input. | v2 specifies: orchestrator MUST use `jq` (already required by every other pack runner); adapters MUST use `jq` or fail loudly with "jq required". Smoke covers missing-jq behavior. |
+| M2 | Adapter failure visibility too weak. "See runner log" doesn't reach Codex. A failed security/vulnerability adapter becomes invisible in the review prompt. | v2 §3.3 expanded: failed adapters' last ~500 chars of stderr go DIRECTLY into the grounding block ("(adapter `<name>` failed (exit `<code>`): `<tail>`)") in addition to the runner log. Smoke covers this. |
+| M3 | No validation on adapter names. Values like `../x`, names with whitespace, symlinks, shadowed executables → security + correctness risk. | v2 §3.4 adds: adapter names MUST match `^[a-z][a-z0-9_-]*$`; orchestrator rejects others with a clear error; resolution restricted to `runner/grounding-adapters/<name>.sh` (no traversal). Smoke covers invalid names. |
+| M4 | Total-cap truncation may cut through markdown code fences or hide later adapters' output entirely if earlier adapter is verbose. | v2 §5 truncation strategy: truncate at SECTION boundaries when possible; close any open fences; reserve a small per-adapter status budget (~200 chars per configured adapter) so every adapter at least surfaces its name + status even when content is truncated. |
+| M5 | Slice 1 as "docs only" is not independently shippable; the real risk is parity, not documentation. | v2 slice 1 reframed as a "contract spike": ship the spec doc AND a golden-output fixture in `test/fixtures/grounding-parity/` that the slice 2 refactor must reproduce byte-for-byte. The fixture IS the load-bearing artifact. |
+| M6 | Several unverified claims ("~5ms per adapter", "half a day", "industry-standard residual trust", "behavior stays identical"). | v2 adds explicit verification: benchmark the orchestrator overhead on a 1000-file changed-list (slice 2 smoke); the byte-for-byte parity smoke is the "identical behavior" proof; "residual trust" reframed as a documented policy decision, not an empirical standard. |
+
+### MINOR findings (2) — accepted
+
+- **Adapter ordering / polyglot composition** under-specified.
+  Each adapter block must include `adapter_name`, `executable_path`,
+  `relevant_file_count`, and the `discovery_basis` it used (e.g.
+  "walked to nearest `go.mod`"). Helps Codex (and humans)
+  distinguish overlapping language claims.
+- **The architectural direction is sound** (Codex's words: "the
+  core architectural instinct: separating language-specific tool
+  execution from the shared review runner is the right direction").
+  Config-driven discovery (Option B in §4) is also endorsed. The
+  proposal's weakness is operational contract details, not the
+  interface shape itself.
+
+### Revised slice plan
+
+| Slice | v1 scope | v2 scope (post-addendum) |
+|---|---|---|
+| 1 | Define + document contract (docs only) | **Contract spike**: spec doc + golden-output fixture under `test/fixtures/grounding-parity/<diff-id>/expected.md`. The fixture is the load-bearing parity artifact. |
+| 2 | Extract `go.sh` adapter + refactor orchestrator | Same, plus byte-for-byte parity smoke against the slice 1 fixture. Plus §3.4 adapter-name validation. Plus §3.5 install-script contract documentation. |
+| 3 | Smoke: discovery / cap / failure / mismatch | Smoke now also covers M2 (failed-adapter stderr-in-block), M3 (invalid adapter names rejected), M4 (truncation at section boundaries with per-adapter status budget). |
+| 4 | `python.sh.example` reference adapter | Unchanged, but mention M1's jq requirement explicitly in the example. |
+| 5 | Adopter doc update | Unchanged. |
+
+### What stays solid in v1
+
+- The three-jobs framing (discover / run tools / format) is exactly
+  the right slicing.
+- Config-driven adapter discovery (`[grounding] adapters = [...]`)
+  is endorsed by Codex over auto-detect.
+- The default `adapters = ["go"]` preserves zero-config behavior
+  for existing adopters.
+- Polyglot composition (independent adapters, concatenated output)
+  is the right tradeoff.
+- The smoke-counterfactual discipline carries through correctly.
+
+---
+
 ## 11. Related
 
 - `runner/tool-grounding.sh` — the script being refactored.
