@@ -63,6 +63,56 @@ Not blocking for v2.0.0 launch.
 
 ---
 
+## Pre-implementation discipline — proposal review
+
+**Before any implementation slice for a new release begins, every
+`docs/PROPOSAL-*.md` doc that will drive that release MUST get a
+Codex adversarial review pass.**
+
+Why this exists: the v2.3 proposal cycle (2026-06-08) surfaced
+**8 BLOCKER findings across 3 proposals** that the author missed
+when writing them. Without the review pass, slice 2 of
+`PROPOSAL-safer-execution-mode.md` would have shipped a "safe"
+worktree fallback that doesn't actually prevent the writes it
+claims to prevent. Two models from different families catch
+different blind spots — same philosophy the whole pack is built
+on, applied to design docs.
+
+How to run it (one command per proposal):
+
+```bash
+bash scripts/review/proposal-review.sh docs/PROPOSAL-<name>.md
+```
+
+The script handles the gotchas for you: pins `gpt-5.5` (avoids
+v2.1.0 Bug 2), passes `--ignore-user-config` (avoids
+openai/codex#15451), sets `model_reasoning_effort=high`, applies
+the standard critique prompt from `prompts/proposal-critique.md`,
+writes an audit trail to
+`.tdd/review/proposal-review-<name>-<sha>.txt`, and surfaces the
+findings inline.
+
+What to do with the findings:
+
+- **BLOCKER**: amend the proposal (a "Codex review findings"
+  addendum section, as `PROPOSAL-safer-execution-mode.md`
+  §13, `PROPOSAL-grounding-adapter-interface.md` §12,
+  `PROPOSAL-fdtdd-stage1-rails.md` §14 demonstrate) before any
+  slice 1 work begins. Accept the finding, push back honestly
+  with reasoning, or restructure the proposal.
+- **MAJOR**: same addendum pattern, but the change can be
+  smaller (a slice-plan tweak, a clarification, an added open
+  question).
+- **MINOR**: optional; document in the addendum for the audit
+  trail.
+
+The addendum pattern is load-bearing: it preserves the v1
+proposal text (so the audit trail shows what we shipped initially)
+AND records what we learned (so future maintainers see why slice
+1 differs from the original §7).
+
+---
+
 ## Per-release checklist
 
 For every release, run in order. Each step is small; skipping any of
