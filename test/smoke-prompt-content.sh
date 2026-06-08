@@ -107,21 +107,35 @@ for f in "${PROJECT_ROOT}/runner/review-runner.sh" "${PROJECT_ROOT}/runner/codex
   fi
 done
 
-info "[5] README.md — pre-write gate ceiling section (scope: file changes only post-v2.1)"
+info "[5] README.md — pre-write gate ceiling + scope evolution (file-default; v2.2 opt-in runtime safety)"
 README="${PROJECT_ROOT}/README.md"
 require_phrase "${README}" 'What the gate does NOT cover'      "README ceiling heading"
-require_phrase "${README}" 'code changes, not commands'        "README scope-is-file-changes message"
-require_phrase "${README}" 'v2.1 removed the Bash matcher'     "README documents Bash matcher removal"
-require_phrase "${README}" 'devopspoint|runtime-safety|sibling plugin' "README points to a sibling runtime-safety tool"
+# v2.2 rewrote this section: default code-review scope is file edits;
+# runtime command safety is the opt-in Ops Risk Triage rail (default-
+# off). The README must teach BOTH facts: what the file-edit default
+# covers + what the v2.2 opt-in adds on top.
+require_phrase "${README}" 'file edits only|file changes only|code review.* default|reviews .*file edits' \
+  "README states default scope is file edits"
+require_phrase "${README}" 'v2.1 removed the .*Bash matcher|removed the v2.0-era Bash matcher' \
+  "README documents v2.1 Bash matcher removal"
+require_phrase "${README}" 'v2.2 added an opt-in|Ops Risk Triage|ops_triage' \
+  "README documents v2.2 opt-in Ops Risk Triage rail"
+require_phrase "${README}" 'default-off|enabled = false|opt-in' \
+  "README states v2.2 ops-triage is default-off / opt-in"
 require_phrase "${README}" 'OS-level audit|seccomp|eBPF|auditd' "README OS-level mitigation"
 require_phrase "${README}" 'Out-of-band|out-of-band|bypasses Claude.s tool API' "README out-of-band changes class"
 
-info "[6] docs/ADOPTION_GUIDE.md — extended ceiling discussion"
+info "[6] docs/ADOPTION_GUIDE.md — extended ceiling discussion (file-default + v2.2 opt-in rail)"
 GUIDE="${PROJECT_ROOT}/docs/ADOPTION_GUIDE.md"
 require_phrase "${GUIDE}" 'Architectural ceiling'              "GUIDE ceiling heading"
-require_phrase "${GUIDE}" 'file changes, not commands'         "GUIDE scope statement"
-require_phrase "${GUIDE}" 'v2.1 removed the Bash matcher'      "GUIDE documents Bash matcher removal"
-require_phrase "${GUIDE}" 'devopspoint|sibling plugin'         "GUIDE points to sibling runtime-safety tool"
+# v2.2 reframed this section: default code-review scope is file edits;
+# runtime command safety is the opt-in Ops Risk Triage rail.
+require_phrase "${GUIDE}" 'file edits only|file changes, not commands|reviews file changes' \
+  "GUIDE states default scope is file edits"
+require_phrase "${GUIDE}" 'v2.1 removed the .*Bash matcher|removed the v2.0-era Bash matcher' \
+  "GUIDE documents v2.1 Bash matcher removal"
+require_phrase "${GUIDE}" 'Ops Risk Triage|ops_triage|opt-in.* runtime' \
+  "GUIDE mentions v2.2 opt-in Ops Risk Triage rail"
 require_phrase "${GUIDE}" 'outside Claude.s tool API'          "GUIDE out-of-band class"
 require_phrase "${GUIDE}" 'seccomp|eBPF|auditd'                "GUIDE OS-level mitigation"
 
