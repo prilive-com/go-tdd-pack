@@ -75,6 +75,12 @@ CLAUDE.local.md
 # existing .claude/settings.json. Local-only audit copies; never commit.
 .claude/settings.json.bak-*
 
+# Proposal-review artifacts (scripts/review/proposal-review.sh). One
+# file per (proposal, SHA) run; local audit trail showing which Codex
+# pass each proposal got before its slice 1 started. Same convention as
+# .tdd/release/ for the pre-tag-smoke artifacts.
+.tdd/review/
+
 # OS / editor
 .DS_Store
 .idea/
