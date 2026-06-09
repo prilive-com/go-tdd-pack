@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-06-09T01:00:00Z",
+  "host": {
+    "codex_binary": "<path-to-codex-binary>",
+    "codex_version": "codex-cli 0.129.0",
+    "kernel": "Linux 6.8.0-101-generic"
+  },
+  "static": {
+    "sandbox_modes": [
+      "read-only",
+      "workspace-write",
+      "danger-full-access"
+    ],
+    "flags": {
+      "sandbox": true,
+      "add_dir": true,
+      "ephemeral": true,
+      "ignore_rules": true,
+      "dangerously_bypass_approvals_and_sandbox": true
+    }
+  },
+  "empirical": {
+    "probe_a": {
+      "label": "A_tmp_write_default",
+      "command": "echo TEST > /tmp/codex-probe-A-<uid>.txt",
+      "target": "/tmp/codex-probe-A-<uid>.txt",
+      "exit_code": 2,
+      "stderr": "/bin/sh: 1: cannot create /tmp/codex-probe-A-<uid>.txt: Read-only file system",
+      "file_present_after": "false"
+    },
+    "probe_b": {
+      "label": "B_cwd_write_default",
+      "command": "echo TEST > ./codex-probe-B-<uid>.txt",
+      "target": "<tmp-dir>/codex-probe-B-<uid>.txt",
+      "exit_code": 2,
+      "stderr": "/bin/sh: 1: cannot create ./codex-probe-B-<uid>.txt: Read-only file system",
+      "file_present_after": "false"
+    },
+    "probe_c": {
+      "label": "C_read_etc_hostname",
+      "path": "/etc/hostname",
+      "exit_code": 0,
+      "stdout": "<hostname>",
+      "stderr": ""
+    }
+  },
+  "notes": "REFERENCE EXAMPLE — captured on Linux against Codex CLI 0.129.0 as part of v2.3 task #105 slice 1. Identifying values (binary path, hostname, /tmp uid suffixes) are placeholdered. Per-host probe output lives at .tdd/research/codex-sandbox-features.json and is gitignored. Diff your local probe against this to detect upstream Codex CLI behavior changes."
+}
