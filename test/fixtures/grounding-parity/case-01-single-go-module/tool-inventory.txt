@@ -1,0 +1,10 @@
+# Tool inventory snapshot — captured by capture.sh
+# Slice 2's parity smoke compares the current host's inventory
+# against this. If they differ, the smoke skips with a clear note.
+
+go=installed
+gofmt=installed
+staticcheck=missing
+golangci-lint=missing
+govulncheck=missing
+gosec=missing
