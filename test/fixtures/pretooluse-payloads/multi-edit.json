@@ -1,0 +1,25 @@
+{
+  "_source": "Spec-derived from code.claude.com/docs/en/tools — MultiEdit tool reference. Slice 2 will refine to capture-driven fixture.",
+  "_tool": "MultiEdit",
+  "_slice_1_decision": "SINGLE-FILE per Claude Code docs. The 'edits' array is multiple replacements WITHIN the one file_path. Gate parser MUST NOT iterate over edits to look for multiple file paths — there is only one. This closes MAJOR M2 in the Codex addendum (2026-06-08): the v1 proposal's 'check ALL of them' fan-out requirement is DROPPED.",
+  "session_id": "01HZAY4N8MV5GTQH7E5KJ4XK7P",
+  "tool_name": "MultiEdit",
+  "tool_input": {
+    "file_path": "/home/example/repo/internal/auth/refresh.go",
+    "edits": [
+      {
+        "old_string": "import \"time\"",
+        "new_string": "import (\n\t\"sync\"\n\t\"time\"\n)"
+      },
+      {
+        "old_string": "type Refresher struct {\n\ttokens map[string]Token\n}",
+        "new_string": "type Refresher struct {\n\tmu     sync.Mutex\n\ttokens map[string]Token\n}"
+      },
+      {
+        "old_string": "func (r *Refresher) Get(id string) Token {",
+        "new_string": "func (r *Refresher) Get(id string) Token {\n\tr.mu.Lock()\n\tdefer r.mu.Unlock()",
+        "replace_all": false
+      }
+    ]
+  }
+}

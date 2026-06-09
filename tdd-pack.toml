@@ -26,6 +26,27 @@ max_codex_calls_per_cycle = 8
 # Hard cap on cycle wall time (minutes). xhigh reasoning is slow.
 max_cycle_minutes = 30
 
+# FDTDD Stage 1 mode hierarchy. Drives Gate 1 (Red required for Tier-1
+# prod fix) and Gate 3 (test-lock during Green). Consumed by
+# hooks/inject-findings.sh today; Gate 1 + Gate 3 wire in slice 2 +
+# slice 4 of the v2.3 Stage 1 rollout.
+#
+#   off          → both gates disabled. inject-findings rail also off.
+#   soft         → both gates allow; inject-findings emits soft
+#                  guidance text only. SHIPPED DEFAULT through v2.3
+#                  slice 2 (gate ready-but-not-active).
+#   governed_tdd → gates emit ask prompts; operator decides per-edit.
+#                  Slice 3 activates Gate 1 in this mode.
+#   strict_tdd   → gates emit hard denies; bypass requires
+#                  /finding-accept-red or /finding-restart-red.
+#                  Slice 5 activates Gate 3 in this mode.
+#
+# Default soft so existing v2.1 / v2.2 adopters do not see new
+# gating until they explicitly opt in. Bump to governed_tdd or
+# strict_tdd in your project's tdd-pack.toml override once your
+# .tdd/tiers.toml is set up and the team is ready to enforce.
+mode = "soft"
+
 [codex]
 # Model selection.
 #
