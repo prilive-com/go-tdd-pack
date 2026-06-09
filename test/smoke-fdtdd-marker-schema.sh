@@ -32,7 +32,13 @@ PASS_COUNT=0
 [[ -f "${SCHEMA}" ]] || fail "schema not found: ${SCHEMA}"
 
 CLEANUP_PATHS=()
-trap 'for p in "${CLEANUP_PATHS[@]}"; do [[ -n "$p" ]] && rm -rf "$p"; done' EXIT
+cleanup_all() {
+  local p
+  for p in "${CLEANUP_PATHS[@]}"; do
+    [[ -n "$p" ]] && rm -rf "$p"
+  done
+}
+trap cleanup_all EXIT
 
 make_sandbox() {
   local d

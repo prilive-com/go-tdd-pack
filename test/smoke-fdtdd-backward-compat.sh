@@ -34,7 +34,13 @@ info() { echo "▶ $*"; }
 PASS_COUNT=0
 
 CLEANUP_PATHS=()
-trap 'for p in "${CLEANUP_PATHS[@]}"; do [[ -n "$p" ]] && rm -rf "$p"; done' EXIT
+cleanup_all() {
+  local p
+  for p in "${CLEANUP_PATHS[@]}"; do
+    [[ -n "$p" ]] && rm -rf "$p"
+  done
+}
+trap cleanup_all EXIT
 
 make_sandbox() {
   local d
