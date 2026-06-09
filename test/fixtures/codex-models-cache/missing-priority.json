@@ -1,0 +1,21 @@
+{
+  "client_version": "0.129.0",
+  "fetched_at": "2026-06-08T20:28:06Z",
+  "models": [
+    {
+      "slug": "model-with-no-priority",
+      "display_name": "No Priority",
+      "description": "Missing priority field. Resolver MUST drop this entry — unsortable.",
+      "visibility": "list",
+      "supported_in_api": true
+    },
+    {
+      "slug": "gpt-5.5",
+      "display_name": "GPT-5.5",
+      "description": "Has priority. Wins after the no-priority entry is dropped.",
+      "priority": 9,
+      "visibility": "list",
+      "supported_in_api": true
+    }
+  ]
+}

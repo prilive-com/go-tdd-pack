@@ -1,0 +1,22 @@
+{
+  "client_version": "0.129.0",
+  "fetched_at": "2026-06-08T20:28:06Z",
+  "models": [
+    {
+      "slug": "gpt-5.5-subscription-only",
+      "display_name": "GPT-5.5 (subscription-only)",
+      "description": "Top priority but supported_in_api=false. Under subscription auth → returned. Under api_key auth → skipped (resolver MUST filter).",
+      "priority": 5,
+      "visibility": "list",
+      "supported_in_api": false
+    },
+    {
+      "slug": "gpt-5.4",
+      "display_name": "GPT-5.4",
+      "description": "Lower priority but API-reachable. Wins under api_key auth.",
+      "priority": 16,
+      "visibility": "list",
+      "supported_in_api": true
+    }
+  ]
+}

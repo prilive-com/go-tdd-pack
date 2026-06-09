@@ -1,0 +1,9 @@
+This file is intentionally NOT JSON.
+
+It simulates a corrupted ~/.codex/models_cache.json — disk error,
+partial write, manual editing accident, etc.
+
+Resolver behavior (slice 2): file exists, parse fails, emit warning
+to stderr, fall back to pinned default. Exit code: 0. Never crash.
+
+Used by test/smoke-resolve-model.sh case "parse failure path".

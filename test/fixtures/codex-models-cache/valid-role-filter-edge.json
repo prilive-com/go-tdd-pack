@@ -1,0 +1,38 @@
+{
+  "client_version": "0.129.0",
+  "fetched_at": "2026-06-08T20:28:06Z",
+  "models": [
+    {
+      "slug": "codex-auto-review",
+      "display_name": "Codex Auto Review",
+      "description": "Promoted to top priority for this fixture — proves the role-suitability filter drops it BEFORE priority sort. Without the filter, a generic-UI-promoted model could win the review-round role.",
+      "priority": 1,
+      "visibility": "list",
+      "supported_in_api": true
+    },
+    {
+      "slug": "gpt-5.6-spark",
+      "display_name": "GPT-5.6-Spark",
+      "description": "Spark-class model — likely role-inappropriate for review rounds. Also planted at high priority to prove the *-spark filter rule fires.",
+      "priority": 2,
+      "visibility": "list",
+      "supported_in_api": true
+    },
+    {
+      "slug": "gpt-5.4-mini",
+      "display_name": "GPT-5.4-Mini",
+      "description": "Mini variant — filtered out by the *-mini rule.",
+      "priority": 3,
+      "visibility": "list",
+      "supported_in_api": true
+    },
+    {
+      "slug": "gpt-5.5",
+      "display_name": "GPT-5.5",
+      "description": "Frontier model. Should win after filters drop the three above.",
+      "priority": 9,
+      "visibility": "list",
+      "supported_in_api": true
+    }
+  ]
+}
