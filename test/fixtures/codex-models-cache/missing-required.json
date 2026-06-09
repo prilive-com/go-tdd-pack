@@ -1,0 +1,10 @@
+{
+  "models": [
+    {
+      "slug": "gpt-5.5",
+      "priority": 9,
+      "visibility": "list",
+      "supported_in_api": true
+    }
+  ]
+}

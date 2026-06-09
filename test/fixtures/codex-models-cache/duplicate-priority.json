@@ -1,0 +1,22 @@
+{
+  "client_version": "0.129.0",
+  "fetched_at": "2026-06-08T20:28:06Z",
+  "models": [
+    {
+      "slug": "gpt-5.5-beta",
+      "display_name": "GPT-5.5 Beta",
+      "description": "Same priority as gpt-5.5. Resolver MUST pick deterministically — slice 2 decision: sort by slug ascending as tiebreaker.",
+      "priority": 9,
+      "visibility": "list",
+      "supported_in_api": true
+    },
+    {
+      "slug": "gpt-5.5",
+      "display_name": "GPT-5.5",
+      "description": "Same priority. Lexicographically AFTER gpt-5.5-beta, so beta wins with slug-asc tiebreaker.",
+      "priority": 9,
+      "visibility": "list",
+      "supported_in_api": true
+    }
+  ]
+}

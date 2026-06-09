@@ -1,0 +1,22 @@
+{
+  "client_version": "0.129.0",
+  "fetched_at": "2026-06-08T20:28:06Z",
+  "models": [
+    {
+      "slug": "internal-staging-model",
+      "display_name": "Internal Staging",
+      "description": "Top priority but visibility=hide — must be skipped before sort.",
+      "priority": 1,
+      "visibility": "hide",
+      "supported_in_api": true
+    },
+    {
+      "slug": "gpt-5.5",
+      "display_name": "GPT-5.5",
+      "description": "List-visible — wins after the staging model is filtered.",
+      "priority": 9,
+      "visibility": "list",
+      "supported_in_api": true
+    }
+  ]
+}

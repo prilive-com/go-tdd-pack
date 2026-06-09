@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Codex CLI models_cache.json (external — tolerant)",
+  "description": "Schema for the ~/.codex/models_cache.json file Codex CLI maintains. Used by runner/lib/resolve-model.sh to validate the cache before reading. INTENTIONALLY TOLERANT (additionalProperties NOT forbidden): this is an external file whose schema we do not own. Codex CLI may add fields in any release; the resolver only cares about the fields below. Strict-mode smoke (test/smoke-schema-strict-mode.sh) does not flag this schema because no object inside uses additionalProperties:false. Verified against Codex CLI 0.129.0 (2026-06-08). MAJOR M2 closure from PROPOSAL-model-auto-select.md addendum: declares the required-field set the resolver depends on; missing/malformed = resolver falls back to pinned default with stderr note.",
+  "type": "object",
+  "required": ["client_version", "fetched_at", "models"],
+  "properties": {
+    "client_version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Codex CLI version that wrote the cache (e.g. '0.129.0'). The resolver logs this for version-drift visibility but does not gate on it."
+    },
+    "etag": {
+      "type": "string",
+      "description": "HTTP ETag from the upstream model-list endpoint. Cache-validation hint; the resolver does not consume it."
+    },
+    "fetched_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 timestamp of last cache refresh. The resolver uses this to compute staleness (warn if older than 14 days; never falls back on stale)."
+    },
+    "models": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["slug", "priority", "visibility"],
+        "properties": {
+          "slug": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The value passed to `codex exec -m <slug>`. The resolver echoes this when the slug wins selection."
+          },
+          "display_name": {
+            "type": "string",
+            "description": "Human-readable name (e.g. 'GPT-5.5'). Not consumed by the resolver."
+          },
+          "description": {
+            "type": "string",
+            "description": "Model description. Not consumed by the resolver."
+          },
+          "default_reasoning_level": {
+            "type": "string",
+            "description": "Default reasoning effort (low/medium/high/xhigh). Not consumed by the resolver — adopters control reasoning via the separate [codex] reasoning_effort knob."
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Codex CLI's internal model ranking — LOWER NUMBER = HIGHER RANK. Verified against gpt-5.5=9 (frontier), gpt-5.4=16, gpt-5.4-mini=23 in 0.129.0. The resolver sorts ascending. Integer-typed because Codex CLI 0.129.0 emits integers; if a future release emits strings/null/missing, the resolver falls back (MAJOR M2 fixture coverage in test/fixtures/codex-models-cache/)."
+          },
+          "visibility": {
+            "type": "string",
+            "enum": ["list", "hide"],
+            "description": "'list' = appears in Codex CLI menus; 'hide' = internal/not-end-user-facing (e.g. 'codex-auto-review'). The resolver filters out 'hide' before sorting. WARNING (BLOCKER 1 from addendum): visibility is a UI signal, NOT proof of account entitlement. The cache schema does NOT encode quota state, org scoping, or paid entitlement; a 'list'-visible model may still fail at API call time. The resolver's role-suitability filter (configured in resolve-model.sh) compensates for known-bad cases (*-auto-review, *-spark, *-mini)."
+          },
+          "supported_in_api": {
+            "type": "boolean",
+            "description": "Whether the slug is reachable via the OpenAI API (true) or only via Codex CLI's first-party path / subscription auth (false). The resolver excludes supported_in_api=false models when API-key auth is detected (per MINOR-addendum auth-mode detection)."
+          }
+        }
+      },
+      "description": "Array of cached model entries. The resolver requires at least one entry; an empty list falls back to the pinned default with a stderr note."
+    }
+  }
+}

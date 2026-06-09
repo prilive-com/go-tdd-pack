@@ -1,0 +1,22 @@
+{
+  "client_version": "0.129.0",
+  "fetched_at": "2026-06-08T20:28:06Z",
+  "models": [
+    {
+      "slug": "wrong-type-priority",
+      "display_name": "Wrong Type",
+      "description": "priority is a string, not an integer. Resolver MUST drop this — can't sort.",
+      "priority": "high",
+      "visibility": "list",
+      "supported_in_api": true
+    },
+    {
+      "slug": "gpt-5.5",
+      "display_name": "GPT-5.5",
+      "description": "Integer priority. Wins.",
+      "priority": 9,
+      "visibility": "list",
+      "supported_in_api": true
+    }
+  ]
+}
