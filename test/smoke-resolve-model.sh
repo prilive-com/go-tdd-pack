@@ -76,30 +76,144 @@ echo "${ERR}" | grep -qE 'cli-default|v2.1.1|defers' || fail "case 3: expected d
 pass "cli-default: '' + deprecation note on stderr (MAJOR M3 closure)"
 PASS_COUNT=$((PASS_COUNT+1))
 
-info "[4] auto (stub) → fallback + slice-1 stub warning"
-OUT=$(resolve_codex_model "auto" 2>/dev/null)
-ERR=$(resolve_codex_model "auto" 2>&1 >/dev/null)
-[[ "${OUT}" == "gpt-5.5" ]] || fail "case 4: expected default fallback gpt-5.5, got: '${OUT}'"
-echo "${ERR}" | grep -qE 'slice 1|stub|auto' || fail "case 4: expected stub warning, got: ${ERR}"
-pass "auto (stub): → gpt-5.5 with stub-warning on stderr (slice 2 will read cache)"
+info "[4] auto + missing cache → fallback + warning"
+OUT=$(PRILIVE_MODELS_CACHE=/nonexistent/cache.json resolve_codex_model "auto" 2>/dev/null)
+ERR=$(PRILIVE_MODELS_CACHE=/nonexistent/cache.json resolve_codex_model "auto" 2>&1 >/dev/null)
+[[ "${OUT}" == "gpt-5.5" ]] || fail "case 4: expected fallback gpt-5.5, got: '${OUT}'"
+echo "${ERR}" | grep -qE 'absent|missing|cache' || fail "case 4: expected absent-cache warning, got: ${ERR}"
+pass "auto: missing cache → fallback + absent-cache warning"
 PASS_COUNT=$((PASS_COUNT+1))
 
-info "[4b] auto (stub) honors PRILIVE_MODEL_FALLBACK override"
-OUT=$(PRILIVE_MODEL_FALLBACK=gpt-4.9 resolve_codex_model "auto" 2>/dev/null)
+info "[4b] auto honors PRILIVE_MODEL_FALLBACK override on fallback path"
+OUT=$(PRILIVE_MODELS_CACHE=/nonexistent PRILIVE_MODEL_FALLBACK=gpt-4.9 resolve_codex_model "auto" 2>/dev/null)
 [[ "${OUT}" == "gpt-4.9" ]] || fail "case 4b: env override ignored; got '${OUT}'"
-pass "auto: PRILIVE_MODEL_FALLBACK=gpt-4.9 → gpt-4.9 (env overrides fallback)"
+pass "auto: PRILIVE_MODEL_FALLBACK=gpt-4.9 → gpt-4.9 on fallback path"
 PASS_COUNT=$((PASS_COUNT+1))
 
-info "[4c] auto stub warning includes auth_mode hint (default = subscription)"
-ERR=$(resolve_codex_model "auto" 2>&1 >/dev/null)
-echo "${ERR}" | grep -qF 'subscription' || fail "case 4c: expected 'subscription' in stub warning, got: ${ERR}"
-pass "auto: default auth_mode=subscription surfaces in warning"
+info "[4c] auto with valid-typical fixture → resolves to gpt-5.5 (top priority)"
+OUT=$(PRILIVE_MODELS_CACHE="${FIXTURE_DIR}/valid-typical.json" resolve_codex_model "auto" 2>/dev/null)
+[[ "${OUT}" == "gpt-5.5" ]] || fail "case 4c: expected gpt-5.5 from cache, got: '${OUT}'"
+pass "auto + valid-typical cache → gpt-5.5 (priority 9, list-visible)"
 PASS_COUNT=$((PASS_COUNT+1))
 
-info "[4d] auto stub honors explicit auth_mode arg"
-ERR=$(resolve_codex_model "auto" "api_key" 2>&1 >/dev/null)
-echo "${ERR}" | grep -qF 'api_key' || fail "case 4d: expected 'api_key' in stub warning, got: ${ERR}"
-pass "auto: explicit auth_mode=api_key threads through to warning"
+info "[4d] auto with valid-role-filter-edge → filters role-inappropriate, returns gpt-5.5"
+OUT=$(PRILIVE_MODELS_CACHE="${FIXTURE_DIR}/valid-role-filter-edge.json" resolve_codex_model "auto" 2>/dev/null)
+[[ "${OUT}" == "gpt-5.5" ]] || fail "case 4d: expected gpt-5.5 after role filter, got: '${OUT}' (filter must drop codex-auto-review/-spark/-mini)"
+pass "auto: role-suitability filter drops *-auto-review, *-spark, *-mini → gpt-5.5 (closes BLOCKER 1/MAJOR M1)"
+PASS_COUNT=$((PASS_COUNT+1))
+
+info "[4e] auto with valid-hide-edge → skips visibility=hide, returns gpt-5.5"
+OUT=$(PRILIVE_MODELS_CACHE="${FIXTURE_DIR}/valid-hide-edge.json" resolve_codex_model "auto" 2>/dev/null)
+[[ "${OUT}" == "gpt-5.5" ]] || fail "case 4e: expected gpt-5.5 after hide-filter, got: '${OUT}'"
+pass "auto: visibility=hide filtered → gpt-5.5"
+PASS_COUNT=$((PASS_COUNT+1))
+
+info "[4f] auto + api-only-edge + subscription → returns subscription-only top entry"
+OUT=$(PRILIVE_MODELS_CACHE="${FIXTURE_DIR}/valid-api-only-edge.json" resolve_codex_model "auto" "subscription" 2>/dev/null)
+[[ "${OUT}" == "gpt-5.5-subscription-only" ]] || fail "case 4f: subscription should keep supported_in_api=false top model; got '${OUT}'"
+pass "auto: subscription auth keeps supported_in_api=false top entry"
+PASS_COUNT=$((PASS_COUNT+1))
+
+info "[4g] auto + api-only-edge + api_key → skips subscription-only, returns next"
+OUT=$(PRILIVE_MODELS_CACHE="${FIXTURE_DIR}/valid-api-only-edge.json" resolve_codex_model "auto" "api_key" 2>/dev/null)
+[[ "${OUT}" == "gpt-5.4" ]] || fail "case 4g: api_key should skip supported_in_api=false; got '${OUT}'"
+pass "auto: api_key auth filters supported_in_api=false, returns next-priority"
+PASS_COUNT=$((PASS_COUNT+1))
+
+info "[4h] auto + missing-priority → drops broken entry, returns next"
+OUT=$(PRILIVE_MODELS_CACHE="${FIXTURE_DIR}/missing-priority.json" resolve_codex_model "auto" 2>/dev/null)
+[[ "${OUT}" == "gpt-5.5" ]] || fail "case 4h: expected gpt-5.5 after dropping no-priority entry; got '${OUT}'"
+pass "auto: missing priority → entry dropped → gpt-5.5"
+PASS_COUNT=$((PASS_COUNT+1))
+
+info "[4i] auto + string-priority → drops type-mismatch entry, returns next"
+OUT=$(PRILIVE_MODELS_CACHE="${FIXTURE_DIR}/string-priority.json" resolve_codex_model "auto" 2>/dev/null)
+[[ "${OUT}" == "gpt-5.5" ]] || fail "case 4i: expected gpt-5.5 after dropping string-priority entry; got '${OUT}'"
+pass "auto: string-typed priority → entry dropped → gpt-5.5"
+PASS_COUNT=$((PASS_COUNT+1))
+
+info "[4j] auto + duplicate-priority → deterministic slug-asc tiebreaker"
+OUT=$(PRILIVE_MODELS_CACHE="${FIXTURE_DIR}/duplicate-priority.json" resolve_codex_model "auto" 2>/dev/null)
+# Both have priority 9; slug-asc: gpt-5.5 < gpt-5.5-beta
+[[ "${OUT}" == "gpt-5.5" ]] || fail "case 4j: tiebreaker should pick lexicographically-first slug; got '${OUT}'"
+pass "auto: tied priority → slug-asc tiebreaker picks gpt-5.5"
+PASS_COUNT=$((PASS_COUNT+1))
+
+info "[4k] auto + null-fields → tolerates nulls on optional fields"
+OUT=$(PRILIVE_MODELS_CACHE="${FIXTURE_DIR}/null-fields.json" resolve_codex_model "auto" 2>/dev/null)
+[[ "${OUT}" == "gpt-5.5" ]] || fail "case 4k: should tolerate null display_name/description; got '${OUT}'"
+pass "auto: null on optional fields tolerated → gpt-5.5"
+PASS_COUNT=$((PASS_COUNT+1))
+
+info "[4l] auto + empty-models → fallback + warning"
+OUT=$(PRILIVE_MODELS_CACHE="${FIXTURE_DIR}/empty-models.json" resolve_codex_model "auto" 2>/dev/null)
+ERR=$(PRILIVE_MODELS_CACHE="${FIXTURE_DIR}/empty-models.json" resolve_codex_model "auto" 2>&1 >/dev/null)
+[[ "${OUT}" == "gpt-5.5" ]] || fail "case 4l: expected fallback gpt-5.5 on empty list, got '${OUT}'"
+echo "${ERR}" | grep -qE 'no candidates|filter' || fail "case 4l: expected no-candidates warning, got: ${ERR}"
+pass "auto: empty models list → fallback + no-candidates warning"
+PASS_COUNT=$((PASS_COUNT+1))
+
+info "[4m] auto + not-json → fallback + parse-error warning"
+OUT=$(PRILIVE_MODELS_CACHE="${FIXTURE_DIR}/not-json.txt" resolve_codex_model "auto" 2>/dev/null)
+ERR=$(PRILIVE_MODELS_CACHE="${FIXTURE_DIR}/not-json.txt" resolve_codex_model "auto" 2>&1 >/dev/null)
+[[ "${OUT}" == "gpt-5.5" ]] || fail "case 4m: expected fallback gpt-5.5 on parse error, got '${OUT}'"
+echo "${ERR}" | grep -qE 'not valid JSON|JSON' || fail "case 4m: expected JSON-error warning, got: ${ERR}"
+pass "auto: corrupt cache → fallback + JSON-error warning"
+PASS_COUNT=$((PASS_COUNT+1))
+
+info "[4n] auto + missing-required → fallback + missing-fields warning"
+OUT=$(PRILIVE_MODELS_CACHE="${FIXTURE_DIR}/missing-required.json" resolve_codex_model "auto" 2>/dev/null)
+ERR=$(PRILIVE_MODELS_CACHE="${FIXTURE_DIR}/missing-required.json" resolve_codex_model "auto" 2>&1 >/dev/null)
+# missing-required has .models (which is the field we actually require for slice 2);
+# it lacks client_version + fetched_at but the resolver tolerates that and uses .models.
+# So this fixture should succeed and return the slug. The fixture is documented as
+# "fallback in slice 2" but the resolver design (per addendum: tolerant of unknown
+# fields; only fail on REQUIRED fields the resolver depends on) accepts it.
+[[ "${OUT}" == "gpt-5.5" ]] || fail "case 4n: expected gpt-5.5 (resolver only requires .models[]); got '${OUT}'"
+pass "auto: missing top-level metadata (client_version/fetched_at) tolerated (resolver only depends on .models[])"
+PASS_COUNT=$((PASS_COUNT+1))
+
+info "[4o] auto with stale cache → slug returned, stale warning emitted"
+STALE_CACHE=$(mktemp)
+jq '.fetched_at = "2020-01-01T00:00:00Z"' "${FIXTURE_DIR}/valid-typical.json" > "${STALE_CACHE}"
+OUT=$(PRILIVE_MODELS_CACHE="${STALE_CACHE}" resolve_codex_model "auto" 2>/dev/null)
+ERR=$(PRILIVE_MODELS_CACHE="${STALE_CACHE}" resolve_codex_model "auto" 2>&1 >/dev/null)
+rm -f "${STALE_CACHE}"
+[[ "${OUT}" == "gpt-5.5" ]] || fail "case 4o: stale cache should still return slug, got '${OUT}'"
+echo "${ERR}" | grep -qE 'days old|stale|refresh' || fail "case 4o: expected stale-cache warning, got: ${ERR}"
+pass "auto: stale cache (>14 days) → slug returned + stale warning (warns, does NOT fall back per addendum MINOR)"
+PASS_COUNT=$((PASS_COUNT+1))
+
+info "[4p] counterfactual — fresh cache (today) → NO stale warning"
+FRESH_CACHE=$(mktemp)
+NOW_ISO=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+jq --arg ts "${NOW_ISO}" '.fetched_at = $ts' "${FIXTURE_DIR}/valid-typical.json" > "${FRESH_CACHE}"
+ERR=$(PRILIVE_MODELS_CACHE="${FRESH_CACHE}" resolve_codex_model "auto" 2>&1 >/dev/null)
+rm -f "${FRESH_CACHE}"
+echo "${ERR}" | grep -qE 'days old' && fail "case 4p: fresh cache must NOT emit stale warning, got: ${ERR}"
+pass "auto: fresh cache → no stale warning (counterfactual)"
+PASS_COUNT=$((PASS_COUNT+1))
+
+info "[4q] env-var auth detection: CODEX_API_KEY set → api_key mode"
+ERR=$(CODEX_API_KEY=test PRILIVE_MODELS_CACHE="${FIXTURE_DIR}/valid-api-only-edge.json" resolve_codex_model "auto" 2>&1 >/dev/null)
+echo "${ERR}" | grep -qF 'api_key' || fail "case 4q: CODEX_API_KEY should switch to api_key mode, got: ${ERR}"
+pass "auto: CODEX_API_KEY env var → api_key auth-mode detection"
+PASS_COUNT=$((PASS_COUNT+1))
+
+info "[4r] env-var auth detection: OPENAI_API_KEY set → api_key mode"
+ERR=$(OPENAI_API_KEY=test PRILIVE_MODELS_CACHE="${FIXTURE_DIR}/valid-api-only-edge.json" resolve_codex_model "auto" 2>&1 >/dev/null)
+echo "${ERR}" | grep -qF 'api_key' || fail "case 4r: OPENAI_API_KEY should switch to api_key mode, got: ${ERR}"
+pass "auto: OPENAI_API_KEY env var → api_key auth-mode detection"
+PASS_COUNT=$((PASS_COUNT+1))
+
+info "[4s] counterfactual: no env vars + no explicit arg → subscription mode"
+ERR=$(env -i HOME="${HOME}" PATH="${PATH}" bash -c "
+  unset CODEX_API_KEY OPENAI_API_KEY
+  . '${LIB}'
+  PRILIVE_MODELS_CACHE='${FIXTURE_DIR}/valid-typical.json' resolve_codex_model 'auto'
+" 2>&1 >/dev/null)
+echo "${ERR}" | grep -qF 'subscription' || fail "case 4s: no env vars should default to subscription, got: ${ERR}"
+pass "auto: no env vars → defaults to subscription auth-mode"
 PASS_COUNT=$((PASS_COUNT+1))
 
 info "[5] invalid input — whitespace in slug → exit 2"
@@ -151,11 +265,11 @@ echo "${LINE}" | grep -qF 'deprecated' || fail "case 6c: expected 'deprecated' i
 pass "describe(cli-default): mentions deprecated"
 PASS_COUNT=$((PASS_COUNT+1))
 
-info "[6d] describe: auto → mentions slice 1 stub + slice 2 reference"
+info "[6d] describe: auto → mentions cache resolution (slice 2 real impl)"
 LINE=$(resolve_codex_model_describe "auto" "gpt-5.5")
-echo "${LINE}" | grep -qF 'slice 1 stub' || fail "case 6d: expected 'slice 1 stub' in describe, got: ${LINE}"
-echo "${LINE}" | grep -qF 'slice 2' || fail "case 6d: expected 'slice 2' reference in describe, got: ${LINE}"
-pass "describe(auto): mentions slice 1 stub + slice 2 plan (observability MVP, not optional per M5)"
+echo "${LINE}" | grep -qF 'models_cache.json' || fail "case 6d: expected 'models_cache.json' in describe, got: ${LINE}"
+echo "${LINE}" | grep -qF 'gpt-5.5' || fail "case 6d: expected resolved slug in describe, got: ${LINE}"
+pass "describe(auto): mentions resolved slug + cache source (observability MVP per M5)"
 PASS_COUNT=$((PASS_COUNT+1))
 
 # ============================================================

@@ -91,11 +91,25 @@ if [[ -n "${PRILIVE_OPS_PREFLIGHT_BIN:-}" \
 else
   command -v codex >/dev/null 2>&1 \
     || { echo "ops-preflight-review: codex CLI not on PATH" >&2; exit 1; }
+  # v2.3 slice 2: resolve [codex] model through the shared resolver. Pre-
+  # slice-2 this script passed no -m flag, deferring to Codex CLI's
+  # --model default — a latent v2.1.1 bug. Now resolved per tdd-pack.toml.
+  CONFIG="${PROJECT_DIR:-$(pwd)}/tdd-pack.toml"
+  # shellcheck source=lib/config.sh
+  . "$(dirname "$0")/lib/config.sh"
+  # shellcheck source=lib/resolve-model.sh
+  . "$(dirname "$0")/lib/resolve-model.sh"
+  MODEL_RAW=$(cfg_get "${CONFIG}" "codex.model" "")
+  MODEL=$(resolve_codex_model "${MODEL_RAW}")
+  resolve_codex_model_describe "${MODEL_RAW}" "${MODEL}" >&2
+  CODEX_MODEL_FLAGS=()
+  [[ -n "${MODEL}" ]] && CODEX_MODEL_FLAGS+=(-m "${MODEL}")
   # --ignore-user-config detaches MCP servers so --output-schema is not
   # silently dropped (openai/codex#15451). Validate the output anyway —
   # v2.1.0 Bug 1 lesson.
   OUT=$(printf '%s' "${PROMPT}" | timeout 60 codex exec \
           --ignore-user-config \
+          "${CODEX_MODEL_FLAGS[@]}" \
           --output-schema "${SCHEMA_FILE}" \
           -o /dev/stdout 2>/dev/null) || exit 1
 fi

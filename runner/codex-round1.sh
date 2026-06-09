@@ -24,7 +24,14 @@ CONFIG="${PROJECT_DIR}/tdd-pack.toml"
 toml_val() {
   awk -F' = ' "/^$1 =/ {gsub(/\"/,\"\",\$2); print \$2; exit}" "${CONFIG}"
 }
-MODEL=$(toml_val "model")
+# v2.3 slice 2: resolve [codex] model through the shared resolver so
+# "auto" reads the Codex CLI cache, "cli-default" carries the
+# deprecation warning, etc. Slice 1 locked the API; this is the wire-up.
+# shellcheck source=lib/resolve-model.sh
+. "${PROJECT_DIR}/runner/lib/resolve-model.sh"
+MODEL_RAW=$(toml_val "model")
+MODEL=$(resolve_codex_model "${MODEL_RAW}")
+resolve_codex_model_describe "${MODEL_RAW}" "${MODEL}" >&2
 REASONING=$(toml_val "reasoning_effort")
 WEB_SEARCH=$(toml_val "web_search")
 REASONING="${REASONING:-high}"

@@ -91,7 +91,12 @@ HAS_IGNORE_USER_CFG="$(codex_cap_supports supports_ignore_user_config "${PROJECT
 # defaults if the field is absent.
 # shellcheck source=lib/config.sh
 . "$(dirname "$0")/lib/config.sh"
-MODEL=$(cfg_get "${CONFIG}" "codex.model" "")
+# v2.3 slice 2: resolve [codex] model through the shared resolver.
+# shellcheck source=lib/resolve-model.sh
+. "$(dirname "$0")/lib/resolve-model.sh"
+MODEL_RAW=$(cfg_get "${CONFIG}" "codex.model" "")
+MODEL=$(resolve_codex_model "${MODEL_RAW}")
+resolve_codex_model_describe "${MODEL_RAW}" "${MODEL}" >&2
 REASONING=$(cfg_get "${CONFIG}" "codex.reasoning_effort" "high")
 WEB_SEARCH=$(cfg_get "${CONFIG}" "codex.web_search" "live")
 
