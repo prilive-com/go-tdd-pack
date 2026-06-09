@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FDTDD active finding marker (v2)",
+  "description": "The .tdd/findings/active.json marker that tracks a single active finding through Red → Green → Refactor → Closed. v2 (FDTDD Stage 1) extends the v2.1 PR #26 v1 schema with phase tracking, scoped unlock (test_files + prod_files), red-proof mechanical capture, and amendment ledger. Strict-mode compliant per v2.1.0 Bug 1 lesson: additionalProperties:false on every object AND properties == required.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "finding_id",
+    "started_at",
+    "tier",
+    "phase",
+    "red_proof",
+    "red_proof_hash",
+    "red_proof_accepted",
+    "red_proof_record",
+    "test_files",
+    "prod_files",
+    "red_accepted_at",
+    "green_started_at",
+    "closed_at",
+    "amendments"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "enum": [2],
+      "description": "Marker schema version. v1 (=1) is the v2.1 PR #26 shape; v2 (=2) is the FDTDD Stage 1 shape locked in this slice. Backward-compat readers treat a v1 marker as v2 with phase=red, red_proof_accepted=false, empty test_files/prod_files."
+    },
+    "finding_id": {
+      "type": "string",
+      "pattern": "^R[0-9]+-F[0-9]+$",
+      "description": "Stable identifier R<round>-F<finding>, e.g. R2-F3. Matches the v2.1 PR #26 format — slice 1 does NOT renumber existing findings."
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339Z timestamp when finding-start.sh wrote the marker. Set once; never updated by later phases."
+    },
+    "tier": {
+      "type": "string",
+      "enum": ["tier1", "tier2", "tier3", "untiered"],
+      "description": "Tier classification at start time. Drives whether Gate 1 / Gate 3 enforce. Determined by runner/lib/tier1.sh against the operator-declared prod_files (when present) or the finding description (fallback)."
+    },
+    "phase": {
+      "type": "string",
+      "enum": ["red", "green", "refactor", "closed"],
+      "description": "Current FDTDD phase. red = failing test not yet accepted; green = Red proof accepted, prod fix in progress; refactor = test green, optional refactor window; closed = finding-finish ran. Drives Gate 1 (deny prod edits in red) and Gate 3 (lock test edits in green)."
+    },
+    "red_proof": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Project-relative path to the red-proof markdown document. v1 field, kept for back-compat with existing finding-start.sh callers."
+    },
+    "red_proof_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "SHA-256 of red_proof file at marker-write time. Hooks verify the proof has not been mutated between accept-red and prod-edit. v1 field."
+    },
+    "red_proof_accepted": {
+      "type": "boolean",
+      "description": "True after finding-accept-red.sh (slice 2) has mechanically verified the declared failing test actually fails for the intended reason. False until then. Backward-compat: v1 markers (no field) read as false."
+    },
+    "red_proof_record": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "test_command",
+            "exit_code",
+            "captured_at",
+            "output_tail"
+          ],
+          "properties": {
+            "test_command": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The literal command finding-accept-red.sh ran (e.g. `go test -run TestAuthRefreshRace ./internal/auth`). Verbatim, no shell-quote stripping."
+            },
+            "exit_code": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 255,
+              "description": "Non-zero exit code captured at accept-red time. Slice 2's finding-accept-red.sh REFUSES to transition phase to green if exit_code is 0 (test passed) — mechanical Red proof, not social. Range 1-255 because exit 0 means the bug is NOT reproduced."
+            },
+            "captured_at": {
+              "type": "string",
+              "format": "date-time",
+              "description": "RFC3339Z timestamp when finding-accept-red.sh ran the test command."
+            },
+            "output_tail": {
+              "type": "string",
+              "maxLength": 8000,
+              "description": "Last ~200 lines of test stderr+stdout, joined. Capped at 8000 chars. Lets future review verify the failure mode without re-running the test."
+            }
+          }
+        }
+      ],
+      "description": "BLOCKER 2 (Codex addendum 2026-06-08): proves Red is actually red. null until accept-red. Once set, transitions phase from red to green. finding-restart-red.sh (slice 4) clears this back to null."
+    },
+    "test_files": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Repo-root-relative, canonicalized (./x/../y → y), symlinks resolved via pwd -P. M1 path canonicalization."
+      },
+      "uniqueItems": true,
+      "description": "Locked test files. Operator declares via finding-accept-red.sh. Gate 3 denies edits to these files during phase=green (strict_tdd) or asks (governed_tdd). MAY be empty for backward-compat v1 markers only — slice 2 finding-accept-red.sh refuses an empty list."
+    },
+    "prod_files": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Repo-root-relative, canonicalized. Same rules as test_files."
+      },
+      "uniqueItems": true,
+      "description": "BLOCKER 1 (Codex addendum 2026-06-08): scoped unlock. Operator declares the prod files this finding can edit. Gate 1's allow-condition: red_proof_accepted=true AND file_path is in prod_files OR in the same Tier-1 directory tree as a file in prod_files. Empty list permitted only for backward-compat v1 markers; slice 2 finding-accept-red.sh refuses an empty list."
+    },
+    "red_accepted_at": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string", "format": "date-time" }
+      ],
+      "description": "RFC3339Z timestamp when finding-accept-red.sh accepted Red proof. Null until then. Set once per Red→Green transition; finding-restart-red.sh (slice 4) clears it back to null."
+    },
+    "green_started_at": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string", "format": "date-time" }
+      ],
+      "description": "RFC3339Z timestamp when phase transitioned to green. Same value as red_accepted_at today; separated for forward compatibility with Stage 2 (where the two events may decouple, e.g. mandatory review window between accept and green)."
+    },
+    "closed_at": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string", "format": "date-time" }
+      ],
+      "description": "RFC3339Z timestamp when finding-finish.sh ran. Null while phase != closed. After this, finding-finish.sh rotates the marker from .tdd/findings/active.json to .tdd/findings/closed/<finding_id>.json."
+    },
+    "amendments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ts", "file", "rationale"],
+        "properties": {
+          "ts": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339Z timestamp of finding-amend-red.sh invocation."
+          },
+          "file": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repo-root-relative path of the test file amended."
+          },
+          "rationale": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "description": "Operator-declared reason for amending a locked test file during green phase (e.g. 'fix imports', 'helper placement', 'table case added without changing assertion'). Audit trail; not validated by gates."
+          }
+        }
+      },
+      "description": "MAJOR M3 (Codex addendum 2026-06-08): mechanical test-maintenance flow. Each entry records an operator-authorized test edit during green phase that does NOT regress to Red. Gate 3 allows edits to file F if the most recent amendment's file == F and ts is within configured window (slice 4 will define the window). Empty list by default; slice 4 wires the amend-red helper."
+    }
+  }
+}

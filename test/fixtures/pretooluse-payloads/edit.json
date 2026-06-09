@@ -1,0 +1,12 @@
+{
+  "_source": "Spec-derived from code.claude.com/docs/en/tools — Edit tool reference. Slice 2 will refine to capture-driven fixture.",
+  "_tool": "Edit",
+  "_slice_1_decision": "Single-file. Gate parser reads tool_input.file_path as one string; no per-edit fan-out.",
+  "session_id": "01HZAY4N8MV5GTQH7E5KJ4XK7P",
+  "tool_name": "Edit",
+  "tool_input": {
+    "file_path": "/home/example/repo/internal/auth/refresh.go",
+    "old_string": "if token.ExpiresAt.Before(time.Now()) {",
+    "new_string": "if token.ExpiresAt.Before(time.Now().UTC()) {"
+  }
+}

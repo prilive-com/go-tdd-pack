@@ -1,0 +1,11 @@
+{
+  "_source": "Spec-derived from code.claude.com/docs/en/tools — Write tool reference. Slice 2 will refine to capture-driven fixture.",
+  "_tool": "Write",
+  "_slice_1_decision": "Single-file. Gate parser reads tool_input.file_path as one string; tool_input.content for content scanning.",
+  "session_id": "01HZAY4N8MV5GTQH7E5KJ4XK7P",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "/home/example/repo/internal/auth/refresh_test.go",
+    "content": "package auth\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestRefreshConcurrent(t *testing.T) {\n\t// Demonstrates token-refresh race under concurrent requests.\n\tt.Fatal(\"red proof: data race in concurrent refresh\")\n\t_ = time.Now()\n}\n"
+  }
+}
