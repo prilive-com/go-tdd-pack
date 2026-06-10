@@ -67,7 +67,7 @@ OUTPUT="${PROJECT_ROOT}/.tdd/review/proposal-review-${NAME}-${SHA}.txt"
 
 echo "▶ Codex adversarial review of: ${PROPOSAL}"
 echo "  prompt:    prompts/proposal-critique.md"
-echo "  model:     gpt-5.5 (pinned; avoids v2.1.0 Bug 2)"
+echo "  model:     (Codex CLI default — currently gpt-5.5 per OpenAI docs)"
 echo "  reasoning: high"
 echo "  output:    ${OUTPUT#${PROJECT_ROOT}/}"
 echo "  (this typically takes 2-5 minutes)"
@@ -76,8 +76,12 @@ echo ""
 # Build the input: critique prompt + proposal contents
 INPUT=$(cat "${PROMPT_FILE}" "${PROPOSAL}")
 
+# v2.3.2: no -m flag. Codex CLI's own default applies (per OpenAI's
+# June-2026 Codex docs, currently gpt-5.5, works on both ChatGPT and
+# API-key auth). Auto-tracks when OpenAI updates the default. The pack
+# stopped pinning specific slugs in v2.3.2 — same principle as the
+# runner's resolve-model.sh fallback path.
 if printf '%s' "${INPUT}" | codex exec \
-     -m gpt-5.5 \
      --ignore-user-config \
      -c model_reasoning_effort="high" \
      - > "${OUTPUT}" 2>&1; then
