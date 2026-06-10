@@ -55,9 +55,11 @@ PASS_COUNT=$((PASS_COUNT+1))
 # on ChatGPT-subscription auth. Every fresh subscription adopter crashed
 # on the first runner cycle. Adopters who want "track Codex default" can
 # set `model = ""` themselves in their own copy; the shipped default
-# must always be a concrete model id we have verified works on both
-# auth modes.
-info "[3] [codex] ships a concrete (non-empty) model id"
+# must always be a non-empty value. v2.3 (#138 slice 4): "auto" is also
+# a valid non-empty value — the runner resolves it from the local
+# Codex CLI models cache with a fallback to gpt-5.5. Both "auto" and
+# any concrete slug (e.g. "gpt-5.5") satisfy this invariant.
+info "[3] [codex] ships a non-empty model id (concrete slug or \"auto\")"
 MODEL=$(awk '
   /^\[codex\]/ { in_s=1; next }
   /^\[/        { in_s=0 }

@@ -50,22 +50,38 @@ mode = "soft"
 [codex]
 # Model selection.
 #
-# DEFAULT: model = "gpt-5.5" — verified working on both ChatGPT
-# subscription auth (Plus/Pro/Team) and API-key auth. v2.1.1 hotfix
-# changed this from `model = ""` (which deferred to Codex CLI's default)
-# because Codex CLI 0.130 changed that default to `gpt-5.3-codex`, a
-# paid-only model that returns HTTP 400 on ChatGPT-subscription auth.
-# Every fresh adopter on a subscription account hit the failure on
-# their first runner cycle. Pinning here insulates adopters from
-# upstream default changes.
+# DEFAULT: model = "auto" — runner reads ~/.codex/models_cache.json
+# at session start and picks the highest-priority "list"-visible model
+# the account can reach. Falls back to gpt-5.5 with a stderr warning
+# if the cache is missing / corrupt / has no candidates. Implemented
+# by runner/lib/resolve-model.sh (v2.3 task #138 slices 1+2).
 #
-# TO PIN A DIFFERENT MODEL: set model = "<id>" (e.g. "gpt-5-codex",
-# "gpt-5.5-codex"). Confirm your account has access first —
-# `codex models` lists what is reachable.
+# Why "auto" is the shipped default (slice 4 flip):
+# - The pack itself dogfoods this knob on its own dev cycles. The
+#   maintainer is adopter #1; the BLOCKER 2 "≥2 adopters × 14 days
+#   clean" gate starts its clock here.
+# - Adopters who freshly copy this file get latest-frontier behavior
+#   without having to bump a pinned slug on each Codex CLI release.
+# - Failure mode is bounded: cache missing → fallback to gpt-5.5
+#   (same value v2.1.1 hotfix pinned). Empirical fallback is the
+#   same value the prior shipped default was, so the worst case is
+#   no worse than v2.1.1.
 #
-# TO TRACK CODEX CLI'S DEFAULT AGAIN: set model = "". You opt back in
-# to whatever the CLI ships. Re-verify after every Codex CLI upgrade.
-model = "gpt-5.5"
+# TO PIN A SPECIFIC MODEL: set model = "<id>" (e.g. "gpt-5.5",
+# "gpt-5.5-codex"). Use this for reproducibility across sessions
+# or when validating a specific model. Confirm your account has
+# access first — `codex models` lists what is reachable.
+#
+# TO DEFER TO CODEX CLI'S DEFAULT (v2.1.x semantics): set model = "".
+# DOCUMENTED UNSAFE — v2.1.1 incident: Codex CLI 0.130 silently
+# shifted the default to a paid-only model and every fresh
+# subscription adopter hit HTTP 400 on their first cycle. Re-verify
+# after every Codex CLI upgrade if you choose this path.
+#
+# Resolver fallback override:
+#   PRILIVE_MODEL_FALLBACK=<slug> env var changes what the runner
+#   uses when "auto" cannot resolve from cache. Defaults to gpt-5.5.
+model = "auto"
 
 # Reasoning effort: low | medium | high | xhigh
 # Quality-tuned default "xhigh" — maximum reasoning supported by ChatGPT
