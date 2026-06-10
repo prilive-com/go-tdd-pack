@@ -50,54 +50,46 @@ mode = "soft"
 [codex]
 # Model selection.
 #
-# DEFAULT: model = "auto" — runner reads ~/.codex/models_cache.json
-# at session start and picks the highest-priority "list"-visible model
-# the account can reach. Falls back to gpt-5.5 with a stderr warning
-# if the cache is missing / corrupt / has no candidates. Implemented
-# by runner/lib/resolve-model.sh (v2.3 task #138 slices 1+2).
+# DEFAULT: model = "" — no pin. Runner omits the --model flag and
+# Codex CLI applies its own --model default. Per OpenAI's June-2026
+# Codex docs (developers.openai.com/codex/models), the current
+# Codex CLI default IS gpt-5.5, and it works on BOTH ChatGPT-auth
+# (Plus / Pro / Team / Business) and API-key auth. When OpenAI
+# updates the default, we auto-track with zero repo edits.
 #
-# Why "auto" is the shipped default (slice 4 flip):
-# - The pack itself dogfoods this knob on its own dev cycles. The
-#   maintainer is adopter #1.
-# - Adopters who freshly copy this file get latest-frontier behavior
-#   without having to bump a pinned slug on each Codex CLI release.
-# - Failure mode is bounded: cache missing → auth-aware fallback (see
-#   below). Same v2.1.1 safety net for subscription accounts.
+# Why "" (no pin) is the shipped default — the v2.3.2 design:
 #
-# Fallback path (v2.3.1 fix — auth-aware):
-#   The resolver detects auth mode via the CODEX_API_KEY /
-#   OPENAI_API_KEY env vars (set → "api_key"; unset → "subscription").
-#   When cache is missing / corrupt / has no candidates, the
-#   fallback slug is auth-aware:
-#     subscription → "gpt-5.5"      (frontier model, ChatGPT-auth)
-#     api_key      → "gpt-5.2-codex" (per OpenAI's June-2026
-#                                     model lineup — gpt-5.5 is
-#                                     subscription-auth-only and
-#                                     would return HTTP 400 under
-#                                     api_key auth).
+#   The pack tried three pin strategies (v2.1.1 gpt-5.5,
+#   v2.3.0 auto-with-gpt-5.5-fallback, v2.3.1 auth-aware
+#   gpt-5.5 / gpt-5.2-codex). Each one ages the moment OpenAI
+#   ships a new minor. v2.3.2 refuses to keep patching pins —
+#   we trust OpenAI to manage the default and treat any future
+#   "default shifted to wrong model" event as their bug, not
+#   ours.
 #
-# This auth-aware split was added in v2.3.1 after the devopspoint
-# review-engine team surfaced empirically that gpt-5.5 is not
-# API-key-reachable. Pre-v2.3.1 the fallback hardcoded gpt-5.5 for
-# both auth modes — an unfixed latent v2.1.1-class bug for the
-# api_key fallback path.
+# Three valid forms:
 #
-# TO PIN A SPECIFIC MODEL: set model = "<id>" (e.g. "gpt-5.5",
-# "gpt-5.2-codex", "gpt-5.5-codex"). Use this for reproducibility
-# across sessions or when validating a specific model. Confirm
-# your account has access first.
+#   model = ""        DEFAULT. No --model flag emitted. Codex CLI's
+#                     own default applies. Auto-tracks upstream.
 #
-# TO DEFER TO CODEX CLI'S DEFAULT (v2.1.x semantics): set model = "".
-# DOCUMENTED UNSAFE — v2.1.1 incident: Codex CLI 0.130 silently
-# shifted the default to a paid-only model and every fresh
-# subscription adopter hit HTTP 400 on their first cycle. Re-verify
-# after every Codex CLI upgrade if you choose this path.
+#   model = "auto"    Runner reads ~/.codex/models_cache.json + picks
+#                     the highest-priority "list"-visible slug. Use
+#                     ONLY if you want the resolver's filter rules
+#                     (drops *-auto-review, *-spark, *-mini even if
+#                     they win on priority). Fallback when cache
+#                     fails: empty string (same as model = "").
 #
-# Resolver fallback override:
-#   PRILIVE_MODEL_FALLBACK=<slug> env var ALWAYS wins (both auth
-#   modes), letting operators pin the fallback explicitly. Useful
-#   for environments that cache the slug + want determinism.
-model = "auto"
+#   model = "<slug>"  Pin a specific slug (e.g. "gpt-5.5",
+#                     "gpt-5.5-codex"). Use for reproducibility
+#                     across sessions or model A/B testing.
+#                     Stale-by-design; YOU maintain the bump cadence.
+#
+# Resolver fallback override (separate env var, operator-only):
+#   PRILIVE_MODEL_FALLBACK=<slug> wins over the empty-fallback path,
+#   letting operators pin the fallback explicitly without changing
+#   the shipped tdd-pack.toml. Useful for environments that need
+#   determinism (CI replay, regulatory audit). NOT a shipped default.
+model = ""
 
 # Reasoning effort: low | medium | high | xhigh
 # Quality-tuned default "xhigh" — maximum reasoning supported by ChatGPT

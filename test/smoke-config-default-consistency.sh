@@ -49,17 +49,30 @@ grep -q "PRILIVE_PRE_REVIEW_EXPERIMENTAL" <<< "${BLOCK}" \
 pass "opt-in path (PRILIVE_PRE_REVIEW_EXPERIMENTAL) documented"
 PASS_COUNT=$((PASS_COUNT+1))
 
-# v2.1.1: shipped `model` must be non-empty. v2.1.0 shipped `model = ""`
-# (intended: "track Codex CLI's default"), but Codex CLI 0.130 changed
-# its default to `gpt-5.3-codex`, a paid-only model that returns HTTP 400
-# on ChatGPT-subscription auth. Every fresh subscription adopter crashed
-# on the first runner cycle. Adopters who want "track Codex default" can
-# set `model = ""` themselves in their own copy; the shipped default
-# must always be a non-empty value. v2.3 (#138 slice 4): "auto" is also
-# a valid non-empty value — the runner resolves it from the local
-# Codex CLI models cache with a fallback to gpt-5.5. Both "auto" and
-# any concrete slug (e.g. "gpt-5.5") satisfy this invariant.
-info "[3] [codex] ships a non-empty model id (concrete slug or \"auto\")"
+# v2.3.2: model key MUST be present and quoted. Value can be:
+#   ""        — DEFAULT. No pin. Runner omits --model; Codex CLI applies
+#               its own default (currently gpt-5.5 per OpenAI June-2026
+#               docs, works on both ChatGPT-auth and API-key auth).
+#               When OpenAI updates the default, we auto-track.
+#   "auto"    — resolver reads ~/.codex/models_cache.json and picks
+#               highest-priority slug. Fallback when cache fails: empty.
+#   "<slug>"  — explicit pin (e.g. "gpt-5.5", "gpt-5.5-codex"). Stale-
+#               by-design; the adopter maintains the bump cadence.
+#
+# History this smoke captures:
+#   v2.1.0 shipped model = "" (trust upstream).
+#   v2.1.1 forced shipped model to be non-empty after Codex CLI 0.130
+#     changed its default to gpt-5.3-codex (paid-only) and broke every
+#     fresh subscription account on first cycle.
+#   v2.3.0/v2.3.1 kept pinning a specific slug ("gpt-5.5", then
+#     auth-aware split).
+#   v2.3.2 REVERTS to "" by explicit decision: the user refuses to
+#     keep patching pins as OpenAI ships new minors. The v2.1.1
+#     incident is on OpenAI to fix going forward.
+#
+# This smoke now asserts: model key exists, value is a string. ANY
+# value (including "") is valid.
+info "[3] [codex] ships model key (any string value is valid in v2.3.2)"
 MODEL=$(awk '
   /^\[codex\]/ { in_s=1; next }
   /^\[/        { in_s=0 }
@@ -81,13 +94,13 @@ if [[ -z "${MODEL}" ]]; then
     }
   ' "${TOML}")
 fi
-[[ -n "${MODEL}" ]] || fail "no model key found in tdd-pack.toml"
-# Strip surrounding quotes for the emptiness check.
-MODEL_UNQUOTED="${MODEL%\"}"
-MODEL_UNQUOTED="${MODEL_UNQUOTED#\"}"
-[[ -n "${MODEL_UNQUOTED}" ]] \
-  || fail "model = ${MODEL}; must be a concrete model id (empty defers to Codex CLI default which can crash on subscription auth — see v2.1.0 regression)"
-pass "model = ${MODEL} (non-empty)"
+# We just need the assignment to exist. MODEL captures the literal
+# RHS including quotes. Empty string + quotes ("") is a VALID value.
+case "${MODEL}" in
+  '""'|'"'*'"') pass "model = ${MODEL} (quoted string, any value valid in v2.3.2)" ;;
+  '')           fail "no model key found in tdd-pack.toml" ;;
+  *)            fail "model value must be a quoted string; got: ${MODEL}" ;;
+esac
 PASS_COUNT=$((PASS_COUNT+1))
 
 # v2.2 slice 1: ops-triage ships disabled. Adopters opt in by editing

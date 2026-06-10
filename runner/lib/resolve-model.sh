@@ -41,35 +41,40 @@ if [[ -z "${__PRILIVE_RESOLVE_MODEL_LIB_LOADED:-}" ]]; then
   __PRILIVE_RESOLVE_MODEL_LIB_LOADED=1
 fi
 
-# resolve_codex_model_fallback [<auth_mode>] → echoes the safe fallback
-# slug for the given auth mode.
+# resolve_codex_model_fallback [<auth_mode>] → echoes the fallback slug,
+# or empty string ("") to defer to Codex CLI's own --model default.
 #
-# v2.3.1 fix — auth-aware fallback. Pre-v2.3.1 this hardcoded
-# "gpt-5.5", which was wrong for API-key adopters: per OpenAI's
-# June-2026 model lineup, gpt-5.5 is ChatGPT-subscription-auth ONLY
-# (Plus / Pro / Team). API-key auth requires a different slug
-# (gpt-5.2-codex). Hardcoding gpt-5.5 caused HTTP 400 on the
-# fallback path under api_key auth — same class of incident as
-# v2.1.1 Bug 2, surfaced empirically by the devopspoint review-
-# engine team during their own dual-auth investigation.
+# v2.3.2 design — STOP PINNING. v2.1.1 / v2.3.0 / v2.3.1 each tried
+# to pin a specific slug as the fallback (gpt-5.5, then gpt-5.2-codex
+# under api_key). Every pin goes stale the moment OpenAI ships a new
+# minor — operators end up running yesterday's model.
+#
+# Per OpenAI's June-2026 Codex docs (developers.openai.com/codex/models),
+# gpt-5.5 IS the current default for both ChatGPT-auth and API-key
+# auth, AND Codex CLI's --model default also resolves to gpt-5.5.
+# So returning empty here ⇒ runner omits the --model flag ⇒ Codex CLI
+# applies its own default ⇒ when OpenAI updates the default, we
+# auto-track with ZERO repo edits.
+#
+# The v2.1.1 incident (Codex CLI 0.130 shifted default to a paid-only
+# model) is on OpenAI to fix going forward. We refuse to keep
+# patching pins.
 #
 # Precedence:
-#   1. PRILIVE_MODEL_FALLBACK env var (always wins — operator
-#      escape hatch for both auth modes).
-#   2. auth_mode == "api_key"      → "gpt-5.2-codex"
-#   3. auth_mode == "subscription" → "gpt-5.5"
-#   4. unknown / unset             → "gpt-5.5" (preserves prior
-#                                    default for back-compat).
+#   1. PRILIVE_MODEL_FALLBACK env var → echo it. Operators who want
+#      to pin in their own environment (testing, regulatory
+#      determinism) keep doing exactly that. Not a shipped default.
+#   2. else → echo "" (let Codex CLI's --model default apply).
+#
+# auth_mode arg is preserved for back-compat with v2.3.1 callers but
+# is no longer consulted.
 resolve_codex_model_fallback() {
   if [[ -n "${PRILIVE_MODEL_FALLBACK:-}" ]]; then
     echo "${PRILIVE_MODEL_FALLBACK}"
     return 0
   fi
-  local auth_mode="${1-subscription}"
-  case "${auth_mode}" in
-    api_key)        echo "gpt-5.2-codex" ;;
-    subscription|*) echo "gpt-5.5" ;;
-  esac
+  # No pin. Runner sees empty → omits --model → CLI default applies.
+  echo ""
 }
 
 # _resolve_codex_cache_path → echoes the path to models_cache.json.

@@ -15,6 +15,52 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 _No unreleased changes._
 
+## [2.3.2] - 2026-06-10
+
+**Hotfix release. Stop pinning models.** v2.1.1 / v2.3.0 / v2.3.1 each tried to pin a specific slug as the resolver's fallback (`gpt-5.5`, then auth-aware `gpt-5.5` / `gpt-5.2-codex`). Every pin goes stale the moment OpenAI ships a new minor; the pack has shipped three model-related patches in ten days. v2.3.2 reverts to the v2.1.0 design — **no pin, ever** — and trusts Codex CLI to manage the default.
+
+Per [OpenAI's June-2026 Codex docs](https://developers.openai.com/codex/models), the current Codex CLI default IS `gpt-5.5`, and it works on both ChatGPT-auth and API-key auth. The dev assumption behind v2.3.1's auth-aware split (`gpt-5.5` is ChatGPT-only) was based on a third-party blog interpretation; the official docs disagree. When OpenAI updates the default, the pack auto-tracks with **zero repo edits**.
+
+The v2.1.1 incident (Codex CLI 0.130 shifted default to a paid-only model) is OpenAI's problem to fix going forward. The pack refuses to keep patching pins.
+
+### Changed
+
+- **`tdd-pack.toml` `[codex] model`** flipped from `"auto"` to `""`. The runner now omits the `--model` flag and Codex CLI applies its own default.
+- **`runner/lib/resolve-model.sh:resolve_codex_model_fallback`** — returns empty string for ALL auth modes. Previously returned `gpt-5.5` / `gpt-5.2-codex` per auth-aware split. The `auth_mode` arg is preserved for back-compat with v2.3.1 callers but no longer consulted.
+- **`tdd-pack.toml`** `[codex]` doc-block rewritten — documents the three valid forms (`""` / `"auto"` / `"<slug>"`) and the "stop pinning" rationale with the OpenAI docs citation.
+- **`test/smoke-config-default-consistency.sh`** — case [3] no longer rejects `model = ""`. Asserts the key exists and is a string; any value (including empty) is valid in v2.3.2.
+
+### Behavior matrix after v2.3.2
+
+| Scenario | `--model` flag passed to `codex exec` |
+|---|---|
+| `model = ""` (DEFAULT) | omitted |
+| `model = "auto"` + cache works | the highest-priority slug in cache |
+| `model = "auto"` + cache missing / corrupt / empty | omitted (was: pinned slug) |
+| `model = "<slug>"` | `--model <slug>` |
+| `PRILIVE_MODEL_FALLBACK=<slug>` env set + cache-fallback path | `--model <slug>` (operator escape hatch unchanged) |
+
+When `--model` is omitted, Codex CLI uses its own default (currently `gpt-5.5` per the official docs). The pack auto-tracks any future default change.
+
+### Verification
+
+- `test/smoke-resolve-model.sh` — 47 checks; v2.3.1's auth-aware assertions replaced with empty-fallback assertions + operator escape hatch coverage.
+- All 12 critical smokes green: 199 checks total.
+- Codex review of the diff: see audit artifact at `.tdd/review/v2.3.2-diff-review-<sha>.txt`.
+
+### Adopter action
+
+| Adopter type | Action |
+|---|---|
+| Fresh copy of new `tdd-pack.toml` | Default flips `"auto"` → `""`. Net behavior identical today (Codex CLI default is `gpt-5.5`); auto-tracks future Codex CLI default changes. |
+| Existing `model = "auto"` | No change for cache-present path. Fallback path now returns empty instead of pinned slug. |
+| Pinned slug | No change. |
+| `PRILIVE_MODEL_FALLBACK` env override | No change. |
+
+### Acknowledgement
+
+This is the third consecutive model-pin patch. The user surfaced the underlying issue clearly: "we need to use a slug which will pick always the latest version automatically." The honest design — no auto-tracking alias exists at the slug level, so the only "auto" behavior is to let Codex CLI manage its own default — was right in front of me the whole time. v2.3.2 stops fighting it.
+
 ## [2.3.1] - 2026-06-10
 
 **Hotfix release.** Auth-aware fallback for `runner/lib/resolve-model.sh`. Pre-v2.3.1 the resolver's fallback path (used when the Codex models cache is missing / corrupt / has no candidates) hardcoded `gpt-5.5` for both auth modes. **Per OpenAI's June-2026 model lineup, `gpt-5.5` is ChatGPT-subscription-auth ONLY** (Plus / Pro / Team) — it is NOT API-key-reachable. API-key adopters who hit the fallback path would get HTTP 400 on every cycle, same incident class as v2.1.1 Bug 2.

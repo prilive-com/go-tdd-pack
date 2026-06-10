@@ -1,6 +1,6 @@
 {
   "name": "prilive-go-tdd-pack",
-  "version": "2.3.1",
+  "version": "2.3.2",
   "description": "Finding-aware continuous code review + opt-in runtime ops-safety triage for Go projects. Claude implements; OpenAI Codex CLI reviews in the background. v2.1 added four false-positive rails, verify-only later rounds, Gate 4 artifact protection, the FDTDD active-finding foundation, MCP detachment for structured-output calls, and origin-aware escalation. v2.2 added the Ops Risk Triage rail: a three-layer Bash-command gate (deterministic parser → fast Haiku classifier → Codex deep ops-preflight) with ask/governed modes, session-tag-driven R2→R3 escalation, and ops-debt accounting via Stop-hook block. v2.3 ships cache-driven model selection (model = \"auto\" reads ~/.codex/models_cache.json, filters role-inappropriate models, returns the highest-priority slug with safe fallback) — closes the v2.1.1 stale-pin problem; defaults are forward-compatible. v2.3 also lands contract spikes for FDTDD Stage 1, the grounding-adapter interface, and safer Codex sandbox execution.",
   "author": {
     "name": "Prilive",

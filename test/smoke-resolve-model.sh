@@ -76,7 +76,7 @@ echo "${ERR}" | grep -qE 'cli-default|v2.1.1|defers' || fail "case 3: expected d
 pass "cli-default: '' + deprecation note on stderr (MAJOR M3 closure)"
 PASS_COUNT=$((PASS_COUNT+1))
 
-info "[4] auto + missing cache + subscription auth → fallback to gpt-5.5"
+info "[4] v2.3.2 — auto + missing cache → fallback is EMPTY (let Codex CLI default apply)"
 OUT=$(env -i HOME="${HOME}" PATH="${PATH}" bash -c "
   . '${LIB}'
   PRILIVE_MODELS_CACHE=/nonexistent/cache.json resolve_codex_model 'auto'
@@ -85,24 +85,25 @@ ERR=$(env -i HOME="${HOME}" PATH="${PATH}" bash -c "
   . '${LIB}'
   PRILIVE_MODELS_CACHE=/nonexistent/cache.json resolve_codex_model 'auto'
 " 2>&1 >/dev/null)
-[[ "${OUT}" == "gpt-5.5" ]] || fail "case 4: expected subscription fallback gpt-5.5, got: '${OUT}'"
+[[ -z "${OUT}" ]] || fail "case 4: v2.3.2 expects empty fallback (no pin); got: '${OUT}'"
 echo "${ERR}" | grep -qE 'absent|missing|cache' || fail "case 4: expected absent-cache warning, got: ${ERR}"
-pass "auto: missing cache + subscription → gpt-5.5 + absent-cache warning"
+pass "auto: missing cache → empty fallback + absent-cache warning (no pin per v2.3.2)"
 PASS_COUNT=$((PASS_COUNT+1))
 
-info "[4-aa] v2.3.1 — auto + missing cache + api_key auth → fallback to gpt-5.2-codex"
+info "[4-aa] v2.3.2 — auto + missing cache + api_key auth → ALSO empty (no auth-aware pin)"
 OUT=$(CODEX_API_KEY=test PRILIVE_MODELS_CACHE=/nonexistent/cache.json resolve_codex_model "auto" 2>/dev/null)
-[[ "${OUT}" == "gpt-5.2-codex" ]] || fail "case 4-aa: api_key fallback should be gpt-5.2-codex (NOT gpt-5.5 — that 400s under api_key per OpenAI June-2026); got: '${OUT}'"
-pass "auto: missing cache + api_key → gpt-5.2-codex (closes the v2.1.1-class api_key fallback bug)"
+[[ -z "${OUT}" ]] || fail "case 4-aa: v2.3.2 api_key fallback should be empty (NOT gpt-5.2-codex, NOT gpt-5.5 — refused to keep patching pins); got: '${OUT}'"
+pass "auto: missing cache + api_key → empty (v2.3.2 stop-pinning design)"
 PASS_COUNT=$((PASS_COUNT+1))
 
-info "[4-ab] counterfactual — subscription fallback is NOT gpt-5.2-codex"
+info "[4-ab] counterfactual — empty fallback is NOT a specific slug"
 OUT=$(env -i HOME="${HOME}" PATH="${PATH}" bash -c "
   . '${LIB}'
   PRILIVE_MODELS_CACHE=/nonexistent resolve_codex_model 'auto'
 " 2>/dev/null)
-[[ "${OUT}" != "gpt-5.2-codex" ]] || fail "case 4-ab: subscription should NOT get api_key default; got: '${OUT}'"
-pass "counterfactual: subscription path does NOT cross over to api_key default"
+[[ "${OUT}" != "gpt-5.5" ]]       || fail "case 4-ab: v2.3.2 must NOT pin gpt-5.5; got: '${OUT}'"
+[[ "${OUT}" != "gpt-5.2-codex" ]] || fail "case 4-ab: v2.3.2 must NOT pin gpt-5.2-codex; got: '${OUT}'"
+pass "counterfactual: v2.3.2 fallback is NOT any specific slug"
 PASS_COUNT=$((PASS_COUNT+1))
 
 info "[4b] auto honors PRILIVE_MODEL_FALLBACK override on fallback path (subscription)"
@@ -111,23 +112,23 @@ OUT=$(env -i HOME="${HOME}" PATH="${PATH}" bash -c "
   PRILIVE_MODELS_CACHE=/nonexistent PRILIVE_MODEL_FALLBACK=gpt-4.9 resolve_codex_model 'auto'
 " 2>/dev/null)
 [[ "${OUT}" == "gpt-4.9" ]] || fail "case 4b: env override ignored under subscription; got '${OUT}'"
-pass "auto: PRILIVE_MODEL_FALLBACK=gpt-4.9 → gpt-4.9 on subscription fallback"
+pass "auto: PRILIVE_MODEL_FALLBACK=gpt-4.9 → gpt-4.9 (operator escape hatch still works)"
 PASS_COUNT=$((PASS_COUNT+1))
 
-info "[4b-aa] v2.3.1 — PRILIVE_MODEL_FALLBACK override wins over api_key default"
+info "[4b-aa] PRILIVE_MODEL_FALLBACK override wins under api_key auth too"
 OUT=$(CODEX_API_KEY=test PRILIVE_MODELS_CACHE=/nonexistent PRILIVE_MODEL_FALLBACK=gpt-4.9 resolve_codex_model "auto" 2>/dev/null)
-[[ "${OUT}" == "gpt-4.9" ]] || fail "case 4b-aa: explicit fallback should beat api_key default; got: '${OUT}'"
-pass "auto: PRILIVE_MODEL_FALLBACK wins over api_key auth-aware default"
+[[ "${OUT}" == "gpt-4.9" ]] || fail "case 4b-aa: explicit env fallback should win under api_key; got: '${OUT}'"
+pass "auto: PRILIVE_MODEL_FALLBACK wins under api_key auth (operator escape hatch unchanged)"
 PASS_COUNT=$((PASS_COUNT+1))
 
-info "[4b-ab] v2.3.1 — fallback function directly, both auth modes"
+info "[4b-ab] v2.3.2 — fallback function returns empty for all auth modes"
 SUB=$(resolve_codex_model_fallback subscription 2>/dev/null)
 API=$(resolve_codex_model_fallback api_key 2>/dev/null)
 UNSET=$(env -i HOME="${HOME}" PATH="${PATH}" bash -c ". '${LIB}'; resolve_codex_model_fallback" 2>/dev/null)
-[[ "${SUB}" == "gpt-5.5" ]]       || fail "case 4b-ab: subscription should be gpt-5.5; got '${SUB}'"
-[[ "${API}" == "gpt-5.2-codex" ]] || fail "case 4b-ab: api_key should be gpt-5.2-codex; got '${API}'"
-[[ "${UNSET}" == "gpt-5.5" ]]     || fail "case 4b-ab: missing auth_mode should default to subscription/gpt-5.5; got '${UNSET}'"
-pass "resolve_codex_model_fallback: subscription=gpt-5.5, api_key=gpt-5.2-codex, unset=gpt-5.5 (back-compat)"
+[[ -z "${SUB}" ]]   || fail "case 4b-ab: v2.3.2 subscription fallback should be empty; got '${SUB}'"
+[[ -z "${API}" ]]   || fail "case 4b-ab: v2.3.2 api_key fallback should be empty; got '${API}'"
+[[ -z "${UNSET}" ]] || fail "case 4b-ab: v2.3.2 unset-arg fallback should be empty; got '${UNSET}'"
+pass "resolve_codex_model_fallback: empty for subscription, empty for api_key, empty for unset (v2.3.2 stop-pinning)"
 PASS_COUNT=$((PASS_COUNT+1))
 
 info "[4c] auto with valid-typical fixture → resolves to gpt-5.5 (top priority)"
@@ -185,32 +186,42 @@ OUT=$(PRILIVE_MODELS_CACHE="${FIXTURE_DIR}/null-fields.json" resolve_codex_model
 pass "auto: null on optional fields tolerated → gpt-5.5"
 PASS_COUNT=$((PASS_COUNT+1))
 
-info "[4l] auto + empty-models → fallback + warning"
-OUT=$(PRILIVE_MODELS_CACHE="${FIXTURE_DIR}/empty-models.json" resolve_codex_model "auto" 2>/dev/null)
-ERR=$(PRILIVE_MODELS_CACHE="${FIXTURE_DIR}/empty-models.json" resolve_codex_model "auto" 2>&1 >/dev/null)
-[[ "${OUT}" == "gpt-5.5" ]] || fail "case 4l: expected fallback gpt-5.5 on empty list, got '${OUT}'"
+info "[4l] auto + empty-models → empty fallback (v2.3.2) + warning"
+OUT=$(env -i HOME="${HOME}" PATH="${PATH}" bash -c "
+  . '${LIB}'
+  PRILIVE_MODELS_CACHE='${FIXTURE_DIR}/empty-models.json' resolve_codex_model 'auto'
+" 2>/dev/null)
+ERR=$(env -i HOME="${HOME}" PATH="${PATH}" bash -c "
+  . '${LIB}'
+  PRILIVE_MODELS_CACHE='${FIXTURE_DIR}/empty-models.json' resolve_codex_model 'auto'
+" 2>&1 >/dev/null)
+[[ -z "${OUT}" ]] || fail "case 4l: v2.3.2 expects empty fallback on empty models list; got '${OUT}'"
 echo "${ERR}" | grep -qE 'no candidates|filter' || fail "case 4l: expected no-candidates warning, got: ${ERR}"
-pass "auto: empty models list → fallback + no-candidates warning"
+pass "auto: empty models list → empty fallback + no-candidates warning"
 PASS_COUNT=$((PASS_COUNT+1))
 
-info "[4m] auto + not-json → fallback + parse-error warning"
-OUT=$(PRILIVE_MODELS_CACHE="${FIXTURE_DIR}/not-json.txt" resolve_codex_model "auto" 2>/dev/null)
-ERR=$(PRILIVE_MODELS_CACHE="${FIXTURE_DIR}/not-json.txt" resolve_codex_model "auto" 2>&1 >/dev/null)
-[[ "${OUT}" == "gpt-5.5" ]] || fail "case 4m: expected fallback gpt-5.5 on parse error, got '${OUT}'"
+info "[4m] auto + not-json → empty fallback (v2.3.2) + parse-error warning"
+OUT=$(env -i HOME="${HOME}" PATH="${PATH}" bash -c "
+  . '${LIB}'
+  PRILIVE_MODELS_CACHE='${FIXTURE_DIR}/not-json.txt' resolve_codex_model 'auto'
+" 2>/dev/null)
+ERR=$(env -i HOME="${HOME}" PATH="${PATH}" bash -c "
+  . '${LIB}'
+  PRILIVE_MODELS_CACHE='${FIXTURE_DIR}/not-json.txt' resolve_codex_model 'auto'
+" 2>&1 >/dev/null)
+[[ -z "${OUT}" ]] || fail "case 4m: v2.3.2 expects empty fallback on parse error; got '${OUT}'"
 echo "${ERR}" | grep -qE 'not valid JSON|JSON' || fail "case 4m: expected JSON-error warning, got: ${ERR}"
-pass "auto: corrupt cache → fallback + JSON-error warning"
+pass "auto: corrupt cache → empty fallback + JSON-error warning"
 PASS_COUNT=$((PASS_COUNT+1))
 
-info "[4n] auto + missing-required → fallback + missing-fields warning"
+info "[4n] auto + missing-required → still tolerated (resolver only needs .models[])"
 OUT=$(PRILIVE_MODELS_CACHE="${FIXTURE_DIR}/missing-required.json" resolve_codex_model "auto" 2>/dev/null)
 ERR=$(PRILIVE_MODELS_CACHE="${FIXTURE_DIR}/missing-required.json" resolve_codex_model "auto" 2>&1 >/dev/null)
-# missing-required has .models (which is the field we actually require for slice 2);
-# it lacks client_version + fetched_at but the resolver tolerates that and uses .models.
-# So this fixture should succeed and return the slug. The fixture is documented as
-# "fallback in slice 2" but the resolver design (per addendum: tolerant of unknown
-# fields; only fail on REQUIRED fields the resolver depends on) accepts it.
-[[ "${OUT}" == "gpt-5.5" ]] || fail "case 4n: expected gpt-5.5 (resolver only requires .models[]); got '${OUT}'"
-pass "auto: missing top-level metadata (client_version/fetched_at) tolerated (resolver only depends on .models[])"
+# missing-required has .models (which is the field we actually require);
+# it lacks client_version + fetched_at but the resolver tolerates that.
+# So this fixture should succeed and return the slug (cache path, not fallback path).
+[[ "${OUT}" == "gpt-5.5" ]] || fail "case 4n: expected gpt-5.5 from cache (resolver only requires .models[]); got '${OUT}'"
+pass "auto: missing top-level metadata tolerated; cache path returns slug from cache"
 PASS_COUNT=$((PASS_COUNT+1))
 
 info "[4o] auto with stale cache → slug returned, stale warning emitted"
