@@ -1,8 +1,9 @@
-# Update notes: v2.2.x → v2.3.0
+# Update notes: v2.2.x → v2.3.2
 
 > **Audience.** A developer who already installed the Prilive Go TDD
 > Pack at **v2.2.x** (via project-copy or plugin install) and wants
-> to move to **v2.3.0**.
+> to move to **v2.3.2** (the current v2.3.x tag — supersedes v2.3.0
+> and v2.3.1).
 >
 > First time installing? Read
 > [`ADOPTION_GUIDE.md`](ADOPTION_GUIDE.md) instead.
@@ -11,33 +12,67 @@
 > [`UPDATE_NOTES_v2.0-to-v2.1.md`](UPDATE_NOTES_v2.0-to-v2.1.md) and
 > [`UPDATE_NOTES_v2.1-to-v2.2.md`](UPDATE_NOTES_v2.1-to-v2.2.md) FIRST
 > to get to v2.2.x, then this guide.
+>
+> Already at v2.3.0 or v2.3.1? Skip to
+> [§ "What changed between v2.3.0 and v2.3.2"](#what-changed-between-v230-and-v232)
+> below — it's a small delta (one toml value + one resolver behavior).
 
-v2.3.0 is **backwards-compatible with v2.2.x** in the happy path. The
-headline change — `model = "auto"` cache-driven model selection — is
-default-on, but its fallback path resolves to the same `gpt-5.5`
-slug v2.1.1 pinned, so adopters on subscription accounts see zero
-immediate behavior change. The three other v2.3-track items
-(grounding adapter, FDTDD Stage 1 marker, sandbox research) are
-**contract spikes** — design documents + fixture sets that gate
-future slice 2+ work, with **no runtime behavior change** in v2.3.0.
+v2.3.2 is **backwards-compatible with v2.2.x** in the happy path. The
+headline change — `model = ""` (no pin) as the shipped default — lets
+Codex CLI manage its own model default. Per [OpenAI's June-2026 Codex
+docs](https://developers.openai.com/codex/models), Codex CLI's current
+default is `gpt-5.5` and works on both ChatGPT-auth and API-key auth,
+so adopters see **zero immediate behavior change**. The pack now
+auto-tracks future Codex CLI default changes with no repo edits. The
+three other v2.3-track items (grounding adapter, FDTDD Stage 1 marker,
+sandbox research) are **contract spikes** — design documents +
+fixture sets that gate future slice 2+ work, with **no runtime
+behavior change** in v2.3.x.
+
+## What changed between v2.3.0 and v2.3.2
+
+Three patches landed inside the v2.3.x line over a single weekend.
+If you're caught at v2.3.0 or v2.3.1, the cumulative delta to v2.3.2:
+
+- **v2.3.0** shipped `model = "auto"` (cache-driven resolver with
+  `gpt-5.5` hardcoded fallback).
+- **v2.3.1** added an auth-aware fallback split (`gpt-5.5` under
+  subscription, `gpt-5.2-codex` under api_key). Based on a wrong
+  third-party-blog interpretation of OpenAI's model lineup.
+- **v2.3.2** reverted to no-pin. Shipped default is `model = ""`;
+  resolver fallback returns empty for all auth modes. Trusts Codex
+  CLI to manage the default. The v2.1.1 incident (Codex CLI 0.130
+  shifted default to a paid-only model) is OpenAI's problem to fix
+  upstream going forward.
+
+If you're already at v2.3.x, the v2.3.2 upgrade is one file change
+(`tdd-pack.toml` template `model` flip) + one resolver behavior
+change (`resolve_codex_model_fallback` returns empty). Pinned-slug
+adopters and `PRILIVE_MODEL_FALLBACK` env adopters see **no change**.
 
 ---
 
 ## TL;DR — what changed
 
-- **`model = "auto"` is the new shipped default.** The runner reads
-  `~/.codex/models_cache.json` (Codex CLI maintains it
-  automatically), filters role-inappropriate slugs (`*-auto-review`,
-  `*-spark`, `*-mini`), sorts by priority, returns the winner. Falls
-  back to `gpt-5.5` with a stderr warning if the cache is missing or
-  corrupt — same slug v2.1.1 hotfix pinned.
+- **`model = ""` is the new shipped default** (v2.3.2). The runner
+  omits the `--model` flag and Codex CLI's own default applies.
+  Per [OpenAI's June-2026 Codex docs](https://developers.openai.com/codex/models),
+  that default is `gpt-5.5` and works on both ChatGPT-auth and
+  API-key auth. **Zero immediate behavior change** for adopters;
+  auto-tracks future Codex CLI default changes.
+- **`model = "auto"` is still supported** as an opt-in. Adopters who
+  want the cache-driven resolver (reads `~/.codex/models_cache.json`,
+  filters role-inappropriate slugs, picks highest priority) can set
+  it explicitly. Fallback when cache fails: empty (same as
+  `model = ""`).
 - **Adopters keeping their existing `tdd-pack.toml`** (with their own
-  `model` value) are unaffected — the resolver respects pinned slugs
-  unchanged.
-- **One latent bug fixed.** Pre-v2.3, `runner/ops-preflight-review.sh`
-  called `codex exec` with **no `-m` flag** — same trap v2.1.1 fixed
-  in the main runners but missed for the ops-preflight path. Now
-  resolved via the same resolver.
+  `model` value, whether `""`, `"auto"`, or a pinned slug) are
+  unaffected — the resolver respects whatever they set.
+- **One latent bug fixed** (v2.3.0 slice 2). Pre-v2.3,
+  `runner/ops-preflight-review.sh` called `codex exec` with **no
+  `-m` flag** — same trap v2.1.1 fixed in the main runners but
+  missed for the ops-preflight path. Now resolved via the same
+  resolver.
 - **FDTDD marker location moved** to `.tdd/findings/active.json`
   (was: `.tdd/active-finding`). Legacy markers remain
   **read-only via fallback** until you next run `finding-start.sh`,
@@ -51,7 +86,7 @@ future slice 2+ work, with **no runtime behavior change** in v2.3.0.
   - `docs/FDTDD-MARKER-CONTRACT.md` + `docs/FDTDD-SLICE1-PRECHECKLIST.md` (task #133)
   - `docs/RESEARCH-codex-sandbox-features.md` (task #105)
 
-  These are read-only artifacts in v2.3.0; their runtime
+  These are read-only artifacts in v2.3.x; their runtime
   implementations will land in future minors.
 
 - **No breaking changes.** No code-review behavior, no
@@ -62,8 +97,8 @@ future slice 2+ work, with **no runtime behavior change** in v2.3.0.
 ## TL;DR — happy path
 
 ```bash
-# 1. Pull the v2.3.0 pack source.
-git clone --depth 1 --branch v2.3.0 \
+# 1. Pull the v2.3.2 pack source.
+git clone --depth 1 --branch v2.3.2 \
   git@github.com:prilive-com/go-tdd-pack.git /tmp/go-tdd-pack-v2.3
 
 # 2. From your project root, refresh pack-owned trees (overwrites
@@ -117,8 +152,10 @@ bash test/smoke-fdtdd-backward-compat.sh
 bash test/smoke-fdtdd-marker-schema.sh
 bash test/smoke-protect-tdd-artifacts.sh
 bash test/smoke-protect-tdd-artifacts-traversal.sh
-bash test/smoke-prompt-content.sh
 bash test/smoke-plugin-manifest-v21.sh
+# Note: smoke-prompt-content.sh is pack-internal CI (asserts the pack's
+# own README/ADOPTION_GUIDE content); SKIP it in adopter projects —
+# you don't ship the pack's user-facing docs verbatim.
 # If you're using the v2.2 Ops Risk Triage rail (opt-in):
 bash test/smoke-ops-triage-slice1.sh
 bash test/smoke-ops-triage-slice2.sh
@@ -136,37 +173,39 @@ adopters can leave it alone.
 
 ### Decision: what value for `[codex] model`?
 
-The shipped default flipped from `model = "gpt-5.5"` to
-`model = "auto"`. You have three reasonable choices:
+The shipped default flipped from `model = "gpt-5.5"` (v2.1.1) through
+`model = "auto"` (v2.3.0) to **`model = ""`** (v2.3.2). You have
+three valid choices:
 
 | Your `tdd-pack.toml` | Behavior |
 |---|---|
-| `model = "auto"` **(recommended)** | Runner reads `~/.codex/models_cache.json` at session start, picks the highest-priority "list"-visible slug, falls back to `gpt-5.5` if cache missing/corrupt. **Self-upgrades when new frontier models ship.** |
-| `model = "<slug>"` (e.g. `"gpt-5.5"`) | Pin a specific slug. Use for **reproducibility** or when validating a specific model. Skips the cache. |
-| `model = ""` | Defer to Codex CLI's `--model` default. **Documented unsafe** (v2.1.1 incident); kept only for adopters who explicitly depend on it. |
+| `model = ""` **(recommended; v2.3.2 shipped default)** | Runner omits the `--model` flag. Codex CLI applies its own default (currently `gpt-5.5` per OpenAI's June-2026 docs; works on both ChatGPT-auth and API-key auth). Auto-tracks future Codex CLI default changes. |
+| `model = "auto"` (opt-in) | Resolver reads `~/.codex/models_cache.json`, filters role-inappropriate slugs (`*-auto-review`, `*-spark`, `*-mini`), picks highest priority. Fallback when cache fails: empty (same as `""`). Use this if you specifically want the role-suitability filter. |
+| `model = "<slug>"` (e.g. `"gpt-5.5"`) | Pin a specific slug. Use for **reproducibility** or when validating a specific model. Skips the cache. Stale-by-design — you maintain the bump cadence. |
 
 If you keep your existing value (whatever it is), nothing breaks.
 
-#### Adopter recommendation: keep your current value for one
-maintenance cycle, then flip to `"auto"`
+#### Adopter recommendation: keep your current value
 
-If you've been running `model = "gpt-5.5"` since v2.1.1, that's
-still working today. The pack maintainer is dogfooding `"auto"`
-since v2.3.0; once a week or two of field signal accumulates, the
-risk of `"auto"` resolving to something unreachable on your account
-is well-understood. Until then, `model = "gpt-5.5"` is no worse
-than what you had.
+If you've been running `model = "gpt-5.5"` since v2.1.1, it still
+works exactly as before. If you've been running `model = ""` since
+before v2.1.1, you're now back to a supported-and-documented state.
+**No reason to change unless you want the new behavior.**
 
-#### Fallback override
+The pack maintainer is on `model = ""` since v2.3.2 (dogfooding the
+no-pin design).
 
-If you flip to `"auto"` but want a different safety-net slug, set:
+#### Fallback override (operator escape hatch)
+
+If you set `model = "auto"` but want a specific safety-net slug when
+the cache fails (CI replay, regulatory audit, etc.), set:
 
 ```bash
-export PRILIVE_MODEL_FALLBACK=gpt-5.5-codex
+export PRILIVE_MODEL_FALLBACK=gpt-5.5
 ```
 
-(or whatever your account reaches). The resolver uses this value
-on the fallback path. Default fallback is `gpt-5.5`.
+(or whatever your account reaches). The env var ALWAYS wins. Default
+fallback (when the env var is unset): empty — same as `model = ""`.
 
 ### Optional: add explicit `[review] mode` to `tdd-pack.toml`
 
@@ -300,12 +339,15 @@ cp -R "$PACK/runner/."  runner/
 cp -R "$PACK/prompts/." prompts/
 cp -R "$PACK/schemas/." schemas/
 cp -R "$PACK/test/."    test/
-# Manually drop the new v2.3-only files (or just leave them — they
-# are unreferenced by v2.2 hooks/runners):
+cp -R "$PACK/scripts/." scripts/        # ← important; forward upgrade copied scripts/
+cp "$PACK/.claude-plugin/plugin.json" .claude-plugin/
+# Drop v2.3-only files that cp -R doesn't remove (cp -R only overwrites,
+# never deletes files absent in the source):
 rm -rf test/fixtures/codex-models-cache \
        test/fixtures/grounding-parity \
        test/fixtures/pretooluse-payloads \
        scripts/research \
+       scripts/review \
        docs/research \
        docs/PROPOSAL-model-auto-select.md \
        docs/PROPOSAL-grounding-adapter-interface.md \
@@ -319,6 +361,13 @@ rm -rf test/fixtures/codex-models-cache \
        schemas/active-finding.schema.json \
        runner/lib/resolve-model.sh
 ```
+
+> **Rollback is best-effort.** Forward upgrade is the validated
+> path. Rollback works for file restoration but adopter-state
+> quirks (active FDTDD findings, partially-migrated markers,
+> custom hooks layered on top) may need hand-resolution.
+> Recommend using `git restore` of your project's tdd-pack files
+> if you have meaningful state.
 
 `tdd-pack.toml`, `CLAUDE.md`, `.claude/settings.json`, and any
 adopter-owned files are not touched by either upgrade or rollback.
@@ -340,12 +389,12 @@ adopter-owned files are not touched by either upgrade or rollback.
 
 ## References
 
-- [`CHANGELOG.md`](../CHANGELOG.md) — full v2.3.0 entry with PR
-  numbers + technical detail.
+- [`CHANGELOG.md`](../CHANGELOG.md) — full v2.3.0 / v2.3.1 / v2.3.2
+  entries with PR numbers + technical detail.
 - [`README.md`](../README.md) — current product line + project
   status.
 - [`ADOPTION_GUIDE.md`](ADOPTION_GUIDE.md) — fresh-install path.
-- v2.3 contract spikes (read-only in v2.3.0; slice 2+ will land
+- v2.3 contract spikes (read-only in v2.3.x; slice 2+ will land
   the implementations):
   - [`PROPOSAL-model-auto-select.md`](PROPOSAL-model-auto-select.md)
     + addendum (the design + Codex review of the resolver shipped
