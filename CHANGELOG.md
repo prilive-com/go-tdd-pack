@@ -15,6 +15,50 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 _No unreleased changes._
 
+## [2.3.1] - 2026-06-10
+
+**Hotfix release.** Auth-aware fallback for `runner/lib/resolve-model.sh`. Pre-v2.3.1 the resolver's fallback path (used when the Codex models cache is missing / corrupt / has no candidates) hardcoded `gpt-5.5` for both auth modes. **Per OpenAI's June-2026 model lineup, `gpt-5.5` is ChatGPT-subscription-auth ONLY** (Plus / Pro / Team) — it is NOT API-key-reachable. API-key adopters who hit the fallback path would get HTTP 400 on every cycle, same incident class as v2.1.1 Bug 2.
+
+The behavior gap was surfaced empirically by the **devopspoint review-engine team** during their own dual-auth investigation: they tested the binary instead of trusting upstream documentation, found the API-key model lineup requires `gpt-5.2-codex`, and shared the finding back. Credit to them for catching what v2.3.0 missed.
+
+**Subscription adopters: zero behavior change.** The subscription-path fallback is still `gpt-5.5`. **API-key adopters: fallback now resolves to `gpt-5.2-codex` instead of `gpt-5.5`** — your fallback path now actually works.
+
+### Fixed
+
+- **`runner/lib/resolve-model.sh:resolve_codex_model_fallback`** — now takes an `auth_mode` argument and returns the safe slug per mode:
+  - `subscription` → `gpt-5.5` (unchanged)
+  - `api_key` → `gpt-5.2-codex` (NEW)
+  - missing arg → `gpt-5.5` (back-compat for any caller that doesn't pass the new arg)
+- **`resolve_codex_model`** — resolves `auth_mode` upfront (via the existing `_resolve_codex_auth_mode` helper which checks `CODEX_API_KEY` / `OPENAI_API_KEY`) and threads it through to the fallback function.
+- **`tdd-pack.toml` doc-block for `[codex] model`** — removed the misleading "verified working on both ChatGPT subscription auth and API-key auth" claim that pre-v2.3.1 carried over from v2.1.1. New doc-block documents the auth-aware fallback explicitly with the OpenAI June-2026 model-lineup citation.
+
+### Changed
+
+- **`PRILIVE_MODEL_FALLBACK` env override** — semantics unchanged. The env var STILL wins over both auth modes — operators who want to pin the fallback explicitly (testing, regulatory determinism, etc.) keep doing exactly that.
+
+### Verification
+
+- `test/smoke-resolve-model.sh` extended from 43 to 47 checks. Four new cases cover:
+  - Subscription auth + missing cache → `gpt-5.5` (existing behavior preserved).
+  - **`api_key` auth + missing cache → `gpt-5.2-codex`** (NEW — closes the bug).
+  - Counterfactual: subscription path does NOT cross over to the api_key default.
+  - `PRILIVE_MODEL_FALLBACK` wins over both auth modes (regression protection).
+  - `resolve_codex_model_fallback` direct API: 3-way coverage (subscription / api_key / unset).
+- All 12 critical smokes green: total check count up from 195 to 199.
+
+### Adopter action
+
+| Adopter type | Action |
+|---|---|
+| Subscription auth, `model = "auto"` | None. Behavior identical. |
+| Subscription auth, pinned slug | None. Pin is respected. |
+| **API-key auth, `model = "auto"`** | **Upgrade to v2.3.1.** Pre-v2.3.1 your fallback path was broken. |
+| API-key auth, pinned `gpt-5.2-codex` (or other API-reachable slug) | None. Pin is respected. |
+
+### Acknowledgement
+
+This fix exists because the devopspoint review-engine team chose to verify against their actual Codex binary instead of trusting my v2.3.0 recommendation (which was wrong on this point). The "verify, don't defer" stance is the right discipline; v2.3.0's `tdd-pack.toml` doc-block has been corrected to match.
+
 ## [2.3.0] - 2026-06-10
 
 **Feature release.** Adds **cache-driven model selection** (`model = "auto"`) — the runner reads `~/.codex/models_cache.json` at session start, filters role-inappropriate slugs (`*-auto-review`, `*-spark`, `*-mini`), sorts by priority, and picks the winner with a fallback to `gpt-5.5` if the cache is missing or corrupt. Closes the v2.1.1 stale-pin problem: when a new frontier model ships, the runner picks it up on the next session with zero adopter action. Also lands **three v2.3-track contract spikes** that gate slice-2 implementation work: grounding-adapter interface (#107), FDTDD Stage 1 marker schema + filesystem contract (#133), and Codex sandbox-features research (#105). All three followed the **proposal-review discipline** baked into RELEASE_GUIDE in v2.3 process work — each proposal was Codex-reviewed before any code shipped (8 BLOCKERs caught across the three, all addressed in addenda).

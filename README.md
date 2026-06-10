@@ -303,7 +303,7 @@ git commit -s -m "Your change description"
 
 ## Project status
 
-- **Current public line:** v2.3.x (v2.3.0 released 2026-06-10).
+- **Current public line:** v2.3.x (v2.3.1 released 2026-06-10).
 - **License:** Apache-2.0
 - **Maintainer:** Prilive ([github.com/prilive-com](https://github.com/prilive-com))
 - **Primary audience:** Go teams using Claude Code and Codex CLI

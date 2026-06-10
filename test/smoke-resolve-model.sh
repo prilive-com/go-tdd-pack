@@ -76,18 +76,58 @@ echo "${ERR}" | grep -qE 'cli-default|v2.1.1|defers' || fail "case 3: expected d
 pass "cli-default: '' + deprecation note on stderr (MAJOR M3 closure)"
 PASS_COUNT=$((PASS_COUNT+1))
 
-info "[4] auto + missing cache → fallback + warning"
-OUT=$(PRILIVE_MODELS_CACHE=/nonexistent/cache.json resolve_codex_model "auto" 2>/dev/null)
-ERR=$(PRILIVE_MODELS_CACHE=/nonexistent/cache.json resolve_codex_model "auto" 2>&1 >/dev/null)
-[[ "${OUT}" == "gpt-5.5" ]] || fail "case 4: expected fallback gpt-5.5, got: '${OUT}'"
+info "[4] auto + missing cache + subscription auth → fallback to gpt-5.5"
+OUT=$(env -i HOME="${HOME}" PATH="${PATH}" bash -c "
+  . '${LIB}'
+  PRILIVE_MODELS_CACHE=/nonexistent/cache.json resolve_codex_model 'auto'
+" 2>/dev/null)
+ERR=$(env -i HOME="${HOME}" PATH="${PATH}" bash -c "
+  . '${LIB}'
+  PRILIVE_MODELS_CACHE=/nonexistent/cache.json resolve_codex_model 'auto'
+" 2>&1 >/dev/null)
+[[ "${OUT}" == "gpt-5.5" ]] || fail "case 4: expected subscription fallback gpt-5.5, got: '${OUT}'"
 echo "${ERR}" | grep -qE 'absent|missing|cache' || fail "case 4: expected absent-cache warning, got: ${ERR}"
-pass "auto: missing cache → fallback + absent-cache warning"
+pass "auto: missing cache + subscription → gpt-5.5 + absent-cache warning"
 PASS_COUNT=$((PASS_COUNT+1))
 
-info "[4b] auto honors PRILIVE_MODEL_FALLBACK override on fallback path"
-OUT=$(PRILIVE_MODELS_CACHE=/nonexistent PRILIVE_MODEL_FALLBACK=gpt-4.9 resolve_codex_model "auto" 2>/dev/null)
-[[ "${OUT}" == "gpt-4.9" ]] || fail "case 4b: env override ignored; got '${OUT}'"
-pass "auto: PRILIVE_MODEL_FALLBACK=gpt-4.9 → gpt-4.9 on fallback path"
+info "[4-aa] v2.3.1 — auto + missing cache + api_key auth → fallback to gpt-5.2-codex"
+OUT=$(CODEX_API_KEY=test PRILIVE_MODELS_CACHE=/nonexistent/cache.json resolve_codex_model "auto" 2>/dev/null)
+[[ "${OUT}" == "gpt-5.2-codex" ]] || fail "case 4-aa: api_key fallback should be gpt-5.2-codex (NOT gpt-5.5 — that 400s under api_key per OpenAI June-2026); got: '${OUT}'"
+pass "auto: missing cache + api_key → gpt-5.2-codex (closes the v2.1.1-class api_key fallback bug)"
+PASS_COUNT=$((PASS_COUNT+1))
+
+info "[4-ab] counterfactual — subscription fallback is NOT gpt-5.2-codex"
+OUT=$(env -i HOME="${HOME}" PATH="${PATH}" bash -c "
+  . '${LIB}'
+  PRILIVE_MODELS_CACHE=/nonexistent resolve_codex_model 'auto'
+" 2>/dev/null)
+[[ "${OUT}" != "gpt-5.2-codex" ]] || fail "case 4-ab: subscription should NOT get api_key default; got: '${OUT}'"
+pass "counterfactual: subscription path does NOT cross over to api_key default"
+PASS_COUNT=$((PASS_COUNT+1))
+
+info "[4b] auto honors PRILIVE_MODEL_FALLBACK override on fallback path (subscription)"
+OUT=$(env -i HOME="${HOME}" PATH="${PATH}" bash -c "
+  . '${LIB}'
+  PRILIVE_MODELS_CACHE=/nonexistent PRILIVE_MODEL_FALLBACK=gpt-4.9 resolve_codex_model 'auto'
+" 2>/dev/null)
+[[ "${OUT}" == "gpt-4.9" ]] || fail "case 4b: env override ignored under subscription; got '${OUT}'"
+pass "auto: PRILIVE_MODEL_FALLBACK=gpt-4.9 → gpt-4.9 on subscription fallback"
+PASS_COUNT=$((PASS_COUNT+1))
+
+info "[4b-aa] v2.3.1 — PRILIVE_MODEL_FALLBACK override wins over api_key default"
+OUT=$(CODEX_API_KEY=test PRILIVE_MODELS_CACHE=/nonexistent PRILIVE_MODEL_FALLBACK=gpt-4.9 resolve_codex_model "auto" 2>/dev/null)
+[[ "${OUT}" == "gpt-4.9" ]] || fail "case 4b-aa: explicit fallback should beat api_key default; got: '${OUT}'"
+pass "auto: PRILIVE_MODEL_FALLBACK wins over api_key auth-aware default"
+PASS_COUNT=$((PASS_COUNT+1))
+
+info "[4b-ab] v2.3.1 — fallback function directly, both auth modes"
+SUB=$(resolve_codex_model_fallback subscription 2>/dev/null)
+API=$(resolve_codex_model_fallback api_key 2>/dev/null)
+UNSET=$(env -i HOME="${HOME}" PATH="${PATH}" bash -c ". '${LIB}'; resolve_codex_model_fallback" 2>/dev/null)
+[[ "${SUB}" == "gpt-5.5" ]]       || fail "case 4b-ab: subscription should be gpt-5.5; got '${SUB}'"
+[[ "${API}" == "gpt-5.2-codex" ]] || fail "case 4b-ab: api_key should be gpt-5.2-codex; got '${API}'"
+[[ "${UNSET}" == "gpt-5.5" ]]     || fail "case 4b-ab: missing auth_mode should default to subscription/gpt-5.5; got '${UNSET}'"
+pass "resolve_codex_model_fallback: subscription=gpt-5.5, api_key=gpt-5.2-codex, unset=gpt-5.5 (back-compat)"
 PASS_COUNT=$((PASS_COUNT+1))
 
 info "[4c] auto with valid-typical fixture → resolves to gpt-5.5 (top priority)"
