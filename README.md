@@ -303,12 +303,12 @@ git commit -s -m "Your change description"
 
 ## Project status
 
-- **Current public line:** v2.2.x (v2.2.0 released 2026-06-07).
+- **Current public line:** v2.3.x (v2.3.0 released 2026-06-10).
 - **License:** Apache-2.0
 - **Maintainer:** Prilive ([github.com/prilive-com](https://github.com/prilive-com))
 - **Primary audience:** Go teams using Claude Code and Codex CLI
 - **Production usage:** validated on one real Go monorepo since 2026-05-18; v2.1.0 + v2.2.0 verified via the postmortem A1/A2 live-smoke gate against post-merge clean `main` ([`docs/RELEASE_GUIDE.md`](docs/RELEASE_GUIDE.md) Phase 3a).
-- **Legacy support:** v1.x ceremony architecture is no longer maintained; v2.0.x / v2.1.0 are superseded. New adoption should use v2.2.x.
+- **Legacy support:** v1.x ceremony architecture is no longer maintained; v2.0.x / v2.1.0 / v2.2.x are superseded. New adoption should use v2.3.x.
 
 ---
 

@@ -24,11 +24,11 @@ PASS_COUNT=0
 command -v jq >/dev/null 2>&1 || fail "jq required"
 [[ -f "${MANIFEST}" ]] || fail "plugin manifest not found"
 
-info "[1] manifest version is 2.1.x or 2.2.x (covers shipped release lines)"
+info "[1] manifest version is 2.1.x, 2.2.x or 2.3.x (covers shipped release lines)"
 VER=$(jq -r '.version // empty' "${MANIFEST}")
 case "${VER}" in
-  2.1.*|2.2.*) ;;
-  *) fail "manifest version is '${VER}', expected 2.1.x or 2.2.x" ;;
+  2.1.*|2.2.*|2.3.*) ;;
+  *) fail "manifest version is '${VER}', expected 2.1.x, 2.2.x or 2.3.x" ;;
 esac
 pass "version = ${VER}"
 PASS_COUNT=$((PASS_COUNT+1))

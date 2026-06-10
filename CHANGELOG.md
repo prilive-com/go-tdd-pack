@@ -15,6 +15,50 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 _No unreleased changes._
 
+## [2.3.0] - 2026-06-10
+
+**Feature release.** Adds **cache-driven model selection** (`model = "auto"`) — the runner reads `~/.codex/models_cache.json` at session start, filters role-inappropriate slugs (`*-auto-review`, `*-spark`, `*-mini`), sorts by priority, and picks the winner with a fallback to `gpt-5.5` if the cache is missing or corrupt. Closes the v2.1.1 stale-pin problem: when a new frontier model ships, the runner picks it up on the next session with zero adopter action. Also lands **three v2.3-track contract spikes** that gate slice-2 implementation work: grounding-adapter interface (#107), FDTDD Stage 1 marker schema + filesystem contract (#133), and Codex sandbox-features research (#105). All three followed the **proposal-review discipline** baked into RELEASE_GUIDE in v2.3 process work — each proposal was Codex-reviewed before any code shipped (8 BLOCKERs caught across the three, all addressed in addenda).
+
+Six implementation PRs (#61–#66) + the design proposals (#53–#55) + their Codex-review addenda (#56–#58) + the proposal-review process bake-in (#59) + adopter doc refresh (#60). **`model = "auto"` is now the shipped default** (`tdd-pack.toml`); pinned-slug behavior is preserved by setting `model = "<slug>"` explicitly; v2.1.x defer-to-CLI behavior preserved by `model = ""` (still documented unsafe).
+
+### Added
+
+- **Cache-driven model resolver (#138)** — `runner/lib/resolve-model.sh` reads `~/.codex/models_cache.json`, validates structure, filters by role suitability + visibility + auth-mode reach, sorts by priority ASC then slug ASC, returns the winner. Fallback path on missing / corrupt / empty cache to `PRILIVE_MODEL_FALLBACK` or `gpt-5.5`. Wired into every runner that calls `codex exec`: `runner/codex-round1.sh`, `runner/codex-round-n.sh`, `runner/pre-review-worker.sh`, `runner/ops-preflight-review.sh`. Operator sees a one-line model resolution log per session (observability MVP, not optional).
+- **Defensive JSON Schema for the Codex models cache** — `schemas/codex-models-cache.schema.json`. Tolerant of unknown fields (the cache is an EXTERNAL file we do not own); declares the required-field set the resolver depends on.
+- **Cache-fixture corpus (11 files)** — `test/fixtures/codex-models-cache/`. Covers valid + every documented failure mode (missing priority, string priority, duplicate priority, null fields, role-filter edge, hide-edge, api-only-edge, empty models, not-json). Slice 2 fixture-drives the resolver; slice 4 ratchets the shipped default.
+- **Grounding adapter interface contract (#107 slice 1)** — `docs/GROUNDING_ADAPTER_INTERFACE.md` defines the per-language tool-grounding contract (input JSON shape, output header / truncation / status budget, install + ownership model, versioning). Golden-output fixture at `test/fixtures/grounding-parity/` locks the byte-for-byte parity smoke that slice 2 will drive.
+- **FDTDD Stage 1 marker schema (#133 slice 1)** — `schemas/active-finding.schema.json` defines the v2 marker shape (`phase`, `red_proof_accepted`, `test_files`, `prod_files`, `red_proof_record`, `amendments`, etc.). New `runner/lib/active-finding.sh` accessors with v1-fallback semantics; helpers (`scripts/tdd/finding-{start,finish}.sh`) write v2, read v1 via fallback. Filesystem contract documented at `docs/FDTDD-MARKER-CONTRACT.md`.
+- **PreToolUse payload fixtures** — `test/fixtures/pretooluse-payloads/` documents the spec-derived Edit / Write / MultiEdit payload shapes that Gate 1 + Gate 3 will parse against. MultiEdit confirmed single-file (closes #133 addendum MAJOR M2).
+- **Codex sandbox-features research spike (#105 slice 1)** — `docs/RESEARCH-codex-sandbox-features.md` reports empirical findings against Codex CLI 0.129.0: `--sandbox workspace-write` + `--add-dir` provides Option C, BLOCKER 1 proved (`--dangerously-bypass` bypasses worktree by design), `~/.codex/` write-path inventory for the slice-2 `--add-dir` design. `scripts/research/probe-codex-sandbox.sh` automates §3's zero-token probes; example record at `docs/research/codex-sandbox-features.example.json`.
+- **Proposal-review discipline baked into RELEASE_GUIDE (#59)** — `scripts/review/proposal-review.sh` wraps `codex exec` with pinned model + high-reasoning + audit-trail output. New RELEASE_GUIDE § "Pre-implementation discipline" requires proposal-review before any slice-1 implementation lands. Real evidence of value: across #105 + #107 + #133 + #138, eight BLOCKERs were caught at proposal-review time and resolved in addenda before code shipped.
+- **`PROPOSAL-model-auto-select.md` addendum (#138)** — Codex surfaced 2 BLOCKER + 5 MAJOR + 3 MINOR; all accepted. Notable: BLOCKER 1 narrowed the contract from "best model the account can reach" to "best cached listed model" (cache visibility is a UI signal, NOT proof of entitlement); BLOCKER 2 gated the default flip on field-evidence accumulation; MAJOR M1 added the role-suitability filter; MAJOR M3 preserved `model = ""` semantics + added `model = "cli-default"` for the deprecation.
+
+### Changed
+
+- **Shipped default `[codex] model` flipped from `"gpt-5.5"` to `"auto"`** (#138 slice 4). The pack maintainer is adopter #1 (eats own dog food on the pack-on-pack workflow). Empirical safety net: on the maintainer's host, `resolve_codex_model "auto"` resolves to `"gpt-5.5"` from cache today — the EXACT slug v2.1.1 hotfix pinned. Immediate behavior unchanged; the change is purely forward-looking. Worst-case (missing / corrupt cache) → fallback to `gpt-5.5` with stderr warning — strictly no worse than the prior shipped default.
+- **`[review] mode = "soft"` documented as new shipped default** (#133 slice 1) — explicit `[review] mode` line added to `tdd-pack.toml` with the four-value enum (`off / soft / governed_tdd / strict_tdd`). Consumed by `hooks/inject-findings.sh:143,278` per #133 addendum Claim 1 closure.
+- **FDTDD marker filesystem contract** (#133 slice 1) — canonical path moves from `.tdd/active-finding` to `.tdd/findings/active.json` (BLOCKER 3 closure). Legacy v1 path remains read-only via fallback in `runner/lib/active-finding.sh`; helpers refuse to write the legacy path. `protect-tdd-artifacts.sh` already protects `.tdd/findings/` (verified in slice 1 pre-checklist Claim 2 — no edit needed).
+
+### Fixed
+
+- **Latent v2.1.1 bug in `runner/ops-preflight-review.sh`** (#138 slice 2). The script previously called `codex exec` with **no `-m` flag at all**, deferring to Codex CLI's `--model` default — the exact same trap v2.1.1 fixed in `codex-round1.sh` and `codex-round-n.sh` but missed for the ops-preflight path. Slice 2 wired the resolver here too; `-m` now always present when the resolved slug is non-empty.
+
+### Documentation
+
+- **`docs/PROPOSAL-model-auto-select.md`** + addendum (#138) — ~280-line design proposal + 12-section Codex-review addendum. The first proposal in the repo with a fully documented pre-implementation review trail.
+- **`docs/PROPOSAL-grounding-adapter-interface.md`** + addendum (#107) — design proposal for sibling-pack adapter support; addendum closes the install/ownership model gap.
+- **`docs/PROPOSAL-fdtdd-stage1-rails.md`** + addendum (#133) — Stage 1 enforcement rail design (Gate 1 + Gate 3); addendum reorders slices vertically and adds the BLOCKER 1/2/3 closures into the v2 scope.
+- **`docs/PROPOSAL-safer-execution-mode.md`** + addendum (#105) — drop `--dangerously-bypass` for `--sandbox workspace-write` + `--add-dir`; addendum downgrades worktree (Option B) from safety mechanism to artifact-isolation convenience.
+- **README + ADOPTION_GUIDE + AI_DEVELOPER_GUIDE refreshed for v2.2.0 reality** (#60) — Bash matcher removal language + v2.2 opt-in Ops Risk Triage rail awareness threaded through the user-facing docs.
+- **`docs/FDTDD-MARKER-CONTRACT.md`** + slice-1 pre-checklist (#133) — locks the filesystem contract + documents M5's load-bearing-claim verification (all four claims verified).
+- **`docs/RESEARCH-codex-sandbox-features.md`** (#105) — hard gate before #105 slice 2 ships. Maintainer reads the §1 decision + §10 slice-2 brief.
+
+### Verification
+
+- All 11 critical smokes green at `292b57b` (release commit): 168 → 195 checks total (the resolver smoke added 28 checks in slice 1, +15 more in slice 2; FDTDD smokes added 32 checks; the rest unchanged).
+- Pre-tag-smoke gate PASS at `292b57b` (artifact: `.tdd/release/pre-tag-smoke-292b57b.txt`). Both `smoke-v2-mvp.sh` and `smoke-v2-phase2-live.sh` ran against real Codex; no regressions vs v2.2.0.
+- Live verification on maintainer host: `resolve_codex_model "auto"` → `gpt-5.5` (same slug as v2.1.1 pin); zero immediate behavior change from the shipped-default flip.
+
 ## [2.2.0] - 2026-06-07
 
 **Feature release.** Adds the **Ops Risk Triage rail** — a soft middle
