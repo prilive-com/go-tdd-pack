@@ -41,9 +41,35 @@ if [[ -z "${__PRILIVE_RESOLVE_MODEL_LIB_LOADED:-}" ]]; then
   __PRILIVE_RESOLVE_MODEL_LIB_LOADED=1
 fi
 
-# resolve_codex_model_fallback → echoes the pinned-fallback slug.
+# resolve_codex_model_fallback [<auth_mode>] → echoes the safe fallback
+# slug for the given auth mode.
+#
+# v2.3.1 fix — auth-aware fallback. Pre-v2.3.1 this hardcoded
+# "gpt-5.5", which was wrong for API-key adopters: per OpenAI's
+# June-2026 model lineup, gpt-5.5 is ChatGPT-subscription-auth ONLY
+# (Plus / Pro / Team). API-key auth requires a different slug
+# (gpt-5.2-codex). Hardcoding gpt-5.5 caused HTTP 400 on the
+# fallback path under api_key auth — same class of incident as
+# v2.1.1 Bug 2, surfaced empirically by the devopspoint review-
+# engine team during their own dual-auth investigation.
+#
+# Precedence:
+#   1. PRILIVE_MODEL_FALLBACK env var (always wins — operator
+#      escape hatch for both auth modes).
+#   2. auth_mode == "api_key"      → "gpt-5.2-codex"
+#   3. auth_mode == "subscription" → "gpt-5.5"
+#   4. unknown / unset             → "gpt-5.5" (preserves prior
+#                                    default for back-compat).
 resolve_codex_model_fallback() {
-  echo "${PRILIVE_MODEL_FALLBACK:-gpt-5.5}"
+  if [[ -n "${PRILIVE_MODEL_FALLBACK:-}" ]]; then
+    echo "${PRILIVE_MODEL_FALLBACK}"
+    return 0
+  fi
+  local auth_mode="${1-subscription}"
+  case "${auth_mode}" in
+    api_key)        echo "gpt-5.2-codex" ;;
+    subscription|*) echo "gpt-5.5" ;;
+  esac
 }
 
 # _resolve_codex_cache_path → echoes the path to models_cache.json.
@@ -148,8 +174,10 @@ except Exception:
 resolve_codex_model() {
   local toml_value="${1-}"
   local auth_explicit="${2-}"
-  local fallback
-  fallback=$(resolve_codex_model_fallback)
+  local auth_mode fallback
+  # v2.3.1: resolve auth_mode FIRST so the fallback can be auth-aware.
+  auth_mode=$(_resolve_codex_auth_mode "${auth_explicit}")
+  fallback=$(resolve_codex_model_fallback "${auth_mode}")
 
   # Input validation — reject control characters or embedded whitespace.
   # Empty string is VALID (preserves v2.1.x defer-to-CLI).
@@ -172,7 +200,7 @@ resolve_codex_model() {
       ;;
 
     "auto")
-      _resolve_codex_model_auto "${auth_explicit}" "${fallback}"
+      _resolve_codex_model_auto "${auth_mode}" "${fallback}"
       ;;
 
     *)

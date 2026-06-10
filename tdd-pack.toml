@@ -58,19 +58,34 @@ mode = "soft"
 #
 # Why "auto" is the shipped default (slice 4 flip):
 # - The pack itself dogfoods this knob on its own dev cycles. The
-#   maintainer is adopter #1; the BLOCKER 2 "≥2 adopters × 14 days
-#   clean" gate starts its clock here.
+#   maintainer is adopter #1.
 # - Adopters who freshly copy this file get latest-frontier behavior
 #   without having to bump a pinned slug on each Codex CLI release.
-# - Failure mode is bounded: cache missing → fallback to gpt-5.5
-#   (same value v2.1.1 hotfix pinned). Empirical fallback is the
-#   same value the prior shipped default was, so the worst case is
-#   no worse than v2.1.1.
+# - Failure mode is bounded: cache missing → auth-aware fallback (see
+#   below). Same v2.1.1 safety net for subscription accounts.
+#
+# Fallback path (v2.3.1 fix — auth-aware):
+#   The resolver detects auth mode via the CODEX_API_KEY /
+#   OPENAI_API_KEY env vars (set → "api_key"; unset → "subscription").
+#   When cache is missing / corrupt / has no candidates, the
+#   fallback slug is auth-aware:
+#     subscription → "gpt-5.5"      (frontier model, ChatGPT-auth)
+#     api_key      → "gpt-5.2-codex" (per OpenAI's June-2026
+#                                     model lineup — gpt-5.5 is
+#                                     subscription-auth-only and
+#                                     would return HTTP 400 under
+#                                     api_key auth).
+#
+# This auth-aware split was added in v2.3.1 after the devopspoint
+# review-engine team surfaced empirically that gpt-5.5 is not
+# API-key-reachable. Pre-v2.3.1 the fallback hardcoded gpt-5.5 for
+# both auth modes — an unfixed latent v2.1.1-class bug for the
+# api_key fallback path.
 #
 # TO PIN A SPECIFIC MODEL: set model = "<id>" (e.g. "gpt-5.5",
-# "gpt-5.5-codex"). Use this for reproducibility across sessions
-# or when validating a specific model. Confirm your account has
-# access first — `codex models` lists what is reachable.
+# "gpt-5.2-codex", "gpt-5.5-codex"). Use this for reproducibility
+# across sessions or when validating a specific model. Confirm
+# your account has access first.
 #
 # TO DEFER TO CODEX CLI'S DEFAULT (v2.1.x semantics): set model = "".
 # DOCUMENTED UNSAFE — v2.1.1 incident: Codex CLI 0.130 silently
@@ -79,8 +94,9 @@ mode = "soft"
 # after every Codex CLI upgrade if you choose this path.
 #
 # Resolver fallback override:
-#   PRILIVE_MODEL_FALLBACK=<slug> env var changes what the runner
-#   uses when "auto" cannot resolve from cache. Defaults to gpt-5.5.
+#   PRILIVE_MODEL_FALLBACK=<slug> env var ALWAYS wins (both auth
+#   modes), letting operators pin the fallback explicitly. Useful
+#   for environments that cache the slug + want determinism.
 model = "auto"
 
 # Reasoning effort: low | medium | high | xhigh
